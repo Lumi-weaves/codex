@@ -57,6 +57,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         expose_spawn_agent_model_overrides: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        plaintext_message: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -141,6 +142,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         expose_spawn_agent_model_overrides: true,
         multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
+        plaintext_message: false,
     });
 
     let ToolSpec::Namespace(namespace) = tool else {
@@ -206,6 +208,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         expose_spawn_agent_model_overrides: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        plaintext_message: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
@@ -252,6 +255,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         expose_spawn_agent_model_overrides: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        plaintext_message: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -285,6 +289,7 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         expose_spawn_agent_model_overrides: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        plaintext_message: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {

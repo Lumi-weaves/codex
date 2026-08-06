@@ -1507,7 +1507,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
             break request;
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child agent message request");
+            anyhow::bail!("timed out waiting for child task request");
         }
         sleep(Duration::from_millis(10)).await;
     };
@@ -1598,6 +1598,140 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(
                 && log_field(line, "communication_id") == Some(communication_id)
         })
         .expect("correlated receive event");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_no_fork_spawn_delivers_task_to_non_openai_child() -> Result<()> {
+    const PLAINTEXT_NAMESPACE: &str = "lumi_collaboration";
+    const CROSS_PROVIDER_ROLE: &str = "cross_provider";
+
+    let server = start_mock_server().await;
+    let child_provider_base_url = format!("{}/v1", server.uri());
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "task_name": "worker",
+        "fork_turns": "none",
+        "agent_type": CROSS_PROVIDER_ROLE,
+    }))?;
+    let parent_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-parent-1"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                PLAINTEXT_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-parent-1"),
+        ]),
+    )
+    .await;
+    let child_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-parent-2"),
+            ev_assistant_message("msg-parent-2", "done"),
+            ev_completed("resp-parent-2"),
+        ]),
+    )
+    .await;
+
+    let test = test_codex()
+        .with_model("koffing")
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+            config.multi_agent_v2.tool_namespace = Some(PLAINTEXT_NAMESPACE.to_string());
+            let role_path = config.codex_home.join("cross-provider-role.toml");
+            std::fs::write(
+                &role_path,
+                format!(
+                    "model = \"koffing\"\nmodel_provider = \"mock\"\n\n[model_providers.mock]\nname = \"mock\"\nbase_url = \"{child_provider_base_url}\"\nenv_key = \"PATH\"\nwire_api = \"responses\"\n"
+                ),
+            )
+            .expect("write cross-provider role config");
+            config.agent_roles.insert(
+                CROSS_PROVIDER_ROLE.to_string(),
+                AgentRoleConfig {
+                    description: Some("Cross-provider worker".to_string()),
+                    config_file: Some(role_path.to_path_buf()),
+                    nickname_candidates: None,
+                },
+            );
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn(TURN_1_PROMPT).await?;
+
+    let parent_request = parent_request_log.single_request();
+    let parent_request_body = parent_request.body_json();
+    let spawn_tool = namespace_child_tool(&parent_request_body, PLAINTEXT_NAMESPACE, "spawn_agent")
+        .expect("custom namespace should expose spawn_agent");
+    assert!(
+        spawn_tool
+            .pointer("/parameters/properties/message/encrypted")
+            .is_none(),
+        "the cross-provider spawn namespace must request a plaintext message argument"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let child_request = loop {
+        if let Some(request) = child_request_log.requests().into_iter().find(|request| {
+            request.body_contains_text(CHILD_PROMPT) && !request.body_contains_text(SPAWN_CALL_ID)
+        }) {
+            break request;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for child agent message request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        child_request.inputs_of_type("agent_message").is_empty(),
+        "non-OpenAI providers silently ignore agent_message input items"
+    );
+    let delegated_task = child_request
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|item| item["role"] == json!("user") && item.to_string().contains(CHILD_PROMPT))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(delegated_task))),
+        Value::Array(vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!(
+                    "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n{CHILD_PROMPT}"
+                ),
+            }],
+        })]),
+        "the non-OpenAI child must receive the delegated task as a standard user message"
+    );
 
     Ok(())
 }

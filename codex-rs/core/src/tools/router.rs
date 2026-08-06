@@ -8,6 +8,7 @@ use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 #[cfg(test)]
 use crate::tools::handlers::ToolSearchHandlerCache;
+use crate::tools::handlers::multi_agents_spec::PLAINTEXT_MULTI_AGENT_V2_NAMESPACE;
 use crate::tools::registry::AnyToolResult;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
@@ -38,15 +39,22 @@ pub struct ToolCall {
 
 impl ToolCall {
     pub(crate) fn direct_source(&self) -> ToolCallSource {
-        if self.tool_name.namespace.as_deref() == Some("collaboration")
+        let namespace = self.tool_name.namespace.as_deref();
+        let is_collaboration_namespace = matches!(namespace, Some("collaboration"))
+            || namespace == Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE);
+        let has_plaintext_marker = self
+            .encrypted_function_args
+            .as_ref()
+            .is_some_and(Vec::is_empty);
+        let is_plaintext_spawn = namespace == Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE)
+            && self.tool_name.name == "spawn_agent"
+            && self.encrypted_function_args.is_none();
+        if is_collaboration_namespace
             && matches!(
                 self.tool_name.name.as_str(),
                 "spawn_agent" | "send_message" | "followup_task"
             )
-            && self
-                .encrypted_function_args
-                .as_ref()
-                .is_some_and(Vec::is_empty)
+            && (has_plaintext_marker || is_plaintext_spawn)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {

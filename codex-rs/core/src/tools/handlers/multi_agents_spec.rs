@@ -12,6 +12,9 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 pub const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
+/// Opt-in namespace for plaintext spawn payloads sent to providers that cannot decrypt OpenAI
+/// collaboration messages.
+pub const PLAINTEXT_MULTI_AGENT_V2_NAMESPACE: &str = "lumi_collaboration";
 const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
@@ -31,6 +34,8 @@ pub struct SpawnAgentToolOptions {
     pub expose_spawn_agent_model_overrides: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
+    /// Whether the model-facing spawn schema should request an ordinary plaintext argument.
+    pub plaintext_message: bool,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -43,6 +48,7 @@ impl Default for SpawnAgentToolOptions {
             expose_spawn_agent_model_overrides: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
+            plaintext_message: false,
         }
     }
 }
@@ -106,7 +112,10 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     let inherited_model_guidance = (options.expose_spawn_agent_model_overrides
         && !options.hide_agent_type_model_reasoning)
         .then_some(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE);
-    let mut properties = spawn_agent_common_properties_v2(&options.agent_type_description);
+    let mut properties = spawn_agent_common_properties_v2(
+        &options.agent_type_description,
+        options.plaintext_message,
+    );
     if !options.expose_agent_type {
         properties.remove("agent_type");
     }
@@ -628,15 +637,20 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
-fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<String, JsonSchema> {
+fn spawn_agent_common_properties_v2(
+    agent_type_description: &str,
+    plaintext_message: bool,
+) -> BTreeMap<String, JsonSchema> {
+    let message_schema = JsonSchema::string(Some(
+        "Initial plain-text task for the new agent.".to_string(),
+    ));
+    let message_schema = if plaintext_message {
+        message_schema
+    } else {
+        message_schema.with_encrypted()
+    };
     BTreeMap::from([
-        (
-            "message".to_string(),
-            JsonSchema::string(Some(
-                "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
-        ),
+        ("message".to_string(), message_schema),
         (
             "agent_type".to_string(),
             JsonSchema::string(Some(format!(
