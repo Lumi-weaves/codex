@@ -80,6 +80,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Verbosity as VerbosityConfig;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::plaintext_agent_message_content;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::InternalSessionSource;
@@ -849,6 +850,21 @@ impl ModelClient {
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {
             for item in &mut input {
+                let plaintext_agent_message = match item {
+                    ResponseItem::AgentMessage { content, .. } => {
+                        plaintext_agent_message_content(content)
+                    }
+                    _ => None,
+                };
+                if let Some(text) = plaintext_agent_message {
+                    *item = ResponseItem::Message {
+                        id: None,
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText { text }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    };
+                }
                 item.clear_internal_chat_message_metadata_passthrough();
                 if let ResponseItem::FunctionCall {
                     encrypted_function_args,
