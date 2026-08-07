@@ -1245,11 +1245,23 @@ impl ToolExecutor<ToolInvocation> for MultiAgentV2NamespaceOverride {
 
     fn spec(&self) -> ToolSpec {
         match self.handler.spec() {
-            ToolSpec::Function(tool) => ToolSpec::Namespace(ResponsesApiNamespace {
-                name: self.namespace.clone(),
-                description: MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string(),
-                tools: vec![ResponsesApiNamespaceTool::Function(tool)],
-            }),
+            ToolSpec::Function(mut tool) => {
+                if self.namespace == PLAINTEXT_MULTI_AGENT_V2_NAMESPACE
+                    && matches!(tool.name.as_str(), "send_message" | "followup_task")
+                    && let Some(message_schema) = tool
+                        .parameters
+                        .properties
+                        .as_mut()
+                        .and_then(|properties| properties.get_mut("message"))
+                {
+                    message_schema.encrypted = None;
+                }
+                ToolSpec::Namespace(ResponsesApiNamespace {
+                    name: self.namespace.clone(),
+                    description: MULTI_AGENT_V2_NAMESPACE_DESCRIPTION.to_string(),
+                    tools: vec![ResponsesApiNamespaceTool::Function(tool)],
+                })
+            }
             spec => spec,
         }
     }

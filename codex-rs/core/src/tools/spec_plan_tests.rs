@@ -49,6 +49,7 @@ use crate::tools::handlers::McpHandler;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::handlers::WaitForEnvironmentHandler;
 use crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE;
+use crate::tools::handlers::multi_agents_spec::PLAINTEXT_MULTI_AGENT_V2_NAMESPACE;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::RegisteredTool;
 use crate::tools::router::ToolRouter;
@@ -2252,6 +2253,43 @@ async fn multi_agent_v2_message_schemas_are_encrypted() {
                 .get("message")
                 .and_then(|schema| schema.encrypted),
             Some(true)
+        );
+    }
+}
+
+#[tokio::test]
+async fn lumi_multi_agent_v2_message_schemas_are_plaintext() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.tool_namespace =
+                Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE.to_string());
+        });
+    })
+    .await;
+    let ToolSpec::Namespace(namespace) = plan.visible_spec(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE)
+    else {
+        panic!("expected {PLAINTEXT_MULTI_AGENT_V2_NAMESPACE} namespace");
+    };
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        let Some(ResponsesApiNamespaceTool::Function(tool)) = namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == tool_name
+            )
+        }) else {
+            panic!("expected {tool_name} in {PLAINTEXT_MULTI_AGENT_V2_NAMESPACE} namespace");
+        };
+        let properties = tool
+            .parameters
+            .properties
+            .as_ref()
+            .expect("tool should use object params");
+        assert_eq!(
+            properties
+                .get("message")
+                .and_then(|schema| schema.encrypted),
+            None
         );
     }
 }
