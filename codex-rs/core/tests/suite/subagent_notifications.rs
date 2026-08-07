@@ -1673,6 +1673,17 @@ async fn multi_agent_v2_no_fork_delivers_tasks_to_non_openai_child() -> Result<(
             .is_none(),
         "the cross-provider spawn namespace must request a plaintext message argument"
     );
+    for tool_name in ["send_message", "followup_task"] {
+        let message_tool =
+            namespace_child_tool(&parent_request_body, PLAINTEXT_NAMESPACE, tool_name)
+                .unwrap_or_else(|| panic!("custom namespace should expose {tool_name}"));
+        assert!(
+            message_tool
+                .pointer("/parameters/properties/message/encrypted")
+                .is_none(),
+            "the cross-provider {tool_name} tool must request a plaintext message argument"
+        );
+    }
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let child_request = loop {
