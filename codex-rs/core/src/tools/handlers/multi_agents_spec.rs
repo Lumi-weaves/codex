@@ -12,8 +12,8 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 pub const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
-/// Opt-in namespace for plaintext spawn payloads sent to providers that cannot decrypt OpenAI
-/// collaboration messages.
+/// Opt-in namespace for plaintext collaboration payloads sent to providers that cannot decrypt
+/// OpenAI collaboration messages.
 pub const PLAINTEXT_MULTI_AGENT_V2_NAMESPACE: &str = "lumi_collaboration";
 const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 

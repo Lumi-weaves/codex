@@ -60,6 +60,26 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
+#[test]
+fn lumi_collaboration_message_tools_use_plaintext_arguments() {
+    for tool_name in ["spawn_agent", "send_message", "followup_task"] {
+        let call = ToolCall {
+            tool_name: ToolName::namespaced("lumi_collaboration", tool_name),
+            call_id: format!("call-{tool_name}"),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+
+        assert_eq!(
+            call.direct_source(),
+            ToolCallSource::DirectPlaintextMessage,
+            "{tool_name} must preserve plaintext delivery for cross-provider agents"
+        );
+    }
+}
+
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,
