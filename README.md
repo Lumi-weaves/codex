@@ -24,13 +24,16 @@ based on upstream tag
 [`rust-v0.147.0-alpha.1.2`](https://github.com/openai/codex/releases/tag/rust-v0.147.0-alpha.1.2).
 It currently carries two fixes:
 
-### Cross-provider MultiAgentV2 spawn delivery
+### Cross-provider MultiAgentV2 delivery
 
 Commit [`59b3699`](https://github.com/Lumi-weaves/codex/commit/59b369924db09005aae42f540c3314f9c59bfac4)
 adds an opt-in compatibility namespace for Responses-compatible providers that
-cannot decode OpenAI's encrypted collaboration payload. The initial no-fork
-spawn task is delivered as ordinary model input for non-OpenAI child providers,
-while the upstream `collaboration` namespace remains unchanged.
+cannot decode OpenAI's encrypted collaboration payload. Commit
+[`82ecd6e`](https://github.com/Lumi-weaves/codex/commit/82ecd6e18b)
+extends that route to direct messages and follow-up tasks, including follow-ups
+sent after a worker has completed. These payloads are delivered as ordinary
+model input for non-OpenAI child providers, while the upstream `collaboration`
+namespace remains unchanged.
 
 ```toml
 [features.multi_agent_v2]
