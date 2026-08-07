@@ -116,6 +116,17 @@ pub enum AuthCredentialsStoreMode {
     Ephemeral,
 }
 
+/// Selects which locally managed login supplies credentials for model-provider requests.
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelAuthSource {
+    /// Reuse the ordinary Codex control-plane login.
+    #[default]
+    Control,
+    /// Use the independent machine-local model-usage login.
+    Model,
+}
+
 /// Determine where Codex should store and read MCP credentials.
 #[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]

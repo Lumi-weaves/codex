@@ -117,7 +117,10 @@ pub struct TurnContext {
     pub(crate) trace_id: Option<String>,
     pub(crate) realtime_active: bool,
     pub config: Arc<Config>,
+    /// Control-plane login used for Apps and other Codex services.
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
+    /// Login selected for model-provider requests and model-backed tools.
+    pub(crate) model_auth_manager: Option<Arc<AuthManager>>,
     pub(crate) model_info: ModelInfo,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: SharedModelProvider,
@@ -283,6 +286,7 @@ impl TurnContext {
             realtime_active: self.realtime_active,
             config: Arc::new(config),
             auth_manager: self.auth_manager.clone(),
+            model_auth_manager: self.model_auth_manager.clone(),
             model_info: model_info.clone(),
             session_telemetry: self
                 .session_telemetry
@@ -498,6 +502,7 @@ impl Session {
         thread_id: ThreadId,
         session_id: SessionId,
         auth_manager: Option<Arc<AuthManager>>,
+        model_auth_manager: Option<Arc<AuthManager>>,
         session_telemetry: &SessionTelemetry,
         provider: ModelProviderInfo,
         session_configuration: &SessionConfiguration,
@@ -524,8 +529,8 @@ impl Session {
             model_info.slug.as_str(),
         );
         let session_source = session_configuration.session_source.clone();
-        let auth_manager_for_context = auth_manager.clone();
-        let provider_for_context = create_model_provider(provider, auth_manager);
+        let auth_manager_for_context = auth_manager;
+        let provider_for_context = create_model_provider(provider, model_auth_manager.clone());
         let session_telemetry_for_context = session_telemetry;
         let available_models = models_manager.try_list_models().unwrap_or_default();
         let unified_exec_shell_mode = UnifiedExecShellMode::for_session(
@@ -566,6 +571,7 @@ impl Session {
             realtime_active: false,
             config: per_turn_config,
             auth_manager: auth_manager_for_context,
+            model_auth_manager,
             model_info,
             session_telemetry: session_telemetry_for_context,
             provider: provider_for_context,
@@ -786,6 +792,7 @@ impl Session {
             self.thread_id(),
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
+            Some(Arc::clone(&self.services.model_auth_manager)),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

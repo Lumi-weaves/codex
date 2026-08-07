@@ -16,6 +16,7 @@ use crate::types::History;
 use crate::types::MarketplaceConfig;
 use crate::types::McpServerConfig;
 use crate::types::MemoriesToml;
+use crate::types::ModelAuthSource;
 use crate::types::Notice;
 use crate::types::OAuthCredentialsStoreMode;
 use crate::types::OtelConfigToml;
@@ -155,6 +156,10 @@ pub struct ConfigToml {
 
     /// Provider to use from the model_providers map.
     pub model_provider: Option<String>,
+
+    /// Login whose credentials should be used for model-provider requests.
+    #[serde(default)]
+    pub model_auth_source: Option<ModelAuthSource>,
 
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
@@ -979,6 +984,14 @@ mod tests {
 
     const WORKSPACE_ID_A: &str = "123e4567-e89b-42d3-a456-426614174000";
     const WORKSPACE_ID_B: &str = "123e4567-e89b-42d3-a456-426614174001";
+
+    #[test]
+    fn model_auth_source_accepts_model_scope() {
+        let config: ConfigToml = toml::from_str(r#"model_auth_source = "model""#)
+            .expect("model auth source should deserialize");
+
+        assert_eq!(config.model_auth_source, Some(ModelAuthSource::Model));
+    }
 
     #[test]
     fn forced_chatgpt_workspace_id_accepts_single_string() {

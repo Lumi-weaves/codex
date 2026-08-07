@@ -56,7 +56,10 @@ pub(crate) struct SessionServices {
     pub(crate) user_shell: Arc<crate::shell::Shell>,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
+    /// Control-plane login used by Apps, plugins, MCP, and other Codex services.
     pub(crate) auth_manager: Arc<AuthManager>,
+    /// Login selected for model-provider requests and their refresh lifecycle.
+    pub(crate) model_auth_manager: Arc<AuthManager>,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,

@@ -750,6 +750,8 @@ pub async fn run_main_with_transport_options(
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    let model_auth_manager =
+        AuthManager::shared_for_model_from_config(&config, Arc::clone(&auth_manager)).await;
 
     let remote_control_enabled = remote_control_policy == RemoteControlPolicy::Allowed
         && remote_control_explicitly_requested
@@ -873,6 +875,7 @@ pub async fn run_main_with_transport_options(
 
     let processor_handle = tokio::spawn({
         let auth_manager = Arc::clone(&auth_manager);
+        let model_auth_manager = Arc::clone(&model_auth_manager);
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), &config);
         let outgoing_message_sender = Arc::new(OutgoingMessageSender::new(
@@ -894,6 +897,7 @@ pub async fn run_main_with_transport_options(
             config_warnings,
             session_source,
             auth_manager,
+            model_auth_manager,
             installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),

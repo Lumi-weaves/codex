@@ -1033,7 +1033,7 @@ async fn capture_current_model_fallback_step_context(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Option<Arc<StepContext>>> {
     let uses_codex_backend = turn_context
-        .auth_manager
+        .model_auth_manager
         .as_deref()
         .is_some_and(codex_login::AuthManager::current_auth_uses_codex_backend);
     if !uses_codex_backend
@@ -2181,7 +2181,7 @@ async fn try_run_sampling_request(
         approval_policy = turn_context.approval_policy.value(),
         sandbox_policy = &turn_context.sandbox_policy(),
         effort = turn_context.reasoning_effort,
-        auth_mode = sess.services.auth_manager.auth_mode(),
+        auth_mode = sess.services.model_auth_manager.auth_mode(),
         features = sess.features.enabled_features(),
     );
     let inference_trace = sess.services.rollout_thread_trace.inference_trace_context(

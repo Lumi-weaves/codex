@@ -292,6 +292,7 @@ pub fn turn_permission_fields(
 pub struct TestCodexBuilder {
     config_mutators: Vec<Box<ConfigMutator>>,
     auth: CodexAuth,
+    model_auth: Option<Option<CodexAuth>>,
     pre_build_hooks: Vec<Box<PreBuildHook>>,
     workspace_setups: Vec<Box<WorkspaceSetup>>,
     home: Option<Arc<TempDir>>,
@@ -317,6 +318,16 @@ impl TestCodexBuilder {
 
     pub fn with_auth(mut self, auth: CodexAuth) -> Self {
         self.auth = auth;
+        self
+    }
+
+    pub fn with_model_auth(mut self, auth: CodexAuth) -> Self {
+        self.model_auth = Some(Some(auth));
+        self
+    }
+
+    pub fn without_model_auth(mut self) -> Self {
+        self.model_auth = Some(None);
         self
     }
 
@@ -614,6 +625,7 @@ impl TestCodexBuilder {
         environment_manager: Arc<codex_exec_server::EnvironmentManager>,
     ) -> anyhow::Result<TestCodex> {
         let auth = self.auth.clone();
+        let model_auth = self.model_auth.clone();
         let state_db = codex_core::init_state_db(&config).await;
         let thread_store = thread_store_from_config(&config, state_db.clone());
         let installation_id = resolve_installation_id(&config.codex_home).await?;
@@ -624,10 +636,23 @@ impl TestCodexBuilder {
                 ))
             });
         let auth_manager = codex_core::test_support::auth_manager_from_auth(auth.clone());
-        let thread_manager = ThreadManager::new(
+        let model_auth_manager = match model_auth {
+            None => Arc::clone(&auth_manager),
+            Some(Some(model_auth)) => codex_core::test_support::auth_manager_from_auth(model_auth),
+            Some(None) => {
+                let model_auth_manager = codex_core::test_support::auth_manager_from_auth_with_home(
+                    CodexAuth::from_api_key("discarded-model-key"),
+                    home.path().join("missing-model-auth"),
+                );
+                model_auth_manager.logout().await?;
+                model_auth_manager
+            }
+        };
+        let thread_manager = ThreadManager::new_with_model_auth_manager(
             &config,
             auth_manager.clone(),
-            codex_core::build_models_manager(&config, auth_manager),
+            model_auth_manager.clone(),
+            codex_core::build_models_manager(&config, model_auth_manager),
             codex_core::CodexAppsToolsCache::default(),
             SessionSource::Exec,
             Arc::clone(&environment_manager),
@@ -1225,6 +1250,7 @@ pub fn test_codex() -> TestCodexBuilder {
                 .expect("test config should allow ShellSnapshot override");
         })],
         auth: CodexAuth::from_api_key("dummy"),
+        model_auth: None,
         pre_build_hooks: vec![],
         workspace_setups: vec![],
         home: None,

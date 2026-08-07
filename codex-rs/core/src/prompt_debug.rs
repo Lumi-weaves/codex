@@ -34,6 +34,8 @@ pub async fn build_prompt_input(
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    let model_auth_manager =
+        AuthManager::shared_for_model_from_config(&config, Arc::clone(&auth_manager)).await;
 
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
@@ -42,10 +44,11 @@ pub async fn build_prompt_input(
 
     let thread_store = thread_store_from_config(&config, state_db.clone());
     let installation_id = resolve_installation_id(&config.codex_home).await?;
-    let thread_manager = ThreadManager::new(
+    let thread_manager = ThreadManager::new_with_model_auth_manager(
         &config,
         Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, Arc::clone(&auth_manager)),
+        Arc::clone(&model_auth_manager),
+        crate::thread_manager::build_models_manager(&config, model_auth_manager),
         crate::CodexAppsToolsCache::default(),
         SessionSource::Exec,
         Arc::new(

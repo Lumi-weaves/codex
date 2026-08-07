@@ -57,6 +57,7 @@ use crate::token_data::TokenData;
 use crate::token_data::parse_chatgpt_jwt_claims;
 use crate::token_data::parse_jwt_expiration;
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::ModelAuthSource;
 use codex_http_client::HttpClient;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -1796,6 +1797,9 @@ pub trait AuthManagerConfig {
     /// Returns the CLI auth credential storage mode for auth loading.
     fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode;
 
+    /// Returns the login source selected for model-provider requests.
+    fn model_auth_source(&self) -> ModelAuthSource;
+
     /// Returns the backend to use when CLI auth keyring storage is selected.
     fn auth_keyring_backend_kind(&self) -> AuthKeyringBackendKind;
 
@@ -2334,6 +2338,32 @@ impl AuthManager {
         .await
     }
 
+    /// Returns the auth manager selected for model-provider requests.
+    ///
+    /// Control auth reuses the caller's manager so externally supplied Desktop credentials remain
+    /// live. Model auth is loaded from an independent store below `CODEX_HOME` and never falls
+    /// back to the control-plane login.
+    pub async fn shared_for_model_from_config(
+        config: &impl AuthManagerConfig,
+        control_auth_manager: Arc<Self>,
+    ) -> Arc<Self> {
+        match config.model_auth_source() {
+            ModelAuthSource::Control => control_auth_manager,
+            ModelAuthSource::Model => {
+                Self::shared(
+                    model_auth_home(&config.codex_home()),
+                    /*enable_codex_api_key_env*/ false,
+                    config.cli_auth_credentials_store_mode(),
+                    config.forced_chatgpt_workspace_id(),
+                    Some(config.chatgpt_base_url()),
+                    config.auth_keyring_backend_kind(),
+                    config.auth_route_config(),
+                )
+                .await
+            }
+        }
+    }
+
     pub fn unauthorized_recovery(self: &Arc<Self>) -> UnauthorizedRecovery {
         UnauthorizedRecovery::new(Arc::clone(self))
     }
@@ -2615,6 +2645,11 @@ impl AuthManager {
 
         Ok(())
     }
+}
+
+/// Returns the isolated credential root used by the machine-local model login.
+pub fn model_auth_home(codex_home: &Path) -> PathBuf {
+    codex_home.join("model-auth")
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
+use clap::ValueEnum;
 use clap_complete::Shell;
 use clap_complete::generate;
 use codex_app_server_daemon::BootstrapOptions as AppServerBootstrapOptions;
@@ -67,6 +68,7 @@ use doctor::DoctorCommand;
 use state_db_recovery as local_state_db;
 
 use codex_config::LoaderOverrides;
+use codex_config::types::ModelAuthSource;
 use codex_core::build_models_manager;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
@@ -460,6 +462,10 @@ struct LoginCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
 
+    /// Select which local login to manage.
+    #[arg(long, value_enum, default_value = "control")]
+    scope: LoginScope,
+
     #[arg(
         long = "with-api-key",
         help = "Read the API key from stdin (e.g. `printenv OPENAI_API_KEY | codex login --with-api-key`)"
@@ -498,6 +504,24 @@ struct LoginCommand {
     action: Option<LoginSubcommand>,
 }
 
+#[derive(Debug, Default, Clone, Copy, ValueEnum)]
+enum LoginScope {
+    /// Codex control-plane login.
+    #[default]
+    Control,
+    /// Independent login used for model-provider requests.
+    Model,
+}
+
+impl From<LoginScope> for ModelAuthSource {
+    fn from(scope: LoginScope) -> Self {
+        match scope {
+            LoginScope::Control => Self::Control,
+            LoginScope::Model => Self::Model,
+        }
+    }
+}
+
 #[derive(Debug, clap::Subcommand)]
 enum LoginSubcommand {
     /// Show login status.
@@ -508,6 +532,10 @@ enum LoginSubcommand {
 struct LogoutCommand {
     #[clap(skip)]
     config_overrides: CliConfigOverrides,
+
+    /// Select which local login to clear.
+    #[arg(long, value_enum, default_value = "control")]
+    scope: LoginScope,
 }
 
 #[derive(Debug, Parser)]
@@ -1367,9 +1395,10 @@ async fn cli_main(
                 &mut login_cli.config_overrides,
                 root_config_overrides.clone(),
             );
+            let auth_source = login_cli.scope.into();
             match login_cli.action {
                 Some(LoginSubcommand::Status) => {
-                    run_login_status(login_cli.config_overrides).await;
+                    run_login_status(login_cli.config_overrides, auth_source).await;
                 }
                 None => {
                     if login_cli.with_api_key && login_cli.with_access_token {
@@ -1382,6 +1411,7 @@ async fn cli_main(
                             login_cli.config_overrides,
                             login_cli.issuer_base_url,
                             login_cli.client_id,
+                            auth_source,
                         )
                         .await;
                     } else if login_cli.api_key.is_some() {
@@ -1391,12 +1421,18 @@ async fn cli_main(
                         std::process::exit(1);
                     } else if login_cli.with_api_key {
                         let api_key = read_api_key_from_stdin();
-                        run_login_with_api_key(login_cli.config_overrides, api_key).await;
+                        run_login_with_api_key(login_cli.config_overrides, api_key, auth_source)
+                            .await;
                     } else if login_cli.with_access_token {
                         let access_token = read_access_token_from_stdin();
-                        run_login_with_access_token(login_cli.config_overrides, access_token).await;
+                        run_login_with_access_token(
+                            login_cli.config_overrides,
+                            access_token,
+                            auth_source,
+                        )
+                        .await;
                     } else {
-                        run_login_with_chatgpt(login_cli.config_overrides).await;
+                        run_login_with_chatgpt(login_cli.config_overrides, auth_source).await;
                     }
                 }
             }
@@ -1411,7 +1447,7 @@ async fn cli_main(
                 &mut logout_cli.config_overrides,
                 root_config_overrides.clone(),
             );
-            run_logout(logout_cli.config_overrides).await;
+            run_logout(logout_cli.config_overrides, logout_cli.scope.into()).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
             reject_remote_mode_for_subcommand(
@@ -2083,9 +2119,11 @@ async fn run_debug_models_command(
             .cli_overrides(cli_overrides)
             .build()
             .await?;
-        let auth_manager =
+        let control_auth_manager =
             AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ true).await;
-        let models_manager = build_models_manager(&config, auth_manager);
+        let model_auth_manager =
+            AuthManager::shared_for_model_from_config(&config, control_auth_manager).await;
+        let models_manager = build_models_manager(&config, model_auth_manager);
         models_manager
             .raw_model_catalog(
                 RefreshStrategy::OnlineIfUncached,

@@ -42,6 +42,7 @@ pub(super) async fn spawn_review_thread(
     let review_prompt = resolved.prompt.clone();
     let provider = parent_turn_context.provider.clone();
     let auth_manager = parent_turn_context.auth_manager.clone();
+    let model_auth_manager = parent_turn_context.model_auth_manager.clone();
     let model_info = review_model_info.clone();
 
     // Build per‑turn client with the requested model/family.
@@ -114,6 +115,7 @@ pub(super) async fn spawn_review_thread(
         realtime_active: parent_turn_context.realtime_active,
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
+        model_auth_manager,
         model_info: model_info.clone(),
         session_telemetry: session_telemetry_for_context,
         provider: provider_for_context,

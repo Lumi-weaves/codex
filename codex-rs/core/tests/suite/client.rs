@@ -1605,6 +1605,94 @@ async fn includes_base_instructions_override_in_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn model_requests_use_model_auth_instead_of_control_auth() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("control-key"))
+        .with_model_auth(CodexAuth::from_api_key("model-key"));
+    let test = builder
+        .build(&server)
+        .await
+        .expect("create new conversation");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = resp_mock.single_request();
+    assert_eq!(
+        request.header("authorization").as_deref(),
+        Some("Bearer model-key"),
+        "model-provider requests must not use the control-plane credential"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_model_auth_does_not_fall_back_to_control_auth() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let resp_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::from_api_key("control-key"))
+        .without_model_auth();
+    let test = builder
+        .build(&server)
+        .await
+        .expect("create new conversation");
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit turn");
+
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = resp_mock.single_request();
+    assert_eq!(request.header("authorization"), None::<String>);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chatgpt_auth_sends_correct_request() {
     skip_if_no_network!();
 
