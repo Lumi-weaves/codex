@@ -9,6 +9,58 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
+## About the Lumi fork
+
+This repository is also home to a lightweight downstream maintained by
+[CubeLander](https://github.com/CubeLander) and
+[Lumi](https://github.com/Lumi-weaves). It follows published OpenAI Codex
+releases rather than an arbitrary `main` snapshot, preserves upstream defaults,
+and keeps each downstream patch narrow enough to remove when upstream provides
+equivalent behavior.
+
+The current patch line is
+[`lumi/release-0.147.0-alpha.1.2`](https://github.com/Lumi-weaves/codex/tree/lumi/release-0.147.0-alpha.1.2),
+based on upstream tag
+[`rust-v0.147.0-alpha.1.2`](https://github.com/openai/codex/releases/tag/rust-v0.147.0-alpha.1.2).
+It currently carries two fixes:
+
+### Cross-provider MultiAgentV2 spawn delivery
+
+Commit [`59b3699`](https://github.com/Lumi-weaves/codex/commit/59b369924db09005aae42f540c3314f9c59bfac4)
+adds an opt-in compatibility namespace for Responses-compatible providers that
+cannot decode OpenAI's encrypted collaboration payload. The initial no-fork
+spawn task is delivered as ordinary model input for non-OpenAI child providers,
+while the upstream `collaboration` namespace remains unchanged.
+
+```toml
+[features.multi_agent_v2]
+tool_namespace = "lumi_collaboration"
+```
+
+### Separate control and model credentials
+
+Commit [`b3c43bd`](https://github.com/Lumi-weaves/codex/commit/b3c43bd7d8e9836dd8b0ae2ff491f1308de2a8f7)
+allows Codex control-plane services and model-usage traffic to use different
+credentials on one machine. The independent model credential supports the
+existing API-key and managed ChatGPT OAuth flows, including refresh and 401
+recovery, and never silently falls back to the control credential.
+
+```shell
+codex login --scope model
+# Or: printenv OPENAI_API_KEY | codex login --scope model --with-api-key
+```
+
+```toml
+model_auth_source = "model"
+```
+
+The default remains `model_auth_source = "control"`, so an unconfigured build
+behaves like upstream. This branch is currently distributed as source; the
+OpenAI install commands below install upstream Codex and do not include these
+patches. See [Installing & building](./docs/install.md) to build the fork.
+
+---
+
 ## Quickstart
 
 ### Installing and running Codex CLI
