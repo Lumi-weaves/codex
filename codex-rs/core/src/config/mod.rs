@@ -40,6 +40,7 @@ use codex_config::types::History;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerDisabledReason;
 use codex_config::types::MemoriesConfig;
+use codex_config::types::ModelAuthSource;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_config::types::Notice;
 use codex_config::types::OAuthCredentialsStoreMode;
@@ -654,6 +655,9 @@ pub struct Config {
 
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
+
+    /// Login whose credentials supply model-provider requests.
+    pub model_auth_source: ModelAuthSource,
 
     /// Optionally specify the personality of the model
     pub personality: Option<Personality>,
@@ -1345,6 +1349,10 @@ impl AuthManagerConfig for Config {
 
     fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
         self.cli_auth_credentials_store_mode
+    }
+
+    fn model_auth_source(&self) -> ModelAuthSource {
+        self.model_auth_source
     }
 
     fn auth_keyring_backend_kind(&self) -> AuthKeyringBackendKind {
@@ -4090,6 +4098,7 @@ impl Config {
                 .unwrap_or_default(),
             model_provider_id,
             model_provider,
+            model_auth_source: cfg.model_auth_source.unwrap_or_default(),
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,

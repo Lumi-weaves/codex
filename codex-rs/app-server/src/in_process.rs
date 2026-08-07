@@ -414,6 +414,11 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         let auth_manager =
             AuthManager::shared_from_config(args.config.as_ref(), args.enable_codex_api_key_env)
                 .await;
+        let model_auth_manager = AuthManager::shared_for_model_from_config(
+            args.config.as_ref(),
+            Arc::clone(&auth_manager),
+        )
+        .await;
         let analytics_events_client =
             analytics_events_client_from_config(Arc::clone(&auth_manager), args.config.as_ref());
         let analytics_events_flush_client = analytics_events_client.clone();
@@ -471,6 +476,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 config_warnings: args.config_warnings,
                 session_source: args.session_source,
                 auth_manager,
+                model_auth_manager,
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,

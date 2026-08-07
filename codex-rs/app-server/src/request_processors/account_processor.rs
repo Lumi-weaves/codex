@@ -1047,9 +1047,9 @@ impl AccountRequestProcessor {
     async fn get_account_rate_limits_response(
         &self,
     ) -> Result<GetAccountRateLimitsResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = self.thread_manager.model_auth_manager().auth().await else {
             return Err(invalid_request(
-                "codex account authentication required to read rate limits",
+                "model authentication required to read rate limits",
             ));
         };
 
@@ -1120,9 +1120,9 @@ impl AccountRequestProcessor {
     async fn get_account_token_usage_response(
         &self,
     ) -> Result<GetAccountTokenUsageResponse, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = self.thread_manager.model_auth_manager().auth().await else {
             return Err(invalid_request(
-                "codex account authentication required to read token usage",
+                "model authentication required to read token usage",
             ));
         };
 
@@ -1241,9 +1241,9 @@ impl AccountRequestProcessor {
         &self,
         params: SendAddCreditsNudgeEmailParams,
     ) -> Result<AddCreditsNudgeEmailStatus, JSONRPCErrorError> {
-        let Some(auth) = self.auth_manager.auth().await else {
+        let Some(auth) = self.thread_manager.model_auth_manager().auth().await else {
             return Err(invalid_request(
-                "codex account authentication required to notify workspace owner",
+                "model authentication required to notify workspace owner",
             ));
         };
 

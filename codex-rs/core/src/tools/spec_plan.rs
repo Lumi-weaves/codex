@@ -556,7 +556,7 @@ fn image_generation_available(turn_context: &TurnContext) -> bool {
     }
 
     if turn_context
-        .auth_manager
+        .model_auth_manager
         .as_deref()
         .and_then(AuthManager::auth_cached)
         .and_then(|auth| auth.account_plan_type())
@@ -582,7 +582,7 @@ fn image_generation_available(turn_context: &TurnContext) -> bool {
     provider.uses_openai_actor_authorization()
         || (provider.requires_openai_auth
             && turn_context
-                .auth_manager
+                .model_auth_manager
                 .as_deref()
                 .is_some_and(AuthManager::current_auth_uses_codex_backend))
 }

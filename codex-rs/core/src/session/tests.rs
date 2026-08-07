@@ -5577,6 +5577,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
+        Arc::clone(&auth_manager),
         auth_manager,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
@@ -5767,6 +5768,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: auth_manager.clone(),
+        model_auth_manager: auth_manager.clone(),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -5849,6 +5851,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let turn_context = Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),
+        Some(Arc::clone(&auth_manager)),
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),
@@ -5991,6 +5994,7 @@ async fn make_session_with_config_and_rx(
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
+        Arc::clone(&auth_manager),
         auth_manager,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
@@ -6104,6 +6108,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::clone(&config),
         /*user_instructions*/ None,
         "11111111-1111-4111-8111-111111111111".to_string(),
+        Arc::clone(&auth_manager),
         auth_manager,
         models_manager,
         Arc::new(ExecPolicyManager::default()),
@@ -7983,6 +7988,7 @@ where
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
         auth_manager: Arc::clone(&auth_manager),
+        model_auth_manager: Arc::clone(&auth_manager),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -8065,6 +8071,7 @@ where
     let turn_context = Arc::new(Session::make_turn_context(
         thread_id,
         SessionId::from(thread_id),
+        Some(Arc::clone(&auth_manager)),
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),

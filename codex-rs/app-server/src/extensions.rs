@@ -36,6 +36,7 @@ use crate::thread_state::ThreadStateManager;
 pub(crate) struct ThreadExtensionDependencies {
     pub(crate) event_sink: Arc<dyn ExtensionEventSink>,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) model_auth_manager: Arc<AuthManager>,
     pub(crate) state_db: Option<StateDbHandle>,
     pub(crate) analytics_events_client: AnalyticsEventsClient,
     pub(crate) thread_manager: Weak<ThreadManager>,
@@ -58,6 +59,7 @@ where
     let ThreadExtensionDependencies {
         event_sink,
         auth_manager,
+        model_auth_manager,
         state_db,
         analytics_events_client,
         thread_manager,
@@ -82,7 +84,7 @@ where
     }
     codex_git_attribution::install(
         &mut builder,
-        auth_manager.clone(),
+        auth_manager,
         git_attribution_base_url,
         http_client_factory,
     );
@@ -90,10 +92,12 @@ where
     codex_memories_extension::install(&mut builder, codex_otel::global());
     codex_mcp_extension::install(&mut builder);
     codex_mcp_extension::install_executor_plugins(&mut builder, environment_manager);
-    codex_web_search_extension::install(&mut builder, auth_manager.clone());
-    codex_image_generation_extension::install(&mut builder, auth_manager, |config: &Config| {
-        Some(config.codex_home.clone())
-    });
+    codex_web_search_extension::install(&mut builder, model_auth_manager.clone());
+    codex_image_generation_extension::install(
+        &mut builder,
+        model_auth_manager,
+        |config: &Config| Some(config.codex_home.clone()),
+    );
     let skill_providers = codex_skills_extension::SkillProviders::new()
         .with_executor_provider(executor_skill_provider)
         .with_orchestrator_provider(Arc::new(

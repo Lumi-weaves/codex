@@ -31,6 +31,94 @@ const WORKSPACE_ID_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174000";
 const WORKSPACE_ID_SECOND_ALLOWED: &str = "123e4567-e89b-42d3-a456-426614174001";
 const WORKSPACE_ID_DISALLOWED: &str = "123e4567-e89b-42d3-a456-426614174002";
 
+struct ModelAuthTestConfig {
+    codex_home: PathBuf,
+    source: ModelAuthSource,
+}
+
+impl AuthManagerConfig for ModelAuthTestConfig {
+    fn codex_home(&self) -> PathBuf {
+        self.codex_home.clone()
+    }
+
+    fn cli_auth_credentials_store_mode(&self) -> AuthCredentialsStoreMode {
+        AuthCredentialsStoreMode::File
+    }
+
+    fn model_auth_source(&self) -> ModelAuthSource {
+        self.source
+    }
+
+    fn auth_keyring_backend_kind(&self) -> AuthKeyringBackendKind {
+        AuthKeyringBackendKind::default()
+    }
+
+    fn forced_chatgpt_workspace_id(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn chatgpt_base_url(&self) -> String {
+        "https://chatgpt.com".to_string()
+    }
+
+    fn auth_route_config(&self) -> AuthRouteConfig {
+        crate::test_support::transport_default_auth_route_config()
+    }
+}
+
+#[tokio::test]
+async fn model_auth_selection_loads_only_the_isolated_store() {
+    let codex_home = tempdir().expect("create Codex home");
+    login_with_api_key(
+        codex_home.path(),
+        "control-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("write control auth");
+    login_with_api_key(
+        &model_auth_home(codex_home.path()),
+        "model-key",
+        AuthCredentialsStoreMode::File,
+        AuthKeyringBackendKind::default(),
+    )
+    .expect("write model auth");
+
+    let control_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("in-memory-control-key"));
+    let model_auth_manager = AuthManager::shared_for_model_from_config(
+        &ModelAuthTestConfig {
+            codex_home: codex_home.path().to_path_buf(),
+            source: ModelAuthSource::Model,
+        },
+        control_auth_manager,
+    )
+    .await;
+
+    let api_key = model_auth_manager
+        .auth()
+        .await
+        .and_then(|auth| auth.api_key().map(str::to_string));
+    assert_eq!(api_key.as_deref(), Some("model-key"));
+}
+
+#[tokio::test]
+async fn control_auth_selection_preserves_the_live_control_manager() {
+    let codex_home = tempdir().expect("create Codex home");
+    let control_auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::from_api_key("control-key"));
+    let selected = AuthManager::shared_for_model_from_config(
+        &ModelAuthTestConfig {
+            codex_home: codex_home.path().to_path_buf(),
+            source: ModelAuthSource::Control,
+        },
+        Arc::clone(&control_auth_manager),
+    )
+    .await;
+
+    assert!(Arc::ptr_eq(&selected, &control_auth_manager));
+}
+
 #[tokio::test]
 async fn refresh_without_id_token() {
     let codex_home = tempdir().unwrap();

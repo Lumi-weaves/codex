@@ -331,6 +331,7 @@ enabled = false
                     ThreadExtensionDependencies {
                         event_sink: Arc::new(NoopExtensionEventSink),
                         auth_manager: auth_manager.clone(),
+                        model_auth_manager: auth_manager.clone(),
                         state_db: Some(state_db.clone()),
                         analytics_events_client: codex_analytics::AnalyticsEventsClient::disabled(),
                         thread_manager: thread_manager.clone(),

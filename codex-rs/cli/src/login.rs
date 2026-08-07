@@ -8,6 +8,7 @@
 //! support can request from users.
 
 use codex_config::types::AuthCredentialsStoreMode;
+use codex_config::types::ModelAuthSource;
 use codex_core::config::Config;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::AuthRouteConfig;
@@ -16,6 +17,7 @@ use codex_login::ServerOptions;
 use codex_login::login_with_access_token;
 use codex_login::login_with_api_key;
 use codex_login::logout_with_revoke;
+use codex_login::model_auth_home;
 use codex_login::run_device_code_login;
 use codex_login::run_login_server;
 use codex_protocol::auth::AuthMode;
@@ -40,6 +42,13 @@ const API_KEY_LOGIN_DISABLED_MESSAGE: &str =
 const ACCESS_TOKEN_LOGIN_DISABLED_MESSAGE: &str =
     "Access token login is disabled. Use API key login instead.";
 const LOGIN_SUCCESS_MESSAGE: &str = "Successfully logged in";
+
+fn auth_home_for_source(config: &Config, source: ModelAuthSource) -> PathBuf {
+    match source {
+        ModelAuthSource::Control => config.codex_home.to_path_buf(),
+        ModelAuthSource::Model => model_auth_home(&config.codex_home),
+    }
+}
 
 /// Installs a small file-backed tracing layer for direct `codex login` flows.
 ///
@@ -163,7 +172,10 @@ pub async fn login_with_chatgpt(
     server.block_until_done().await
 }
 
-pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_login_with_chatgpt(
+    cli_config_overrides: CliConfigOverrides,
+    source: ModelAuthSource,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
     tracing::info!("starting browser login flow");
@@ -177,8 +189,9 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
     }
 
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let auth_home = auth_home_for_source(&config, source);
     match login_with_chatgpt(
-        config.codex_home.to_path_buf(),
+        auth_home,
         effective_chatgpt_workspaces,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -200,6 +213,7 @@ pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) ->
 pub async fn run_login_with_api_key(
     cli_config_overrides: CliConfigOverrides,
     api_key: String,
+    source: ModelAuthSource,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
@@ -213,8 +227,9 @@ pub async fn run_login_with_api_key(
         std::process::exit(1);
     }
 
+    let auth_home = auth_home_for_source(&config, source);
     match login_with_api_key(
-        &config.codex_home,
+        &auth_home,
         &api_key,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
@@ -233,6 +248,7 @@ pub async fn run_login_with_api_key(
 pub async fn run_login_with_access_token(
     cli_config_overrides: CliConfigOverrides,
     access_token: String,
+    source: ModelAuthSource,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
@@ -248,8 +264,9 @@ pub async fn run_login_with_access_token(
 
     let auth_route_config = config.auth_route_config();
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
+    let auth_home = auth_home_for_source(&config, source);
     match login_with_access_token(
-        &config.codex_home,
+        &auth_home,
         &access_token,
         config.cli_auth_credentials_store_mode,
         effective_chatgpt_workspaces.as_deref(),
@@ -316,6 +333,7 @@ pub async fn run_login_with_device_code(
     cli_config_overrides: CliConfigOverrides,
     issuer_base_url: Option<String>,
     client_id: Option<String>,
+    source: ModelAuthSource,
 ) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let _login_log_guard = init_login_file_logging(&config);
@@ -328,8 +346,9 @@ pub async fn run_login_with_device_code(
         std::process::exit(1);
     }
     let auth_route_config = config.auth_route_config();
+    let auth_home = auth_home_for_source(&config, source);
     clear_existing_auth_before_login(
-        &config.codex_home,
+        &auth_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,
@@ -337,7 +356,7 @@ pub async fn run_login_with_device_code(
     .await;
     let effective_chatgpt_workspaces = config.auth_config().effective_chatgpt_workspaces();
     let mut opts = ServerOptions::new(
-        config.codex_home.to_path_buf(),
+        auth_home,
         client_id.unwrap_or(CLIENT_ID.to_string()),
         effective_chatgpt_workspaces,
         config.cli_auth_credentials_store_mode,
@@ -436,13 +455,16 @@ pub async fn run_login_with_device_code_fallback_to_browser(
     }
 }
 
-pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_login_status(
+    cli_config_overrides: CliConfigOverrides,
+    source: ModelAuthSource,
+) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
+    let mut auth_config = config.auth_config();
+    let auth_home = auth_home_for_source(&config, source);
+    auth_config.codex_home = auth_home;
 
-    match config
-        .auth_config()
-        .load_auth(/*enable_codex_api_key_env*/ false)
-        .await
+    match auth_config.load_auth(/*enable_codex_api_key_env*/ false).await
     {
         Ok(Some(auth)) => match auth.auth_mode() {
             AuthMode::ApiKey => match auth.get_token() {
@@ -486,12 +508,13 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
     }
 }
 
-pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
+pub async fn run_logout(cli_config_overrides: CliConfigOverrides, source: ModelAuthSource) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
     let auth_route_config = config.auth_route_config();
+    let auth_home = auth_home_for_source(&config, source);
 
     match logout_with_revoke(
-        &config.codex_home,
+        &auth_home,
         config.cli_auth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &auth_route_config,

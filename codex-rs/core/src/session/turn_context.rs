@@ -130,7 +130,10 @@ pub struct TurnContext {
     pub(crate) realtime_active: bool,
     pub(crate) code_mode_available: bool,
     pub config: Arc<Config>,
+    /// Control-plane login used for Apps and other Codex services.
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
+    /// Login selected for model-provider requests and model-backed tools.
+    pub(crate) model_auth_manager: Option<Arc<AuthManager>>,
     pub(crate) model_info: ModelInfo,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: SharedModelProvider,
@@ -302,6 +305,7 @@ impl TurnContext {
             code_mode_available: self.code_mode_available,
             config: Arc::new(config),
             auth_manager: self.auth_manager.clone(),
+            model_auth_manager: self.model_auth_manager.clone(),
             model_info: model_info.clone(),
             session_telemetry: self
                 .session_telemetry
@@ -505,6 +509,7 @@ impl Session {
         thread_id: ThreadId,
         session_id: SessionId,
         auth_manager: Option<Arc<AuthManager>>,
+        model_auth_manager: Option<Arc<AuthManager>>,
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
         session_configuration: &SessionConfiguration,
@@ -572,6 +577,7 @@ impl Session {
             code_mode_available: true,
             config: per_turn_config,
             auth_manager,
+            model_auth_manager,
             model_info,
             session_telemetry: session_telemetry_for_context,
             provider,
@@ -795,6 +801,7 @@ impl Session {
             self.thread_id(),
             self.session_id(),
             Some(Arc::clone(&self.services.auth_manager)),
+            Some(Arc::clone(&self.services.model_auth_manager)),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

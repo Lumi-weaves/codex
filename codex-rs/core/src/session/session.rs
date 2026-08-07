@@ -514,6 +514,7 @@ impl Session {
         user_instructions: Option<codex_extension_api::UserInstructions>,
         installation_id: String,
         auth_manager: Arc<AuthManager>,
+        model_auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
@@ -732,7 +733,7 @@ impl Session {
         ));
 
         let mut mcp_auth_changes = auth_manager.auth_change_receiver();
-        let auth_manager_clone = Arc::clone(&auth_manager);
+        let model_auth_manager_clone = Arc::clone(&model_auth_manager);
         let config_for_mcp = Arc::clone(&config);
         let mcp_manager_for_mcp = Arc::clone(&mcp_manager);
         let mcp_thread_init_for_startup = &mcp_thread_init;
@@ -746,7 +747,7 @@ impl Session {
             .map(|cwd| cwd.to_path_buf())
             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
         let auth_and_mcp_fut = async move {
-            let auth = auth_manager_clone.auth().await;
+            let auth = model_auth_manager_clone.auth().await;
             let mcp_projection = mcp_manager_for_mcp
                 .runtime_config_for_step(
                     &config_for_mcp,
@@ -1123,6 +1124,7 @@ impl Session {
                 show_raw_agent_reasoning: config.show_raw_agent_reasoning,
                 exec_policy,
                 auth_manager: Arc::clone(&auth_manager),
+                model_auth_manager: Arc::clone(&model_auth_manager),
                 openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
                     config.http_client_factory(),
                     ClientRouteClass::Api,
@@ -1155,7 +1157,7 @@ impl Session {
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
                 model_client: ModelClient::new(
-                    Some(Arc::clone(&auth_manager)),
+                    Some(model_auth_manager),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
                     } else {

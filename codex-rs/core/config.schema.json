@@ -1641,6 +1641,25 @@
       },
       "type": "object"
     },
+    "ModelAuthSource": {
+      "description": "Selects which locally managed login supplies credentials for model-provider requests.",
+      "oneOf": [
+        {
+          "description": "Reuse the ordinary Codex control-plane login.",
+          "enum": [
+            "control"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Use the independent machine-local model-usage login.",
+          "enum": [
+            "model"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ModelAvailabilityNuxConfig": {
       "additionalProperties": {
         "format": "uint32",
@@ -5559,6 +5578,15 @@
     "model": {
       "description": "Optional override of model selection.",
       "type": "string"
+    },
+    "model_auth_source": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelAuthSource"
+        }
+      ],
+      "default": null,
+      "description": "Login whose credentials should be used for model-provider requests."
     },
     "model_auto_compact_token_limit": {
       "description": "Token usage threshold triggering auto-compaction of conversation history.",

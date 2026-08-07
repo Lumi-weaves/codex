@@ -41,6 +41,11 @@ fn read_auth_json(codex_home: &Path) -> Result<Value> {
     Ok(serde_json::from_str(&auth_json)?)
 }
 
+fn read_model_auth_json(codex_home: &Path) -> Result<Value> {
+    let auth_json = std::fs::read_to_string(codex_home.join("model-auth/auth.json"))?;
+    Ok(serde_json::from_str(&auth_json)?)
+}
+
 #[test]
 fn login_with_api_key_reads_stdin_and_writes_auth_json() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -77,6 +82,50 @@ fn login_status_reports_auth_storage_errors() -> Result<()> {
         .assert()
         .failure()
         .stderr(contains("Error checking login status:"));
+
+    Ok(())
+}
+
+#[test]
+fn model_login_and_logout_do_not_change_control_auth() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_file_auth_config(codex_home.path())?;
+    std::fs::write(
+        codex_home.path().join("auth.json"),
+        serde_json::to_vec_pretty(&json!({
+            "auth_mode": "apikey",
+            "OPENAI_API_KEY": "control-key",
+        }))?,
+    )?;
+
+    let mut login = codex_command(codex_home.path())?;
+    login
+        .args(["login", "--scope", "model", "--with-api-key"])
+        .write_stdin("model-key\n")
+        .assert()
+        .success()
+        .stderr(contains("Successfully logged in"));
+
+    assert_eq!(
+        read_auth_json(codex_home.path())?["OPENAI_API_KEY"],
+        "control-key"
+    );
+    assert_eq!(
+        read_model_auth_json(codex_home.path())?["OPENAI_API_KEY"],
+        "model-key"
+    );
+
+    codex_command(codex_home.path())?
+        .args(["logout", "--scope", "model"])
+        .assert()
+        .success()
+        .stderr(contains("Successfully logged out"));
+
+    assert_eq!(
+        read_auth_json(codex_home.path())?["OPENAI_API_KEY"],
+        "control-key"
+    );
+    assert!(!codex_home.path().join("model-auth/auth.json").exists());
 
     Ok(())
 }

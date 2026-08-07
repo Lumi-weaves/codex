@@ -312,6 +312,7 @@ pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     auth_manager: Arc<AuthManager>,
+    model_auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
@@ -391,6 +392,43 @@ impl ThreadManager {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         external_time_provider: Option<Arc<dyn TimeProvider>>,
     ) -> Self {
+        Self::new_with_model_auth_manager(
+            config,
+            Arc::clone(&auth_manager),
+            auth_manager,
+            models_manager,
+            codex_apps_tools_cache,
+            session_source,
+            environment_manager,
+            extensions,
+            user_instructions_provider,
+            analytics_events_client,
+            thread_store,
+            agent_graph_store,
+            installation_id,
+            attestation_provider,
+            external_time_provider,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_model_auth_manager(
+        config: &Config,
+        auth_manager: Arc<AuthManager>,
+        model_auth_manager: Arc<AuthManager>,
+        models_manager: SharedModelsManager,
+        codex_apps_tools_cache: CodexAppsToolsCache,
+        session_source: SessionSource,
+        environment_manager: Arc<EnvironmentManager>,
+        extensions: Arc<ExtensionRegistry<Config>>,
+        user_instructions_provider: Arc<dyn UserInstructionsProvider>,
+        analytics_events_client: Option<AnalyticsEventsClient>,
+        thread_store: Arc<dyn ThreadStore>,
+        agent_graph_store: Option<Arc<dyn AgentGraphStore>>,
+        installation_id: String,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        external_time_provider: Option<Arc<dyn TimeProvider>>,
+    ) -> Self {
         let codex_home = config.codex_home.clone();
         let restriction_product = session_source.restriction_product();
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
@@ -435,6 +473,7 @@ impl ThreadManager {
                 attestation_provider,
                 external_time_provider,
                 auth_manager,
+                model_auth_manager,
                 session_source,
                 installation_id,
                 analytics_events_client,
@@ -569,6 +608,7 @@ impl ThreadManager {
                 agent_graph_store,
                 attestation_provider: None,
                 external_time_provider: None,
+                model_auth_manager: Arc::clone(&auth_manager),
                 auth_manager,
                 session_source: SessionSource::Exec,
                 installation_id,
@@ -586,6 +626,10 @@ impl ThreadManager {
 
     pub fn auth_manager(&self) -> Arc<AuthManager> {
         self.state.auth_manager.clone()
+    }
+
+    pub fn model_auth_manager(&self) -> Arc<AuthManager> {
+        self.state.model_auth_manager.clone()
     }
 
     pub fn skills_service(&self) -> Arc<HostSkillsService> {
@@ -1699,6 +1743,7 @@ impl ThreadManagerState {
             user_instructions,
             installation_id: self.installation_id.clone(),
             auth_manager,
+            model_auth_manager: Arc::clone(&self.model_auth_manager),
             models_manager: Arc::clone(&self.models_manager),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),

@@ -212,6 +212,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
     pub(crate) session_source: SessionSource,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) model_auth_manager: Arc<AuthManager>,
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
     pub(crate) rpc_transport: AppServerRpcTransport,
@@ -236,6 +237,7 @@ impl MessageProcessor {
             config_warnings,
             session_source,
             auth_manager,
+            model_auth_manager,
             installation_id,
             code_mode_session_provider,
             rpc_transport,
@@ -258,10 +260,11 @@ impl MessageProcessor {
         );
         let goal_service = Arc::new(GoalService::new());
         let thread_manager = Arc::new_cyclic(|thread_manager| {
-            let manager = ThreadManager::new(
+            let manager = ThreadManager::new_with_model_auth_manager(
                 config.as_ref(),
                 auth_manager.clone(),
-                codex_core::build_models_manager(config.as_ref(), auth_manager.clone()),
+                model_auth_manager.clone(),
+                codex_core::build_models_manager(config.as_ref(), model_auth_manager.clone()),
                 codex_core::CodexAppsToolsCache::default(),
                 session_source,
                 environment_manager,
@@ -273,6 +276,7 @@ impl MessageProcessor {
                             thread_state_manager.clone(),
                         ),
                         auth_manager: auth_manager.clone(),
+                        model_auth_manager: model_auth_manager.clone(),
                         state_db: state_db.clone(),
                         analytics_events_client: analytics_events_client.clone(),
                         thread_manager: thread_manager.clone(),
@@ -439,7 +443,6 @@ impl MessageProcessor {
             config_warnings,
         );
         let turn_processor = TurnRequestProcessor::new(
-            auth_manager.clone(),
             Arc::clone(&thread_manager),
             outgoing.clone(),
             analytics_events_client.clone(),

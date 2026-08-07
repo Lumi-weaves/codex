@@ -117,6 +117,8 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
 
     let auth_manager =
         AuthManager::shared_from_config(&config, /*enable_codex_api_key_env*/ false).await;
+    let model_auth_manager =
+        AuthManager::shared_for_model_from_config(&config, Arc::clone(&auth_manager)).await;
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
@@ -135,13 +137,16 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         config.codex_home.clone(),
     ));
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    install_image_generation_extension(&mut extensions, auth_manager.clone(), |config: &Config| {
-        Some(config.codex_home.clone())
-    });
-    let thread_manager = ThreadManager::new(
+    install_image_generation_extension(
+        &mut extensions,
+        model_auth_manager.clone(),
+        |config: &Config| Some(config.codex_home.clone()),
+    );
+    let thread_manager = ThreadManager::new_with_model_auth_manager(
         &config,
         Arc::clone(&auth_manager),
-        build_models_manager(&config, auth_manager),
+        Arc::clone(&model_auth_manager),
+        build_models_manager(&config, model_auth_manager),
         CodexAppsToolsCache::default(),
         SessionSource::Exec,
         environment_manager,
@@ -196,6 +201,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope::Total,
         model_provider_id,
         model_provider,
+        model_auth_source: Default::default(),
         personality: None,
         permissions: Permissions::from_approval_and_profile(
             Constrained::allow_any(AskForApproval::Never),

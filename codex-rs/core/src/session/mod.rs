@@ -423,6 +423,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) user_instructions: LoadedUserInstructions,
     pub(crate) installation_id: String,
     pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) model_auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<HostSkillsService>,
@@ -519,6 +520,7 @@ impl Session {
             user_instructions,
             installation_id,
             auth_manager,
+            model_auth_manager,
             models_manager,
             environment_manager,
             skills_service,
@@ -683,7 +685,7 @@ impl Session {
         let session_configuration = SessionConfiguration {
             provider: create_model_provider(
                 config.model_provider.clone(),
-                Some(Arc::clone(&auth_manager)),
+                Some(Arc::clone(&model_auth_manager)),
             ),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
@@ -726,6 +728,7 @@ impl Session {
             user_instructions,
             installation_id,
             auth_manager.clone(),
+            model_auth_manager,
             models_manager.clone(),
             exec_policy,
             tx_event.clone(),

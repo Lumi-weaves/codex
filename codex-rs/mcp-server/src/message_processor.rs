@@ -62,6 +62,9 @@ impl MessageProcessor {
             /*enable_codex_api_key_env*/ false,
         )
         .await;
+        let model_auth_manager =
+            AuthManager::shared_for_model_from_config(config.as_ref(), Arc::clone(&auth_manager))
+                .await;
         let user_instructions_provider = Arc::new(CodexHomeUserInstructionsProvider::new(
             config.codex_home.clone(),
         ));
@@ -77,7 +80,7 @@ impl MessageProcessor {
         );
         codex_image_generation_extension::install(
             &mut extensions,
-            auth_manager.clone(),
+            model_auth_manager.clone(),
             |config: &Config| Some(config.codex_home.clone()),
         );
         let skill_providers = codex_skills_extension::SkillProviders::new()
@@ -95,10 +98,11 @@ impl MessageProcessor {
                     .enabled(codex_features::Feature::SkillSearch),
             },
         );
-        let thread_manager = Arc::new(ThreadManager::new(
+        let thread_manager = Arc::new(ThreadManager::new_with_model_auth_manager(
             config.as_ref(),
             Arc::clone(&auth_manager),
-            codex_core::build_models_manager(config.as_ref(), auth_manager),
+            Arc::clone(&model_auth_manager),
+            codex_core::build_models_manager(config.as_ref(), model_auth_manager),
             codex_core::CodexAppsToolsCache::default(),
             SessionSource::Mcp,
             environment_manager,

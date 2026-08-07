@@ -350,8 +350,10 @@ async fn build_report(
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
     match &config_result {
         Ok(config) => {
-            let auth_manager =
+            let control_auth_manager =
                 AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
+            let model_auth_manager =
+                AuthManager::shared_for_model_from_config(config, control_auth_manager).await;
             let reachability_plan = provider_reachability_plan(config);
             let (
                 config_check,
@@ -376,7 +378,7 @@ async fn build_report(
                 run_async_check(
                     "websocket",
                     progress.clone(),
-                    websocket_reachability_check(config, Some(auth_manager)),
+                    websocket_reachability_check(config, Some(model_auth_manager)),
                 ),
                 run_async_check("MCP", progress.clone(), mcp_check(config)),
                 async {
