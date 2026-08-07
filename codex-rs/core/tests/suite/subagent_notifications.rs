@@ -49,6 +49,7 @@ use std::time::Duration;
 use test_case::test_case;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use tokio::time::timeout;
 use tracing::Level;
 use tracing_test::internal::MockWriter;
 use wiremock::MockServer;
@@ -1576,9 +1577,12 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(plaintext: bool) -> R
 }
 
 #[tokio::test]
-async fn multi_agent_v2_no_fork_spawn_delivers_task_to_non_openai_child() -> Result<()> {
+async fn multi_agent_v2_no_fork_delivers_tasks_to_non_openai_child() -> Result<()> {
     const PLAINTEXT_NAMESPACE: &str = "lumi_collaboration";
     const CROSS_PROVIDER_ROLE: &str = "cross_provider";
+    const FOLLOWUP_PROMPT: &str = "continue the completed cross-provider worker";
+    const FOLLOWUP_TASK: &str = "inspect the follow-up payload";
+    const FOLLOWUP_CALL_ID: &str = "followup-cross-provider-worker";
 
     let server = start_mock_server().await;
     let child_provider_base_url = format!("{}/v1", server.uri());
@@ -1704,6 +1708,106 @@ async fn multi_agent_v2_no_fork_spawn_delivers_task_to_non_openai_child() -> Res
             }],
         })]),
         "the non-OpenAI child must receive the delegated task as a standard user message"
+    );
+
+    let child_thread_id = ThreadId::from_string(
+        child_request.body_json()["client_metadata"]["thread_id"]
+            .as_str()
+            .expect("child thread id"),
+    )?;
+    let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
+    timeout(Duration::from_secs(2), async {
+        while !matches!(child_thread.agent_status().await, AgentStatus::Completed(_)) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+
+    let followup_args = serde_json::to_string(&json!({
+        "target": "worker",
+        "message": FOLLOWUP_TASK,
+    }))?;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, FOLLOWUP_PROMPT),
+        sse(vec![
+            ev_response_created("resp-followup-parent-1"),
+            ev_function_call_with_namespace(
+                FOLLOWUP_CALL_ID,
+                PLAINTEXT_NAMESPACE,
+                "followup_task",
+                &followup_args,
+            ),
+            ev_completed("resp-followup-parent-1"),
+        ]),
+    )
+    .await;
+    let followup_child_request_log = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, FOLLOWUP_TASK) && !body_contains(req, FOLLOWUP_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-followup-child"),
+            ev_assistant_message("msg-followup-child", "follow-up done"),
+            ev_completed("resp-followup-child"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, FOLLOWUP_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-followup-parent-2"),
+            ev_assistant_message("msg-followup-parent-2", "follow-up sent"),
+            ev_completed("resp-followup-parent-2"),
+        ]),
+    )
+    .await;
+
+    test.submit_turn(FOLLOWUP_PROMPT).await?;
+
+    let followup_child_request = timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(request) =
+                followup_child_request_log
+                    .requests()
+                    .into_iter()
+                    .find(|request| {
+                        request.body_contains_text(FOLLOWUP_TASK)
+                            && !request.body_contains_text(FOLLOWUP_CALL_ID)
+                    })
+            {
+                break request;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    assert!(
+        followup_child_request
+            .inputs_of_type("agent_message")
+            .is_empty(),
+        "non-OpenAI providers silently ignore agent_message follow-up items"
+    );
+    let followup_task = followup_child_request
+        .inputs_of_type("message")
+        .into_iter()
+        .filter(|item| item["role"] == json!("user") && item.to_string().contains(FOLLOWUP_TASK))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(followup_task))),
+        Value::Array(vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{
+                "type": "input_text",
+                "text": format!(
+                    "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n{FOLLOWUP_TASK}"
+                ),
+            }],
+        })]),
+        "the completed non-OpenAI child must receive the follow-up as a standard user message"
     );
 
     Ok(())

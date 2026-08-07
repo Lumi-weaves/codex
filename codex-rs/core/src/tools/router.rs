@@ -47,15 +47,18 @@ impl ToolCall {
             .encrypted_function_args
             .as_ref()
             .is_some_and(Vec::is_empty);
-        let is_plaintext_spawn = namespace == Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE)
-            && self.tool_name.name == "spawn_agent"
+        let is_plaintext_lumi_message = namespace == Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE)
+            && matches!(
+                self.tool_name.name.as_str(),
+                "spawn_agent" | "send_message" | "followup_task"
+            )
             && self.encrypted_function_args.is_none();
         if is_collaboration_namespace
             && matches!(
                 self.tool_name.name.as_str(),
                 "spawn_agent" | "send_message" | "followup_task"
             )
-            && (has_plaintext_marker || is_plaintext_spawn)
+            && (has_plaintext_marker || is_plaintext_lumi_message)
         {
             ToolCallSource::DirectPlaintextMessage
         } else {
