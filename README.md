@@ -19,9 +19,9 @@ and keeps each downstream patch narrow enough to remove when upstream provides
 equivalent behavior.
 
 The current patch line is
-[`lumi/release-0.147.0-alpha.1.2`](https://github.com/Lumi-weaves/codex/tree/lumi/release-0.147.0-alpha.1.2),
+[`lumi/release-0.147.0`](https://github.com/Lumi-weaves/codex/tree/lumi/release-0.147.0),
 based on upstream tag
-[`rust-v0.147.0-alpha.1.2`](https://github.com/openai/codex/releases/tag/rust-v0.147.0-alpha.1.2).
+[`rust-v0.147.0`](https://github.com/openai/codex/releases/tag/rust-v0.147.0).
 It currently carries two fixes:
 
 ### Cross-provider MultiAgentV2 delivery

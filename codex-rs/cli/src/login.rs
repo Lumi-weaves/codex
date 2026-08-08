@@ -464,7 +464,9 @@ pub async fn run_login_status(
     let auth_home = auth_home_for_source(&config, source);
     auth_config.codex_home = auth_home;
 
-    match auth_config.load_auth(/*enable_codex_api_key_env*/ false).await
+    match auth_config
+        .load_auth(/*enable_codex_api_key_env*/ false)
+        .await
     {
         Ok(Some(auth)) => match auth.auth_mode() {
             AuthMode::ApiKey => match auth.get_token() {

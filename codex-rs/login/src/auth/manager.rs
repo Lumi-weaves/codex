@@ -2611,11 +2611,7 @@ impl AuthManager {
                     managed_auth_policy: config.managed_auth_policy(),
                     auth_route_config: config.auth_route_config(),
                 };
-                Self::shared_from_auth_config(
-                    auth_config,
-                    /*enable_codex_api_key_env*/ false,
-                )
-                .await
+                Self::shared_from_auth_config(auth_config, /*enable_codex_api_key_env*/ false).await
             }
         }
     }

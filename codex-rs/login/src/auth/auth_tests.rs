@@ -53,8 +53,16 @@ impl AuthManagerConfig for ModelAuthTestConfig {
         AuthKeyringBackendKind::default()
     }
 
+    fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        None
+    }
+
     fn forced_chatgpt_workspace_id(&self) -> Option<Vec<String>> {
         None
+    }
+
+    fn managed_auth_policy(&self) -> ManagedAuthPolicy {
+        ManagedAuthPolicy::default()
     }
 
     fn chatgpt_base_url(&self) -> String {

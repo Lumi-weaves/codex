@@ -674,12 +674,9 @@ impl TestCodexBuilder {
                 model_auth_manager
             }
         };
-        let models_manager = self
-            .models_manager
-            .clone()
-            .unwrap_or_else(|| {
-                codex_core::build_models_manager(&config, Arc::clone(&model_auth_manager))
-            });
+        let models_manager = self.models_manager.clone().unwrap_or_else(|| {
+            codex_core::build_models_manager(&config, Arc::clone(&model_auth_manager))
+        });
         let thread_manager = ThreadManager::new_with_model_auth_manager(
             &config,
             auth_manager.clone(),
