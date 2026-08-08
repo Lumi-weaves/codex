@@ -5,10 +5,11 @@ root Lumi session and for a fresh `deepseek_worker`. It is intentionally a
 request-layout document rather than a general prompting guide: the goal is to
 make prompt ownership, precedence, and physical placement inspectable.
 
-The source/deployment snapshot described here was verified on 2026-08-08 at
-commit `261ce781a8fde11b093fe2883c6caae132b1d140`. Runtime configuration can
-change independently of this repository, so the "current deployment" facts
-below must be rechecked when the role or personal environment changes.
+The original source/deployment snapshot was verified on 2026-08-08 at commit
+`261ce781a8fde11b093fe2883c6caae132b1d140`. This revision also records the
+subsequent independent Worker Base design. Runtime configuration can change
+independently of this repository, so the "current deployment" facts below must
+be rechecked when the role or personal environment changes.
 
 The Desktop root session used during this investigation was older than that
 snapshot: its long-lived app-server process was running commit
@@ -23,16 +24,15 @@ snapshot**; the following runtime-drift section records the observed live root.
 For a fresh root and a V2 spawn with `agent_type = "deepseek_worker"` and
 `fork_turns = "none"` under the same current configuration:
 
-- root Lumi and the DeepSeek worker currently resolve to the **same
-  base-instruction bytes**, but by different lifetimes: root retains its
-  session-resolved base, while role reload reconstructs the child config and
-  rereads the configured `model_instructions_file`;
-- the DeepSeek role supplies no separate base prompt. It replaces the child
-  `developer_instructions` slot with its bounded-worker policy, while role
-  reload causes base instructions to be resolved again from current layers;
+- root Lumi and the DeepSeek worker resolve **different, independently owned
+  base instructions**: root uses `lumi.md`, while role reload reconstructs the
+  child config and reads `deepseek-worker.md` relative to the role file;
+- the DeepSeek role intentionally supplies no `developer_instructions`; its
+  stable identity, authority, working rules, and handoff contract all live in
+  the complete role-local Worker Base;
 - root Lumi receives the downstream branch's **root** MultiAgentV2 usage hint;
-- a thread-spawned DeepSeek worker receives the downstream branch's
-  **subagent** MultiAgentV2 usage hint;
+- the DeepSeek role suppresses the generic **subagent** usage hint, the
+  multi-agent mode overlay, and model-owned collaboration-mode instructions;
 - both see the same currently visible skill catalog, although the model-derived
   catalog budgets differ; and
 - the initial DeepSeek task is a plaintext inter-agent message converted to a
@@ -57,10 +57,11 @@ installed values relevant to this layout are:
 | Provider | root configured provider | `deepseek` |
 | Reasoning effort | `medium` | `max` |
 | Model context window | 272,000 catalog tokens | 1,000,000 role/catalog tokens |
-| Base-instruction source | `$CODEX_HOME/lumi.md` | reread from `$CODEX_HOME/lumi.md` during role reload; equal while the configured bytes remain unchanged |
-| Developer instructions | client/config value, if any | role-local bounded-worker policy |
-| Multi-agent guide | root usage hint | subagent usage hint |
-| Active multi-agent mode overlay | absent: configured custom text is empty | absent for the same reason |
+| Base-instruction source | `$CODEX_HOME/lumi.md` | role-relative `$CODEX_HOME/agents/deepseek-worker.md` |
+| Developer instructions | client/config value, if any | none from the role; parent live developer override is not preserved by named-role reload |
+| Multi-agent guide | root usage hint | absent: role-local `subagent_usage_hint_text = ""` |
+| Active multi-agent mode overlay | absent: configured custom text is empty | absent: role-local custom text is empty |
+| Model-owned collaboration mode | enabled when selected catalog supplies one | disabled by the role |
 | Skills catalog | current 23 visible entries | the same 23 visible entries |
 
 ## Live-process drift observed during the investigation
@@ -111,9 +112,11 @@ hygiene.
 ## Base-instruction resolution
 
 The installed configuration selects `lumi.md` with
-`model_instructions_file`. `Config::load_config_with_layer_stack` reads it into
-`Config.base_instructions` in `core/src/config/mod.rs`. Session startup resolves
-base instructions in this order in `core/src/session/mod.rs`:
+`model_instructions_file`. Each worker role overrides that setting with a path
+relative to its own role file. `Config::load_config_with_layer_stack` reads the
+selected file into `Config.base_instructions` in `core/src/config/mod.rs`.
+Session startup resolves base instructions in this order in
+`core/src/session/mod.rs`:
 
 1. `config.base_instructions`;
 2. persisted rollout/session base instructions;
@@ -123,10 +126,16 @@ base instructions in this order in `core/src/session/mod.rs`:
 `core/src/tools/handlers/multi_agents_common.rs` first pins the live parent's
 resolved `BaseInstructions` into the prospective child config. Applying the
 role reconstructs `Config` from the layered TOML and does not preserve that
-runtime-only override; the loader then re-reads the still-configured
-`model_instructions_file`. In the current deployment both routes resolve to the
-same installed `lumi.md` bytes. The result is exact equality, but it depends on
-the role retaining that config layer rather than on DeepSeek's model metadata.
+runtime-only override; the loader then reads the role-local
+`model_instructions_file`. The resulting child base is therefore the complete
+`deepseek-worker.md`, not the parent's `lumi.md` and not a developer-layer delta.
+
+Auto-discovered standalone roles historically required nonblank
+`developer_instructions` even when they provided a complete
+`model_instructions_file`. This downstream branch accepts either field for a
+standalone role, while still rejecting a role with neither and rejecting an
+explicitly blank developer value. Focused tests cover discovery and
+role-relative Base loading.
 
 The current DeepSeek catalog deliberately has `model_messages: null`. On a
 fresh child there is also no previous model identity, so
@@ -147,10 +156,11 @@ assembled from constants in `core/src/config/mod.rs`:
 - the model/fork override suffix when model overrides are exposed.
 
 The current personal configuration changes the namespace to
-`lumi_collaboration`, sets the maximum concurrency to nine, and sets
-`multi_agent_mode_hint_text = ""`. It does not override either usage-hint
-body, so root and child receive the **defaults compiled into this downstream
-branch**, not the corresponding upstream release text.
+`lumi_collaboration`, sets the maximum concurrency to nine, and sets the root
+`multi_agent_mode_hint_text = ""`. Each worker role additionally sets both
+`subagent_usage_hint_text = ""` and `multi_agent_mode_hint_text = ""`, so a
+fresh named worker receives neither compiled default child prose nor a mode
+overlay.
 
 `session/multi_agents.rs::configured_usage_hint_text_for_source` chooses the
 variant:
@@ -164,12 +174,11 @@ variant:
 empty multi-agent mode is intentionally rendered as no message, so there is no
 later explicit-request-only or proactive-mode overlay in the current setup.
 
-### Known policy collision
+### Resolved policy collision
 
-The current `deepseek_worker` role and `lumi.md` both define small workers as
-leaf agents that must not spawn or coordinate other agents. The current
-downstream **subagent usage hint**, however, still says that a subagent can
-spawn and manage further subagents.
+The earlier `deepseek_worker` role and `lumi.md` both defined small workers as
+leaf agents, while the downstream **subagent usage hint** said that a subagent
+could spawn and manage further subagents.
 
 These are not merely comments in different subsystems. The role policy enters
 the aggregate developer context and the usage hint is emitted later as a
@@ -181,9 +190,20 @@ capabilities the child does not receive. Its shared example also names
 `functions.collaboration.spawn_agent` while the deployment namespace is
 `lumi_collaboration`.
 
-The role's leaf policy agrees with the actual tool surface; the later usage
-hint does not. This should be resolved deliberately in the subagent usage-hint
-design rather than assumed away.
+The worker roles now suppress that later generic hint and keep the leaf
+contract in their own complete Bases. They also disable model-owned
+collaboration-mode instructions so a remote catalog cannot silently reintroduce
+a generic collaboration prompt. The DeepSeek catalog still withholds
+collaboration tools, matching the worker contract.
+
+The bundled upstream model Bases also encourage tool preambles and periodic
+progress updates. A valid role-local `model_instructions_file` replaces those
+bytes rather than appending to them. The worker Bases remove routine preambles
+and periodic-update pressure while preserving commentary for material
+discoveries, blockers, requested observations, and meaningful state changes.
+Core does not synthesize or require commentary before tool calls; any remaining
+commentary is optional model behavior or originates in another injected
+configurable fragment.
 
 ## Context as a physical request layout
 
@@ -248,8 +268,8 @@ occupy an item. `Session::build_initial_context_with_world_state` in
   +------------------------------------------------------------+
   | MODEL        deepseek-v4-flash                             |
   | PROVIDER     deepseek                                      |
-  | instructions exact bytes reread from the currently         |
-  |              configured $CODEX_HOME/lumi.md                |
+  | instructions exact bytes read from role-relative           |
+  |              $CODEX_HOME/agents/deepseek-worker.md         |
   | tools        top-level Responses tool schemas              |
   |              (no collaboration tools in current catalog)  |
   +------------------------------------------------------------+
@@ -257,18 +277,18 @@ occupy an item. `Session::build_initial_context_with_world_state` in
            INPUT VECTOR                         low -> high
   0x0000  +----------------------------------------------------+
           | developer: aggregate initial context               |
-          | DeepSeek role bounded-worker instructions FIRST    |
           | thread/turn extension contributions                |
           | <skills_instructions> catalogs                     |
           | permissions instructions                           |
           | apps guide when an accessible enabled app exists   |
           | optional extension state such as git attribution   |
+          | no role developer-instruction block                |
           | no model-owned collaboration-mode fragment         |
           | no generic plugins guide with current flags        |
           | replaces root Desktop <app-context>/developer slot |
   0x1000  +----------------------------------------------------+
           | developer: standalone SUBAGENT MultiAgentV2 hint   |
-          | child + shared + wait_agent + 9 slots + fork suffix|
+          | ABSENT because role-local custom text is empty     |
   0x2000  +----------------------------------------------------+
           | developer: active multi-agent mode                 |
           | ABSENT because custom mode text is empty           |
@@ -291,9 +311,10 @@ an all-plaintext agent message to a normal `user` message whenever the child
 provider is not OpenAI. Its position is unchanged by that conversion.
 
 The Desktop `<app-context>` is supplied through the root thread's external
-`developer_instructions`. Applying `deepseek_worker` replaces that slot with
-the role-local bounded-worker policy, so the fresh worker does not also receive
-the root Desktop app-context block.
+`developer_instructions`. Named-role reload does not preserve that live parent
+override when the role supplies no developer instructions, so the fresh worker
+does not receive the root Desktop app-context block. Its stable worker policy
+is already complete in the role-local Base.
 
 ## Skills: same catalog, one important trigger difference
 
@@ -365,12 +386,13 @@ and retain the parent-derived base/history path.
 
 1. Resolve the root `model_instructions_file` and compare the installed bytes
    with their durable personal-environment source.
-2. Inspect role-local `model`, provider, catalog, context-window, developer,
-   skills, and plugin overrides.
+2. Inspect role-local `model`, provider, catalog, context-window, Base file,
+   instruction-inclusion flags, skills, and plugin overrides.
 3. Resolve `use_responses_lite` and the apps/plugins/skills flags from the
    selected per-session model catalog.
 4. Re-render root and subagent V2 hints using the configured concurrency and
-   override fields; do not compare against upstream prose by memory.
+   override fields; verify that worker-local empty overrides suppress both
+   child hint regions rather than comparing against upstream prose by memory.
 5. Check whether a non-empty active multi-agent mode adds a later developer
    override.
 6. Compare the rendered skills catalog against each model's metadata budget.

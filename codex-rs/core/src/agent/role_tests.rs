@@ -200,6 +200,33 @@ async fn apply_role_preserves_unspecified_keys() {
 }
 
 #[tokio::test]
+async fn apply_role_resolves_model_instructions_file_relative_to_role_file() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    let instructions = "You are an independent worker.";
+    fs::write(home.path().join("worker.md"), instructions).expect("write worker base instructions");
+    let role_path = write_role_config(
+        &home,
+        "base-instructions-role.toml",
+        "model_instructions_file = \"worker.md\"",
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(config.base_instructions.as_deref(), Some(instructions));
+}
+
+#[tokio::test]
 async fn apply_role_reports_explicit_service_tier() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let role_path = write_role_config(

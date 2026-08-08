@@ -8048,11 +8048,71 @@ model = "gpt-5.2"
             .and_then(|role| role.description.as_deref()),
         Some("Review role")
     );
+    assert!(config.startup_warnings.iter().any(|warning| {
+        warning.contains("must define `developer_instructions` or `model_instructions_file`")
+    }));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn standalone_agent_role_file_allows_model_instructions_without_developer_instructions()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    let nested_cwd = repo_root.path().join("packages").join("app");
+    std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::create_dir_all(&nested_cwd)?;
+
+    let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        format!(
+            r#"[projects."{workspace_key}"]
+trust_level = "trusted"
+"#
+        ),
+    )
+    .await?;
+
+    let standalone_agents_dir = repo_root.path().join(".codex").join("agents");
+    tokio::fs::create_dir_all(&standalone_agents_dir).await?;
+    tokio::fs::write(
+        standalone_agents_dir.join("researcher.toml"),
+        r#"
+name = "researcher"
+description = "Role with independent base instructions"
+model_instructions_file = "researcher.md"
+model = "gpt-5.2"
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        standalone_agents_dir.join("researcher.md"),
+        "You are an independent research worker.\n",
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(nested_cwd),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    assert_eq!(
+        config
+            .agent_roles
+            .get("researcher")
+            .and_then(|role| role.description.as_deref()),
+        Some("Role with independent base instructions")
+    );
     assert!(
         config
             .startup_warnings
             .iter()
-            .any(|warning| warning.contains("must define `developer_instructions`"))
+            .all(|warning| !warning.contains("researcher.toml"))
     );
 
     Ok(())

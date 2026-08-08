@@ -258,9 +258,10 @@ pub(crate) fn parse_agent_role_file_contents(
         &format!("agent role file {}.description", role_file_label.display()),
         parsed.description.as_deref(),
     )?;
-    validate_agent_role_file_developer_instructions(
+    validate_agent_role_file_instructions(
         role_file_label,
         parsed.config.developer_instructions.as_deref(),
+        parsed.config.model_instructions_file.as_ref(),
         role_name_hint.is_none(),
     )?;
 
@@ -355,9 +356,10 @@ fn validate_required_agent_role_description(
     }
 }
 
-fn validate_agent_role_file_developer_instructions(
+fn validate_agent_role_file_instructions(
     role_file_label: &Path,
     developer_instructions: Option<&str>,
+    model_instructions_file: Option<&AbsolutePathBuf>,
     require_present: bool,
 ) -> std::io::Result<()> {
     match developer_instructions.map(str::trim) {
@@ -369,10 +371,10 @@ fn validate_agent_role_file_developer_instructions(
             ),
         )),
         Some(_) => Ok(()),
-        None if require_present => Err(std::io::Error::new(
+        None if require_present && model_instructions_file.is_none() => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!(
-                "agent role file at {} must define `developer_instructions`",
+                "agent role file at {} must define `developer_instructions` or `model_instructions_file`",
                 role_file_label.display()
             ),
         )),
