@@ -774,10 +774,8 @@ async fn get_model_info_uses_custom_catalog() {
 #[tokio::test]
 async fn get_model_info_uses_per_call_catalog_for_custom_model() {
     let codex_home = tempdir().expect("temp dir");
-    let manager = openai_manager_for_tests(
-        codex_home.path().to_path_buf(),
-        TestModelsEndpoint::new(Vec::new()),
-    );
+    let endpoint = TestModelsEndpoint::new(Vec::new());
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
     assert!(
         !manager
             .get_remote_models()
@@ -797,6 +795,11 @@ async fn get_model_info_uses_per_call_catalog_for_custom_model() {
     assert_eq!(model_info.max_context_window, Some(1_000_000));
     assert_eq!(model_info.effective_context_window_percent, 100);
     assert!(!model_info.used_fallback_model_metadata);
+    assert_eq!(
+        endpoint.fetch_count(),
+        0,
+        "an authoritative per-call catalog should bypass the shared catalog"
+    );
 }
 
 #[tokio::test]
