@@ -184,6 +184,10 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
 
     // todo(aibrahim): look if we can tighten it to pub(crate)
     /// Look up model metadata, applying remote overrides and config adjustments.
+    ///
+    /// When the call's [`ModelsManagerConfig`] carries a `model_catalog`, its models are the
+    /// authoritative lookup candidates for this call/session (for example a role-local catalog).
+    /// Otherwise the manager's shared/global remote candidates are used.
     fn get_model_info<'a>(
         &'a self,
         model: &'a str,
@@ -192,7 +196,12 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         Box::pin(
             async move {
                 let remote_models = self.get_remote_models().await;
-                construct_model_info_from_candidates(model, &remote_models, config)
+                let candidates: &[ModelInfo] = config
+                    .model_catalog
+                    .as_ref()
+                    .map(|catalog| catalog.models.as_slice())
+                    .unwrap_or(&remote_models);
+                construct_model_info_from_candidates(model, candidates, config)
             }
             .instrument(tracing::info_span!("get_model_info", model = model)),
         )

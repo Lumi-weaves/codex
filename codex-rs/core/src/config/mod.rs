@@ -980,7 +980,8 @@ pub struct Config {
     pub model_reasoning_summary: Option<ReasoningSummary>,
 
     /// Optional full model catalog loaded from `model_catalog_json`.
-    /// When set, this replaces the bundled catalog for the current process.
+    /// When set, its models are the authoritative lookup candidates for
+    /// `get_model_info`, replacing the shared catalog for that call/session.
     pub model_catalog: Option<ModelsResponse>,
 
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).

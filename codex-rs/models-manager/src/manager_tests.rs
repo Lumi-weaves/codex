@@ -75,6 +75,27 @@ fn remote_model_with_visibility(
         .expect("valid model")
 }
 
+fn deepseek_v4_flash_model() -> ModelInfo {
+    let mut model = remote_model(
+        "deepseek-v4-flash",
+        "DeepSeek V4 Flash",
+        /*priority*/ 0,
+    );
+    model.context_window = Some(1_000_000);
+    model.max_context_window = Some(1_000_000);
+    model.effective_context_window_percent = 100;
+    model
+}
+
+fn config_with_deepseek_catalog() -> ModelsManagerConfig {
+    ModelsManagerConfig {
+        model_catalog: Some(ModelsResponse {
+            models: vec![deepseek_v4_flash_model()],
+        }),
+        ..ModelsManagerConfig::default()
+    }
+}
+
 fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
     for model in expected {
         assert!(
@@ -747,6 +768,78 @@ async fn get_model_info_uses_custom_catalog() {
     assert_eq!(model_info.context_window, Some(272_000));
     assert!(model_info.supports_image_detail_original);
     assert!(!model_info.supports_parallel_tool_calls);
+    assert!(!model_info.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn get_model_info_uses_per_call_catalog_for_custom_model() {
+    let codex_home = tempdir().expect("temp dir");
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+    assert!(
+        !manager
+            .get_remote_models()
+            .await
+            .iter()
+            .any(|model| model.slug == "deepseek-v4-flash"),
+        "shared catalog should not already contain the custom model"
+    );
+
+    let model_info = manager
+        .get_model_info("deepseek-v4-flash", &config_with_deepseek_catalog())
+        .await;
+
+    assert_eq!(model_info.slug, "deepseek-v4-flash");
+    assert_eq!(model_info.display_name, "DeepSeek V4 Flash");
+    assert_eq!(model_info.context_window, Some(1_000_000));
+    assert_eq!(model_info.max_context_window, Some(1_000_000));
+    assert_eq!(model_info.effective_context_window_percent, 100);
+    assert!(!model_info.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn get_model_info_without_per_call_catalog_keeps_shared_behavior() {
+    let codex_home = tempdir().expect("temp dir");
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+    let shared_slug = manager
+        .get_remote_models()
+        .await
+        .first()
+        .expect("bundled models should include at least one model")
+        .slug
+        .clone();
+    let config = ModelsManagerConfig::default();
+
+    let unknown = manager.get_model_info("deepseek-v4-flash", &config).await;
+    assert!(unknown.used_fallback_model_metadata);
+    assert_eq!(unknown.context_window, Some(272_000));
+    assert_eq!(unknown.max_context_window, Some(272_000));
+
+    let known = manager.get_model_info(&shared_slug, &config).await;
+    assert_eq!(known.slug, shared_slug);
+    assert!(!known.used_fallback_model_metadata);
+}
+
+#[tokio::test]
+async fn get_model_info_clamps_explicit_context_window_to_custom_catalog_max() {
+    let codex_home = tempdir().expect("temp dir");
+    let manager = openai_manager_for_tests(
+        codex_home.path().to_path_buf(),
+        TestModelsEndpoint::new(Vec::new()),
+    );
+    let mut config = config_with_deepseek_catalog();
+    config.model_context_window = Some(1_500_000);
+
+    let model_info = manager.get_model_info("deepseek-v4-flash", &config).await;
+
+    assert_eq!(model_info.slug, "deepseek-v4-flash");
+    assert_eq!(model_info.context_window, Some(1_000_000));
+    assert_eq!(model_info.max_context_window, Some(1_000_000));
     assert!(!model_info.used_fallback_model_metadata);
 }
 
