@@ -8,6 +8,7 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::AgentPath;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::PermissionProfile;
@@ -17,6 +18,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HookEventName;
 use codex_protocol::protocol::HookRunStatus;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::Op;
@@ -694,6 +696,115 @@ async fn summarize_context_three_requests_and_instructions() {
         saw_compacted_summary,
         "expected a Compacted entry containing the summarizer output"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn local_compaction_retains_agent_input_but_not_completion() {
+    skip_if_no_network!();
+
+    const RETAINED: &str = "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\nKEEP_AFTER_COMPACT";
+    const COMPLETION: &str = "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nDROP_AFTER_COMPACT";
+
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m1", FIRST_REPLY),
+                ev_completed("r1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("m2", SUMMARY_TEXT),
+                ev_completed("r2"),
+            ]),
+            sse(vec![ev_completed("r3")]),
+        ],
+    )
+    .await;
+
+    let model_provider = non_openai_model_provider(&server);
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            set_test_compact_prompt(config);
+            config.model_auto_compact_token_limit = Some(200_000);
+        })
+        .build(&server)
+        .await
+        .unwrap();
+    let codex = test.codex;
+    let worker_path = AgentPath::root().join("worker").expect("valid worker path");
+
+    let communications = [
+        InterAgentCommunication::new(
+            AgentPath::root(),
+            worker_path.clone(),
+            Vec::new(),
+            RETAINED.to_string(),
+            /*trigger_turn*/ false,
+        ),
+        InterAgentCommunication::new(
+            worker_path,
+            AgentPath::root(),
+            Vec::new(),
+            COMPLETION.to_string(),
+            /*trigger_turn*/ false,
+        ),
+    ];
+    // Queue both messages before a regular turn so they are committed to history before compact.
+    for communication in communications {
+        codex
+            .submit(Op::InterAgentCommunication { communication })
+            .await
+            .unwrap();
+    }
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello world".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.unwrap();
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: THIRD_USER_MSG.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 3);
+    let compact_body = requests[1].body_json().to_string();
+    let follow_up_body = requests[2].body_json().to_string();
+
+    assert!(body_contains_text(&compact_body, RETAINED));
+    assert!(body_contains_text(&compact_body, COMPLETION));
+    assert!(!SUMMARY_TEXT.contains("KEEP_AFTER_COMPACT"));
+    assert!(body_contains_text(&follow_up_body, RETAINED));
+    assert!(!body_contains_text(&follow_up_body, COMPLETION));
+    assert!(body_contains_text(
+        &follow_up_body,
+        &summary_with_prefix(SUMMARY_TEXT)
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

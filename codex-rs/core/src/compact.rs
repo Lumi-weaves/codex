@@ -38,6 +38,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::plaintext_agent_message_content;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -520,11 +521,26 @@ pub(crate) struct CompactedUserMessage {
 pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUserMessage> {
     items
         .iter()
-        .filter_map(|item| match crate::event_mapping::parse_turn_item(item) {
-            Some(TurnItem::UserMessage(user)) => {
-                if is_summary_message(&user.message()) {
-                    None
-                } else {
+        .filter_map(|item| {
+            if let ResponseItem::AgentMessage {
+                content,
+                internal_chat_message_metadata_passthrough,
+                ..
+            } = item
+            {
+                if is_agent_completion_message(content) {
+                    return None;
+                }
+                let text = plaintext_agent_message_content(content)?;
+                return Some(CompactedUserMessage {
+                    message: text,
+                    internal_chat_message_metadata_passthrough:
+                        internal_chat_message_metadata_passthrough.clone(),
+                });
+            }
+
+            match crate::event_mapping::parse_turn_item(item) {
+                Some(TurnItem::UserMessage(user)) if !is_summary_message(&user.message()) => {
                     Some(CompactedUserMessage {
                         message: user.message(),
                         internal_chat_message_metadata_passthrough: match item {
@@ -536,14 +552,22 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<CompactedUser
                         },
                     })
                 }
+                _ => None,
             }
-            _ => None,
         })
         .collect()
 }
 
 pub(crate) fn is_summary_message(message: &str) -> bool {
     message.starts_with(format!("{SUMMARY_PREFIX}\n").as_str())
+}
+
+fn is_agent_completion_message(content: &[AgentMessageInputContent]) -> bool {
+    matches!(
+        content.first(),
+        Some(AgentMessageInputContent::InputText { text })
+            if text.starts_with("Message Type: FINAL_ANSWER\n")
+    )
 }
 
 /// Inserts canonical initial context into compacted replacement history at the
@@ -564,11 +588,7 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
     let mut last_real_user_index = None;
     for (i, item) in compacted_history.iter().enumerate().rev() {
         if let ResponseItem::AgentMessage { content, .. } = item
-            && !matches!(
-                content.first(),
-                Some(AgentMessageInputContent::InputText { text })
-                    if text.starts_with("Message Type: FINAL_ANSWER\n")
-            )
+            && !is_agent_completion_message(content)
         {
             last_real_user_index = Some(i);
             break;

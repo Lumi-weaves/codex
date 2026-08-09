@@ -19,6 +19,12 @@ In the codex-rs folder where the rust code lives:
   - The parameter name in the comment must exactly match the callee signature.
   - You can run `just argument-comment-lint` to run the lint check locally. This is powered by Bazel, so running it the first time can be slow if Bazel is not warmed up, though incremental invocations should take <15s. Most of the time, it is best to update the PR and let CI take responsibility for checking this (or run it asynchronously in the background after submitting the PR). Note CI checks all three platforms, which the local run does not.
 - When possible, make `match` statements exhaustive and avoid wildcard arms.
+- When trialing a locally built Codex binary or installation, never install into or mutate the
+  active developer environment (including its `CODEX_HOME`, installed binary, or running
+  app-server). Create a fresh isolated `CODEX_HOME` and install prefix instead. Reuse existing
+  authentication only as the minimum read-only input needed by the trial, without reading,
+  printing, copying into tracked files, or otherwise exposing secret contents. Verify the
+  isolated paths before launch, and keep Desktop/app-server replacement out of a CLI trial.
 - Newly added traits should include doc comments that explain their role and how implementations are expected to use them.
 - Discourage both `#[async_trait]` and `#[allow(async_fn_in_trait)]` in Rust traits.
   - Prefer native RPITIT trait methods with explicit `Send` bounds on the returned future, as in `3c7f013f9735` / `#16630`.
