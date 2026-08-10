@@ -28,7 +28,25 @@ struct WriteStdinArgs {
     max_output_tokens: Option<usize>,
 }
 
-pub struct WriteStdinHandler;
+pub struct WriteStdinHandler {
+    include_lifecycle_guidance: bool,
+}
+
+impl Default for WriteStdinHandler {
+    fn default() -> Self {
+        Self {
+            include_lifecycle_guidance: true,
+        }
+    }
+}
+
+impl WriteStdinHandler {
+    pub(crate) fn new(include_lifecycle_guidance: bool) -> Self {
+        Self {
+            include_lifecycle_guidance,
+        }
+    }
+}
 
 impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
     fn tool_name(&self) -> ToolName {
@@ -36,7 +54,7 @@ impl ToolExecutor<ToolInvocation> for WriteStdinHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_write_stdin_tool()
+        create_write_stdin_tool(self.include_lifecycle_guidance)
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
