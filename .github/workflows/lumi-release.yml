@@ -175,8 +175,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Immutable public upstream input (openai/codex release asset), read
+          # only: the fork has no codex-zsh release of its own, and this
+          # workflow never publishes to that upstream.
           curl -fsSL \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
             -o "${RUNNER_TEMP}/codex-zsh"
 
       - name: Build Codex package archive
@@ -264,48 +267,75 @@ jobs:
           cp scripts/install/lumi-install.sh staging/lumi-install.sh
           sh -n staging/lumi-install.sh
 
-          # 4. Extract and validate the canonical package.
-          extract_dir="${RUNNER_TEMP}/lumi-canary-package"
-          rm -rf "$extract_dir"
-          mkdir -p "$extract_dir"
-          tar -xzf "$archive" -C "$extract_dir"
+          # 4. Validate the canonical archive before extraction. Reject
+          #    absolute members, empty names, and any `..` component — the
+          #    same checks lumi-install.sh enforces on every managed archive.
+          if ! tar -tzf "$archive" 2>/dev/null | awk '
+            {
+              name = $0
+              if (name == "" || substr(name, 1, 1) == "/") { bad = 1 }
+              n = split(name, parts, "/")
+              for (i = 1; i <= n; i++) {
+                if (parts[i] == "..") { bad = 1 }
+              }
+              if (bad) exit 1
+            }
+            END { if (bad) exit 1 }
+          '; then
+            echo "Package archive contains unsafe member names; refusing to extract" >&2
+            exit 1
+          fi
 
-          # Reject absolute members, `..` components, and special files — the
-          # same constraints lumi-install.sh enforces on every managed archive.
+          #    Reject special entries: only regular files and directories may
+          #    be extracted.
           if ! tar -tvzf "$archive" 2>/dev/null | awk '
             {
               type = substr($1, 1, 1)
               if (type != "-" && type != "d") { exit 1 }
             }
           '; then
-            echo "Package archive contains unsafe entry types" >&2
+            echo "Package archive contains unsafe entry types; refusing to extract" >&2
             exit 1
           fi
 
-          # Canonical metadata, using the same grep checks as
-          # lumi-install.sh's validate_package_metadata plus the
-          # layoutVersion written by scripts/codex_package/layout.py.
+          # 5. Extract into a fresh directory without restoring ownership or
+          #    permissions; no unsafe fallback.
+          extract_dir="${RUNNER_TEMP}/lumi-canary-package"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          tar -xzf "$archive" -C "$extract_dir" --no-same-owner --no-same-permissions
+
+          # 6. Canonical metadata: the parsed JSON object must equal the
+          #    eight-field schema exactly, so missing, extra, or regex-decoy
+          #    fields all fail.
           pkgjson="${extract_dir}/codex-package.json"
           [[ -f "$pkgjson" && ! -L "$pkgjson" ]] \
             || { echo "Missing package metadata: codex-package.json"; exit 1; }
-          grep -q '"layoutVersion"[[:space:]]*:[[:space:]]*1' "$pkgjson" \
-            || { echo "Invalid package metadata field: layoutVersion"; exit 1; }
-          grep -q '"distribution"[[:space:]]*:[[:space:]]*"lumi"' "$pkgjson" \
-            || { echo "Invalid package metadata field: distribution"; exit 1; }
-          grep -q "\"version\"[[:space:]]*:[[:space:]]*\"${version}\"" "$pkgjson" \
-            || { echo "Invalid package metadata field: version"; exit 1; }
-          grep -q "\"target\"[[:space:]]*:[[:space:]]*\"${target}\"" "$pkgjson" \
-            || { echo "Invalid package metadata field: target"; exit 1; }
-          grep -q '"variant"[[:space:]]*:[[:space:]]*"codex"' "$pkgjson" \
-            || { echo "Invalid package metadata field: variant"; exit 1; }
-          grep -q '"entrypoint"[[:space:]]*:[[:space:]]*"bin/codex"' "$pkgjson" \
-            || { echo "Invalid package metadata field: entrypoint"; exit 1; }
-          grep -q '"resourcesDir"[[:space:]]*:[[:space:]]*"codex-resources"' "$pkgjson" \
-            || { echo "Invalid package metadata field: resourcesDir"; exit 1; }
-          grep -q '"pathDir"[[:space:]]*:[[:space:]]*"codex-path"' "$pkgjson" \
-            || { echo "Invalid package metadata field: pathDir"; exit 1; }
+          python3 - "${pkgjson}" "${version}" "${target}" <<'PY'
+          import json
+          import pathlib
+          import sys
 
-          # Required regular executables: regular files, not symlinks.
+          pkgjson, expected_version, expected_target = sys.argv[1:]
+          metadata = json.loads(pathlib.Path(pkgjson).read_text(encoding="utf-8"))
+          expected = {
+              "layoutVersion": 1,
+              "distribution": "lumi",
+              "version": expected_version,
+              "target": expected_target,
+              "variant": "codex",
+              "entrypoint": "bin/codex",
+              "resourcesDir": "codex-resources",
+              "pathDir": "codex-path",
+          }
+          if metadata != expected:
+              raise SystemExit(
+                  "Invalid package metadata: expected the canonical eight-field "
+                  f"schema {expected!r}, got {metadata!r}"
+              )
+          PY
+
+          # 7. Required regular executables: regular files, not symlinks.
           for relative in \
             "bin/codex" \
             "bin/codex-code-mode-host" \
@@ -317,7 +347,7 @@ jobs:
               || { echo "Missing or invalid package file: ${relative}"; exit 1; }
           done
 
-          # Exact binary version must equal the tag version.
+          # 8. Exact binary version must equal the tag version.
           binary_version="$( "${extract_dir}/bin/codex" --version 2>/dev/null \
             | sed -n 's/.* \([0-9][0-9A-Za-z.+-]*\)$/\1/p' \
             | head -n 1 )"
@@ -327,7 +357,7 @@ jobs:
             || { echo "Binary version ${binary_version} ≠ tag version ${version}"; exit 1; }
           echo "✅  Package metadata and binary version agree (${version})"
 
-          # 5. Staging must contain exactly the three intended release files.
+          # 9. Staging must contain exactly the three intended release files.
           count="$(find staging -maxdepth 1 -type f | wc -l)"
           [[ "$count" -eq 3 ]] \
             || { echo "Expected exactly 3 files in staging, found ${count}"; exit 1; }
@@ -345,6 +375,8 @@ jobs:
 
       - name: Fail if the release already exists
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
