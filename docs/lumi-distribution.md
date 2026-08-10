@@ -7,9 +7,12 @@ and what must be proven before a canary is promoted.
 
 ## Current maturity
 
-The delivery workflow is implemented on `codex/lumi-public-delivery`, but no
-Lumi release tag has been published yet. The first tag run is therefore a build
-and packaging canary, not a stable release.
+The delivery workflow is implemented on `codex/lumi-public-delivery`.
+`rust-v0.147.0-lumi.1` passed its tag gate but stopped before the release
+mutation point: paid macOS larger runners could not start, and the hosted x64
+Linux runner could not link the ARM musl package with its host `musl-gcc`.
+It published no release assets. The next successful tag is therefore still a
+build and packaging canary, not a stable release.
 
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Windows Authenticode signing,

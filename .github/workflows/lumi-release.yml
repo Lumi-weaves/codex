@@ -11,12 +11,13 @@
 # point). The upstream rust-release workflow excludes these tags so they never
 # start the official release graph.
 #
-# Runners are GitHub-hosted only (macos-15-xlarge for the Apple Darwin
-# targets, ubuntu-24.04 with the canonical Zig/musl cross toolchain for the
-# Linux musl targets, windows-2025 with the canonical setup-msvc-env MSVC
-# environment for the Windows MSVC targets; aarch64-pc-windows-msvc is
-# cross-compiled on the hosted x64 runner exactly as in the upstream release
-# flow). OpenAI's private self-hosted runners, signing environments,
+# Runners are standard GitHub-hosted only (macos-15 for the Apple Darwin
+# targets, architecture-matched ubuntu-24.04 runners with the canonical
+# Zig/musl toolchain for the Linux musl targets, and windows-2025 with the
+# canonical setup-msvc-env MSVC environment for the Windows MSVC targets;
+# aarch64-pc-windows-msvc is cross-compiled on the hosted x64 runner exactly
+# as in the upstream release flow). OpenAI's private self-hosted runners,
+# billable GitHub larger runners, signing environments,
 # credentials, and secrets are never used, and no macOS, Windows, or Linux
 # signing is claimed anywhere: every artifact below is an UNSIGNED canary.
 # The fork publishes only to its own GitHub Release for this tag (fork-scoped
@@ -106,25 +107,24 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Darwin: GitHub-hosted macOS runners only. Both Apple targets
-          # build on macos-15-xlarge (arm64 host); x86_64-apple-darwin is
-          # cross-compiled through the rustup target, exactly as in the
-          # canonical release flow.
+          # Apple Darwin: the standard public-repository macos-15 runner is an
+          # arm64 host. aarch64 builds natively; x86_64-apple-darwin is
+          # cross-compiled through the rustup target. Avoid macos-15-xlarge:
+          # larger runners are billable even for public repositories.
           - target: aarch64-apple-darwin
-            runner: macos-15-xlarge
+            runner: macos-15
             binaries: "codex codex-code-mode-host"
           - target: x86_64-apple-darwin
-            runner: macos-15-xlarge
+            runner: macos-15
             binaries: "codex codex-code-mode-host"
-          # Linux musl: GitHub-hosted x86_64 runners with the canonical
-          # Zig-based musl cross toolchain (install-musl-build-tools.sh).
-          # x86_64-unknown-linux-musl builds natively; aarch64-unknown-linux-musl
-          # is cross-compiled on the same hosted runner.
+          # Linux musl: architecture-matched standard hosted runners with the
+          # canonical Zig/musl toolchain (install-musl-build-tools.sh). Keep
+          # aarch64 native: musl-gcc is host-architecture-specific.
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-24.04
             binaries: "codex codex-code-mode-host"
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04
+            runner: ubuntu-24.04-arm
             binaries: "codex codex-code-mode-host"
           # Windows MSVC: GitHub-hosted windows-2025 only. x86_64 builds
           # natively; aarch64-pc-windows-msvc is cross-compiled on the hosted
