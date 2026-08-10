@@ -895,11 +895,46 @@ validate_package_metadata() {
   expected_target="$3"
 
   [ -f "$pkgjson" ] && [ ! -L "$pkgjson" ] || return 1
-  grep -q '"distribution"[[:space:]]*:[[:space:]]*"lumi"' "$pkgjson" || return 1
-  grep -q '"variant"[[:space:]]*:[[:space:]]*"codex"' "$pkgjson" || return 1
-  grep -q '"entrypoint"[[:space:]]*:[[:space:]]*"bin/codex"' "$pkgjson" || return 1
-  grep -q "\"version\"[[:space:]]*:[[:space:]]*\"$expected_version\"" "$pkgjson" || return 1
-  grep -q "\"target\"[[:space:]]*:[[:space:]]*\"$expected_target\"" "$pkgjson" || return 1
+  # Strict parser for the canonical pretty-printed top-level JSON.  Only the
+  # five fields are allowed, each exactly once, on lines of the exact form
+  #   "key": "value"
+  # Values are compared as exact strings (no regex interpolation), and any
+  # duplicate, unknown, decoy, or malformed line rejects the package.
+  awk -v expected_version="$expected_version" -v expected_target="$expected_target" '
+    BEGIN {
+      bad = 0
+      nfields = 0
+    }
+    {
+      line = $0
+      sub(/[[:space:]]*$/, "", line)
+      sub(/,$/, "", line)
+      sub(/[[:space:]]*$/, "", line)
+      if (line == "{" || line == "}" || line == "") next
+
+      n = split(line, parts, "\"")
+      if (n != 5) { bad = 1; next }
+      if (parts[1] !~ /^[[:space:]]*$/) { bad = 1; next }
+      if (parts[3] !~ /^[[:space:]]*:[[:space:]]*$/) { bad = 1; next }
+      if (parts[5] != "") { bad = 1; next }
+      key = parts[2]
+      val = parts[4]
+      if (key != "distribution" && key != "variant" && key != "entrypoint" &&
+          key != "version" && key != "target") { bad = 1; next }
+      if (seen[key]++) { bad = 1; next }
+      value[key] = val
+      nfields++
+    }
+    END {
+      if (bad || nfields != 5) exit 1
+      if (value["distribution"] != "lumi") exit 1
+      if (value["variant"] != "codex") exit 1
+      if (value["entrypoint"] != "bin/codex") exit 1
+      if (value["version"] != expected_version) exit 1
+      if (value["target"] != expected_target) exit 1
+      exit 0
+    }
+  ' "$pkgjson"
 }
 
 release_dir_is_complete() {
@@ -1017,7 +1052,8 @@ download_and_stage() {
   rm -rf "$stage"
   mkdir -p "$stage"
   if ! tar --no-same-owner --no-same-permissions -xzf "$tmp_dir/archive.tar.gz" -C "$stage" 2>/dev/null; then
-    tar -xzf "$tmp_dir/archive.tar.gz" -C "$stage"
+    rm -rf "$stage"
+    die "Package extraction with hardened tar options failed; aborting without switching (no fallback extraction)."
   fi
   [ -f "$stage/bin/codex" ] && chmod 0755 "$stage/bin/codex"
   [ -f "$stage/bin/codex-code-mode-host" ] && chmod 0755 "$stage/bin/codex-code-mode-host"
