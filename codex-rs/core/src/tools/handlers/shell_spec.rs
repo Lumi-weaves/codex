@@ -100,7 +100,7 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
             .to_string()
     };
     if include_lifecycle_guidance {
-        description.push_str(" A returned session ID means the process is still running and remains owned by the task. When you need its result now, call write_stdin with a realistic bounded wait; otherwise completion can wake a continuation. Use tty:true only for commands that may require interaction, and note that new unread TTY output may request attention.");
+        description.push_str(" A returned session ID means the process is still running and remains owned by the task. When you need its result now, call write_stdin with a realistic bounded wait; when automatic continuation is enabled, completion can wake a continuation later. Use tty:true only for commands that may require interaction, and note that new unread TTY output may request attention.");
     };
 
     ToolSpec::Function(ResponsesApiTool {

@@ -44,6 +44,7 @@ use crate::shell::ShellType;
 use crate::tools::network_approval::DeferredNetworkApproval;
 
 mod async_watcher;
+mod attention_watcher;
 mod errors;
 mod head_tail_buffer;
 mod process;

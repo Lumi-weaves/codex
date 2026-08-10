@@ -158,13 +158,20 @@ impl ThreadWatchManager {
         &self,
         thread_id: &str,
         _failed: bool,
-        live_background_terminal_count: usize,
+        awaited_background_terminal_count: usize,
     ) {
         self.update_runtime_for_thread(thread_id, move |runtime| {
             runtime.running = false;
             runtime.pending_permission_requests = 0;
             runtime.pending_user_input_requests = 0;
-            runtime.waiting_on_background_terminal = live_background_terminal_count > 0;
+            runtime.waiting_on_background_terminal = awaited_background_terminal_count > 0;
+        })
+        .await;
+    }
+
+    pub(crate) async fn note_background_terminal_count(&self, thread_id: &str, count: usize) {
+        self.update_runtime_for_thread(thread_id, move |runtime| {
+            runtime.waiting_on_background_terminal = count > 0;
         })
         .await;
     }
@@ -573,7 +580,7 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 0,
+                /*awaited_background_terminal_count*/ 0,
             )
             .await;
         assert_eq!(
@@ -713,14 +720,14 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 0,
+                /*awaited_background_terminal_count*/ 0,
             )
             .await;
         assert_eq!(manager.running_turn_count().await, 0);
     }
 
     #[tokio::test]
-    async fn turn_complete_with_live_background_terminal_stays_active() {
+    async fn turn_complete_with_awaited_background_terminal_stays_active() {
         let manager = ThreadWatchManager::new();
         manager.upsert_thread(INTERACTIVE_THREAD_ID).await;
 
@@ -729,7 +736,7 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 2,
+                /*awaited_background_terminal_count*/ 2,
             )
             .await;
 
@@ -754,11 +761,11 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 1,
+                /*awaited_background_terminal_count*/ 1,
             )
             .await;
 
-        // A new pending request arriving while the thread waits on a live
+        // A new pending request arriving while the thread waits on an awaited
         // background terminal combines both active flags.
         let permission_guard = manager
             .note_permission_requested(INTERACTIVE_THREAD_ID)
@@ -796,7 +803,7 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 1,
+                /*awaited_background_terminal_count*/ 1,
             )
             .await;
         assert_eq!(
@@ -824,9 +831,34 @@ mod tests {
             .note_turn_completed(
                 INTERACTIVE_THREAD_ID,
                 false,
-                /*live_background_terminal_count*/ 0,
+                /*awaited_background_terminal_count*/ 0,
             )
             .await;
+        assert_eq!(
+            manager
+                .loaded_status_for_thread(INTERACTIVE_THREAD_ID)
+                .await,
+            ThreadStatus::Idle,
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_terminal_cleanup_clears_waiting_flag_without_a_new_turn() {
+        let manager = ThreadWatchManager::new();
+        manager.upsert_thread(INTERACTIVE_THREAD_ID).await;
+        manager.note_turn_started(INTERACTIVE_THREAD_ID).await;
+        manager
+            .note_turn_completed(
+                INTERACTIVE_THREAD_ID,
+                false,
+                /*awaited_background_terminal_count*/ 1,
+            )
+            .await;
+
+        manager
+            .note_background_terminal_count(INTERACTIVE_THREAD_ID, 0)
+            .await;
+
         assert_eq!(
             manager
                 .loaded_status_for_thread(INTERACTIVE_THREAD_ID)

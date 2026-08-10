@@ -13,6 +13,7 @@ use codex_exec_server::WriteStatus;
 use pretty_assertions::assert_eq;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
@@ -162,6 +163,53 @@ async fn fail_and_terminate_preserves_failure_message() {
         process.failure_message(),
         Some("network denied".to_string())
     );
+}
+
+#[tokio::test]
+async fn output_attention_requires_a_drain_before_rearming() {
+    let process = remote_process(
+        WriteStatus::Accepted,
+        /*terminate_error*/ None,
+        codex_sandboxing::SandboxType::None,
+    )
+    .await;
+    let output = process.output_handles().clone();
+
+    {
+        let mut guard = output.output_buffer.lock().await;
+        guard.push_chunk(b"prompt one".to_vec());
+        output.produced_offset.store(10, Ordering::Release);
+    }
+    let first = process
+        .claim_output_attention(/*max_excerpt_bytes*/ 128)
+        .await
+        .expect("first unread batch should claim attention");
+    assert_eq!(
+        first,
+        super::process::OutputAttentionSnapshot {
+            observed_offset: 0,
+            produced_offset: 10,
+            total_output_bytes: 10,
+            omitted_output_bytes: 0,
+            output_excerpt: b"prompt one".to_vec(),
+        }
+    );
+    assert_eq!(process.claim_output_attention(128).await, None);
+
+    {
+        let mut guard = output.output_buffer.lock().await;
+        let _ = guard.drain();
+        output.observed_offset.store(10, Ordering::Release);
+        guard.push_chunk(b"prompt two".to_vec());
+        output.produced_offset.store(20, Ordering::Release);
+    }
+    let second = process
+        .claim_output_attention(/*max_excerpt_bytes*/ 128)
+        .await
+        .expect("new output after a drain should rearm attention");
+    assert_eq!(second.observed_offset, 10);
+    assert_eq!(second.produced_offset, 20);
+    assert_eq!(second.output_excerpt, b"prompt two".to_vec());
 }
 
 #[tokio::test]

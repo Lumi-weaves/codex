@@ -1877,9 +1877,13 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        self.send_event_raw(event).await;
-        self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
-            .await;
+        let suppress_parent_completion = self.send_event_raw(event).await;
+        self.maybe_notify_parent_of_terminal_turn(
+            turn_context,
+            &legacy_source,
+            suppress_parent_completion,
+        )
+        .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
             .await;
         self.maybe_clear_realtime_handoff_for_event(&legacy_source)
@@ -1903,6 +1907,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
+        suppress_parent_completion: bool,
     ) {
         if turn_context.multi_agent_version != MultiAgentVersion::V2 {
             return;
@@ -1912,14 +1917,12 @@ impl Session {
             return;
         }
 
-        // A V2 subagent must not report completion to its parent while
-        // awaited terminals remain: the later `TurnComplete` that finalizes
-        // with zero awaited terminals is the real completion and notifies the
-        // parent then. Known limitation (reported rather than expanding the
-        // protocol): if the last awaited terminal is instead resolved by
-        // synchronous observation/disposal with no continuation, the parent
-        // is never notified by this child.
-        if matches!(msg, EventMsg::TurnComplete(_)) && !self.awaited_terminals.is_empty().await {
+        // Use the decision made atomically with delivery-time status
+        // reduction. Re-sampling the awaited set here would allow a
+        // completion ingress to empty it between status hold-back and parent
+        // notification, producing both a premature result and a later real
+        // result.
+        if matches!(msg, EventMsg::TurnComplete(_)) && suppress_parent_completion {
             return;
         }
 
@@ -2043,7 +2046,9 @@ impl Session {
     /// restores the held-back `Completed` status so the session never stays
     /// permanently non-final.
     pub(crate) async fn resolve_awaited_terminal(&self, process_id: i32) {
-        self.awaited_terminals.resolve(process_id).await;
+        if !self.awaited_terminals.resolve(process_id).await {
+            return;
+        }
         self.maybe_restore_awaited_finality().await;
         self.emit_thread_idle_lifecycle_if_idle().await;
     }
@@ -2078,7 +2083,9 @@ impl Session {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn clear_awaited_terminals(&self) {
-        self.awaited_terminals.clear().await;
+        if !self.awaited_terminals.clear().await {
+            return;
+        }
         self.maybe_restore_awaited_finality().await;
         self.emit_thread_idle_lifecycle_if_idle().await;
     }
@@ -2159,9 +2166,9 @@ impl Session {
         self.conversation.clear_active_handoff().await;
     }
 
-    pub(crate) async fn send_event_raw(&self, event: Event) {
+    pub(crate) async fn send_event_raw(&self, event: Event) -> bool {
         self.send_event_raw_with_persistence(event, /*persist*/ true)
-            .await;
+            .await
     }
 
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
@@ -2174,10 +2181,10 @@ impl Session {
                 true
             }
         };
-        self.send_event_raw_with_persistence(event, persist).await;
+        let _ = self.send_event_raw_with_persistence(event, persist).await;
     }
 
-    async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) {
+    async fn send_event_raw_with_persistence(&self, event: Event, persist: bool) -> bool {
         // Persist the event into rollout storage; the store applies its persistence policy.
         if persist {
             let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
@@ -2186,18 +2193,21 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_protocol_event(&event.msg);
-        self.deliver_event_raw(event).await;
+        self.deliver_event_raw(event).await
     }
 
-    async fn deliver_event_raw(&self, event: Event) {
+    async fn deliver_event_raw(&self, event: Event) -> bool {
         // Record the last known agent status.
+        let mut suppress_parent_completion = false;
         if let Some(status) = agent_status_from_event(&event.msg) {
-            let status = self.awaited_terminal_status(&event.msg, status).await;
+            let (status, suppress) = self.awaited_terminal_status(&event.msg, status).await;
+            suppress_parent_completion = suppress;
             self.agent_status.send_replace(status);
         }
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
         }
+        suppress_parent_completion
     }
 
     /// Applies awaited-terminal turn-status semantics to a status derived
@@ -2210,18 +2220,22 @@ impl Session {
     /// is retained so a later cleanup with no continuation can restore a
     /// truthful `Completed`. A `TurnComplete` with zero awaited terminals is
     /// a normal final completion and supersedes any retained message.
-    async fn awaited_terminal_status(&self, msg: &EventMsg, status: AgentStatus) -> AgentStatus {
+    async fn awaited_terminal_status(
+        &self,
+        msg: &EventMsg,
+        status: AgentStatus,
+    ) -> (AgentStatus, bool) {
         let EventMsg::TurnComplete(completion) = msg else {
-            return status;
+            return (status, false);
         };
         if self.awaited_terminals.is_empty().await {
             self.awaited_terminals.clear_waiting_final().await;
-            return status;
+            return (status, false);
         }
         self.awaited_terminals
             .note_waiting_final(completion.last_agent_message.clone())
             .await;
-        AgentStatus::Running
+        (AgentStatus::Running, true)
     }
 
     pub(crate) async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {

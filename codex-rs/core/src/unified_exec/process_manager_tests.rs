@@ -259,12 +259,16 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     let output_closed = Arc::new(AtomicBool::new(false));
     let output_closed_notify = Arc::new(Notify::new());
     let cancellation_token = CancellationToken::new();
+    let produced_offset = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let output = OutputHandles {
         output_buffer: Arc::clone(&output_buffer),
         output_notify: Arc::clone(&output_notify),
         output_closed: Arc::clone(&output_closed),
         output_closed_notify: Arc::clone(&output_closed_notify),
         cancellation_token: cancellation_token.clone(),
+        produced_offset: Arc::clone(&produced_offset),
+        observed_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        attention_notified_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let collect = UnifiedExecProcessManager::collect_output_until_deadline(
@@ -274,8 +278,14 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
     );
     let produce = async {
         for byte in [b'a', b'b', b'c'] {
-            output_buffer.lock().await.push_chunk(
-                vec![byte; crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES],
+            let chunk = vec![byte; crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES];
+            {
+                let mut guard = output_buffer.lock().await;
+                guard.push_chunk(chunk.clone());
+            }
+            produced_offset.fetch_add(
+                u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+                Ordering::Release,
             );
             output_notify.notify_one();
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -305,6 +315,10 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
         ]);
     }
     assert_eq!(collected, expected);
+    assert_eq!(
+        output.observed_offset.load(Ordering::Acquire),
+        output.produced_offset.load(Ordering::Acquire)
+    );
 }
 
 #[tokio::test]
@@ -321,6 +335,7 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
         crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
     ]);
     expected.push_chunk(b"overflow".to_vec());
+    let produced_bytes = buffered_output.total_bytes();
     let output_buffer = Arc::new(tokio::sync::Mutex::new(buffered_output));
     let output_notify = Arc::new(Notify::new());
     let output_closed = Arc::new(AtomicBool::new(true));
@@ -333,6 +348,11 @@ async fn output_collection_preserves_omissions_from_drained_buffer() {
         output_closed,
         output_closed_notify,
         cancellation_token,
+        produced_offset: Arc::new(std::sync::atomic::AtomicU64::new(
+            u64::try_from(produced_bytes).unwrap_or(u64::MAX),
+        )),
+        observed_offset: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        attention_notified_through: Arc::new(std::sync::atomic::AtomicU64::new(0)),
     };
 
     let collected = UnifiedExecProcessManager::collect_output_until_deadline(

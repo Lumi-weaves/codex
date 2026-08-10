@@ -8082,34 +8082,6 @@ async fn multiple_awaited_terminals_require_all_resolutions() {
     );
 }
 
-/// Batch cleanup (`clear`) with no continuation restores the held-back final
-/// status instead of leaving the session permanently non-final.
-#[tokio::test]
-async fn clear_awaited_terminals_without_continuation_restores_completed() {
-    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
-    session.register_awaited_terminal(41).await;
-    session.register_awaited_terminal(42).await;
-    session
-        .spawn_task(
-            Arc::clone(&tc),
-            Vec::new(),
-            CompletingTaskWithMessage("cleaned up".to_string()),
-        )
-        .await;
-    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
-    assert!(matches!(
-        session.agent_status.borrow().clone(),
-        AgentStatus::Running
-    ));
-
-    session.clear_awaited_terminals().await;
-    assert!(!session.has_awaited_terminals().await);
-    assert_eq!(
-        session.agent_status.borrow().clone(),
-        AgentStatus::Completed(Some("cleaned up".to_string()))
-    );
-}
-
 /// Completion ingress order (queue-before-clear): the model-visible fragment
 /// is queued into the shared FIFO before the awaited token is resolved, and a
 /// fresh continuation turn is scheduled rather than restoring a final status.
@@ -8383,6 +8355,11 @@ async fn thread_idle_lifecycle_waits_for_awaited_terminals() {
         .await
         .expect("cleanup with no continuation must emit the thread-idle lifecycle")
         .expect("idle receiver open");
+    session.resolve_awaited_terminal(4250).await;
+    assert!(
+        idle_rx.try_recv().is_err(),
+        "idempotent resolution must not emit duplicate idle lifecycles"
+    );
 }
 
 /// Builds a ThreadManager with a registered parent thread plus a V2 child

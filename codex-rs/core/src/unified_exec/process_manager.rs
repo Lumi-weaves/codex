@@ -50,6 +50,7 @@ use crate::unified_exec::async_watcher::emit_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::emit_failed_exec_end_for_unified_exec;
 use crate::unified_exec::async_watcher::spawn_exit_watcher;
 use crate::unified_exec::async_watcher::start_streaming_output;
+use crate::unified_exec::attention_watcher::spawn_tty_attention_watcher;
 use crate::unified_exec::clamp_yield_time;
 use crate::unified_exec::generate_chunk_id;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
@@ -412,6 +413,9 @@ impl UnifiedExecProcessManager {
         };
         if let Some(entry) = removed {
             unregister_network_approval_for_entry(&entry).await;
+            if let Some(session) = entry.session.upgrade() {
+                session.resolve_awaited_terminal(process_id).await;
+            }
         }
     }
 
@@ -661,6 +665,33 @@ impl UnifiedExecProcessManager {
             (None, exit_code)
         };
 
+        // Registration happens only after the initial observation has
+        // committed to returning a live session id. The interaction lock held
+        // above keeps the exit watcher from admitting completion first; once
+        // this token exists, completion ingress queues its model-visible event
+        // before resolving it.
+        if response_process_id.is_some()
+            && context.session.enabled(Feature::UnifiedExecCompletionWake)
+        {
+            context.session.register_awaited_terminal(process_id).await;
+            // CleanBackgroundTerminals may have removed and resolved this
+            // entry just before registration. Register-first plus this
+            // membership check closes both sides of that race: a later
+            // removal sees the token, while an earlier removal is repaired
+            // here. Compare the Arc as well as the id so a reused id cannot
+            // keep the wrong token alive.
+            let still_stored = {
+                let store = self.process_store.lock().await;
+                store
+                    .processes
+                    .get(&process_id)
+                    .is_some_and(|entry| Arc::ptr_eq(&entry.process, &process))
+            };
+            if !still_stored {
+                context.session.resolve_awaited_terminal(process_id).await;
+            }
+        }
+
         let response = ExecCommandToolOutput {
             event_call_id: context.call_id.clone(),
             chunk_id,
@@ -824,6 +855,12 @@ impl UnifiedExecProcessManager {
             }
         };
 
+        if process_id.is_none()
+            && let Some(session) = session.as_ref()
+        {
+            session.resolve_awaited_terminal(request.process_id).await;
+        }
+
         let response = ExecCommandToolOutput {
             event_call_id,
             chunk_id,
@@ -958,6 +995,11 @@ impl UnifiedExecProcessManager {
         if let Some(pruned_entry) = pruned_entry {
             unregister_network_approval_for_entry(&pruned_entry).await;
             pruned_entry.process.terminate();
+            if let Some(session) = pruned_entry.session.upgrade() {
+                session
+                    .resolve_awaited_terminal(pruned_entry.process_id)
+                    .await;
+            }
         }
 
         spawn_exit_watcher(
@@ -973,6 +1015,9 @@ impl UnifiedExecProcessManager {
             started_at,
             network_denial_monitor,
         );
+        if tty && context.session.enabled(Feature::UnifiedExecCompletionWake) {
+            spawn_tty_attention_watcher(process, Arc::clone(&context.session), process_id);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1253,6 +1298,9 @@ impl UnifiedExecProcessManager {
             output_closed,
             output_closed_notify,
             cancellation_token,
+            produced_offset,
+            observed_offset,
+            ..
         } = output;
         let mut collected = HeadTailBuffer::default();
         let mut exit_signal_received = cancellation_token.is_cancelled();
@@ -1272,6 +1320,13 @@ impl UnifiedExecProcessManager {
                 drained_output = guard.drain();
                 has_drained_output =
                     drained_output.retained_bytes() > 0 || drained_output.omitted_bytes() > 0;
+                if has_drained_output {
+                    // Producers advance `produced_offset` while holding this
+                    // same buffer lock after appending their bytes, so this
+                    // records exactly the boundary represented by the drain.
+                    observed_offset
+                        .store(produced_offset.load(Ordering::Acquire), Ordering::Release);
+                }
                 if !has_drained_output {
                     wait_for_output = Some(output_notify.notified());
                 }
@@ -1461,6 +1516,9 @@ impl UnifiedExecProcessManager {
             entry.process.record_completion_observed();
             unregister_network_approval_for_entry(&entry).await;
             entry.process.terminate();
+            if let Some(session) = entry.session.upgrade() {
+                session.resolve_awaited_terminal(entry.process_id).await;
+            }
         }
     }
 
@@ -1492,6 +1550,12 @@ impl UnifiedExecProcessManager {
             (Arc::clone(&entry.process), entry.process.has_exited())
         };
 
+        // Serialize explicit disposal with write_stdin and both background
+        // watchers. Removal below marks completion observed before releasing
+        // this lock, so a user-requested termination can never race into an
+        // automatic attention/completion wake.
+        let _interaction_guard = process.interaction_lock().lock_owned().await;
+
         if !already_exited && process.terminate_confirmed().await.is_err() {
             return false;
         }
@@ -1513,7 +1577,11 @@ impl UnifiedExecProcessManager {
             entry
         };
 
+        drop(_interaction_guard);
         unregister_network_approval_for_entry(&entry).await;
+        if let Some(session) = entry.session.upgrade() {
+            session.resolve_awaited_terminal(process_id).await;
+        }
         true
     }
 }

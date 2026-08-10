@@ -243,6 +243,7 @@ You can use `spawn_agent` to create a new agent, `followup_task` to give an exis
 Child agents can also spawn their own sub-agents.
 
 When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
+Before responding in final, await background terminals whose results are part of your assignment; a returned terminal session ID means the process is still running, not that the work is complete.
 
 You will receive messages in the analysis channel in the form:
 ```
