@@ -895,11 +895,17 @@ validate_package_metadata() {
   expected_target="$3"
 
   [ -f "$pkgjson" ] && [ ! -L "$pkgjson" ] || return 1
-  # Strict parser for the canonical pretty-printed top-level JSON.  Only the
-  # five fields are allowed, each exactly once, on lines of the exact form
-  #   "key": "value"
-  # Values are compared as exact strings (no regex interpolation), and any
-  # duplicate, unknown, decoy, or malformed line rejects the package.
+  # Strict parser for the canonical pretty-printed top-level JSON emitted by
+  # scripts/codex_package/layout.py (Lumi layout).  Exactly the eight fields
+  # are allowed, each exactly once:
+  #   layoutVersion (numeric, must be 1)
+  #   distribution=lumi, variant=codex, entrypoint=bin/codex,
+  #   resourcesDir=codex-resources, pathDir=codex-path
+  #   version and target matching the expected release values exactly
+  # Lines must be of the exact forms "key": "value" or "key": NUMBER.
+  # Values are compared as exact strings (the expected version/target are
+  # never interpolated into a regex), and any duplicate, unknown, decoy,
+  # nested, or malformed line rejects the package.
   awk -v expected_version="$expected_version" -v expected_target="$expected_target" '
     BEGIN {
       bad = 0
@@ -913,23 +919,41 @@ validate_package_metadata() {
       if (line == "{" || line == "}" || line == "") next
 
       n = split(line, parts, "\"")
-      if (n != 5) { bad = 1; next }
-      if (parts[1] !~ /^[[:space:]]*$/) { bad = 1; next }
-      if (parts[3] !~ /^[[:space:]]*:[[:space:]]*$/) { bad = 1; next }
-      if (parts[5] != "") { bad = 1; next }
-      key = parts[2]
-      val = parts[4]
-      if (key != "distribution" && key != "variant" && key != "entrypoint" &&
-          key != "version" && key != "target") { bad = 1; next }
+      if (n == 5 && parts[1] ~ /^[[:space:]]*$/ &&
+          parts[3] ~ /^[[:space:]]*:[[:space:]]*$/ && parts[5] == "") {
+        # String-value form:  "key": "value"
+        key = parts[2]
+        val = parts[4]
+        is_num = 0
+      } else if (n == 3 && parts[1] ~ /^[[:space:]]*$/ &&
+                 parts[3] ~ /^[[:space:]]*:[[:space:]]*[0-9]+$/) {
+        # Numeric-value form:  "key": 1
+        key = parts[2]
+        num = parts[3]
+        sub(/^[[:space:]]*:[[:space:]]*/, "", num)
+        val = num
+        is_num = 1
+      } else {
+        bad = 1
+        next
+      }
+      if (key != "layoutVersion" && key != "distribution" && key != "version" &&
+          key != "target" && key != "variant" && key != "entrypoint" &&
+          key != "resourcesDir" && key != "pathDir") { bad = 1; next }
       if (seen[key]++) { bad = 1; next }
       value[key] = val
+      numflag[key] = is_num
       nfields++
     }
     END {
-      if (bad || nfields != 5) exit 1
+      if (bad || nfields != 8) exit 1
+      if (numflag["layoutVersion"] != 1) exit 1
+      if (value["layoutVersion"] != "1") exit 1
       if (value["distribution"] != "lumi") exit 1
       if (value["variant"] != "codex") exit 1
       if (value["entrypoint"] != "bin/codex") exit 1
+      if (value["resourcesDir"] != "codex-resources") exit 1
+      if (value["pathDir"] != "codex-path") exit 1
       if (value["version"] != expected_version) exit 1
       if (value["target"] != expected_target) exit 1
       exit 0

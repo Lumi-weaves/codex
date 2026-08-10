@@ -90,10 +90,13 @@ Run the script directly (`sh lumi-install.sh <action>`) or through the
   executables must be regular non-symlink files before the installer creates
   its own top-level `codex` link.
 - `codex-package.json` must be the canonical pretty-printed top-level JSON
-  containing exactly the five fields `distribution=lumi`, `variant=codex`,
-  `entrypoint=bin/codex`, `version=<exact release version>`, and
-  `target=<exact package target>`; values are compared as exact strings, and
-  duplicate, unknown, decoy, or malformed lines reject the package.
+  emitted by `scripts/codex_package/layout.py` (Lumi layout), containing
+  exactly the eight fields `layoutVersion` (numeric, must be 1),
+  `distribution=lumi`, `variant=codex`, `entrypoint=bin/codex`,
+  `resourcesDir=codex-resources`, `pathDir=codex-path`,
+  `version=<exact release version>`, and `target=<exact package target>`;
+  values are compared as exact strings (never interpolated into regexes), and
+  duplicate, unknown, decoy, nested, or malformed lines reject the package.
 - Lock + staging + validation + atomic `current` switch; failure aborts
   without switching (no non-atomic fallback).
 - A prepared-operation journal is written before switching `current`, so a
