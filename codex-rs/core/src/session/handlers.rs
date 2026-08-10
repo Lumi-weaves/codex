@@ -322,6 +322,13 @@ async fn handle_internal_session_event(
 ) {
     match event {
         super::internal_event::InternalSessionEvent::UnifiedExecCompletion(completion) => {
+            // Queue-before-clear ordering: the model-visible completion
+            // fragment enters the shared FIFO before the awaited token is
+            // resolved, so the cleanup/restore path (which only runs with
+            // zero pending session inputs) can never finalize the session
+            // while the completion is still pending delivery. Resolution is
+            // followed by scheduling the continuation turn.
+            let process_id = completion.process_id;
             sess.input_queue
                 .enqueue_pending_session_input(
                     TurnInput::ResponseItem(crate::context::ContextualUserFragment::into(
@@ -331,6 +338,7 @@ async fn handle_internal_session_event(
                     /*parent_turn_id*/ None,
                 )
                 .await;
+            sess.resolve_awaited_terminal(process_id).await;
             sess.maybe_start_turn_for_pending_work().await;
         }
     }

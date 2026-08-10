@@ -5,6 +5,7 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::session::awaited_terminals::AwaitedTerminals;
 use crate::session::turn_context::EnvironmentConfig;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillError;
@@ -58,6 +59,10 @@ pub(crate) struct Session {
     pub(crate) pending_user_message_admissions:
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
+    /// Tracks live terminal ids yielded to the model whose background
+    /// completion must keep the session status non-final (see
+    /// [`awaited_terminals`] for semantics).
+    pub(crate) awaited_terminals: AwaitedTerminals,
     /// Weak sender for Core-private internal session events on the single
     /// session ingress FIFO. Internal machinery can only upgrade this while
     /// the session's submission channel is alive, so it can never keep the
@@ -1218,6 +1223,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
+                awaited_terminals: AwaitedTerminals::new(),
                 internal_session_event_tx,
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
