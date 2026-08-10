@@ -1465,6 +1465,10 @@ pub enum ThreadStatus {
 pub enum ThreadActiveFlag {
     WaitingOnApproval,
     WaitingOnUserInput,
+    /// The most recent turn completed but at least one live background
+    /// terminal remains; the thread stays active and is waiting for those
+    /// terminals to exit.
+    WaitingOnBackgroundTerminal,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
