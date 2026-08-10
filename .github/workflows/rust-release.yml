@@ -13,6 +13,10 @@ on:
   push:
     tags:
       - "rust-v*.*.*"
+      # Lumi canary tags (rust-vX.Y.Z-lumi.N) are released by
+      # .github/workflows/lumi-release.yml and must never start the upstream
+      # release graph.
+      - "!rust-v*.*.*-lumi.*"
 
 env:
   CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0

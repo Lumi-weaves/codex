@@ -1,0 +1,379 @@
+# Lumi Codex Linux x86_64 canary release workflow.
+#
+# Fires only on Lumi canary tags of the exact shape rust-vX.Y.Z-lumi.N. The
+# tag glob below is a coarse first gate; the authoritative shape check is the
+# Bash regex in the tag-check job (and re-checked at the release mutation
+# point). The upstream rust-release workflow excludes these tags so they never
+# start the official release graph.
+#
+# Honest UX boundary: GitHub's /releases/latest endpoint excludes prereleases,
+# so this canary is never what a no-argument installer resolves. The versioned
+# one-command bootstrap for this canary is documented separately by the primary
+# maintainer; this workflow must not claim otherwise.
+
+name: lumi-release
+
+on:
+  push:
+    tags:
+      - "rust-v*.*.*-lumi.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
+
+jobs:
+  tag-check:
+    name: Validate Lumi canary tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Validate tag matches Cargo.toml version
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Tag validation"
+
+          # Release runs must come from a tag.
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
+            || { echo "❌  Not a tag ref"; exit 1; }
+
+          # Authoritative Lumi canary tag shape: rust-vX.Y.Z-lumi.N. The
+          # workflow-level tag glob is only a coarse first gate.
+          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-lumi\.[0-9]+$ ]] \
+            || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
+
+          # The tag (minus the rust-v prefix) must equal the workspace Cargo
+          # version, which itself carries the -lumi.N suffix (e.g.
+          # 0.147.0-lumi.1).
+          tag_ver="${GITHUB_REF_NAME#rust-v}"
+          cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
+                        | sed -E 's/version *= *"([^"]+)".*/\1/')"
+
+          [[ "${tag_ver}" == "${cargo_ver}" ]] \
+            || { echo "❌  Tag ${tag_ver} ≠ Cargo.toml ${cargo_ver}"; exit 1; }
+
+          echo "✅  Tag and Cargo.toml agree (${tag_ver})"
+          echo "::endgroup::"
+
+  build:
+    needs: tag-check
+    name: Build Linux x86_64 canary package
+    runs-on: ubuntu-24.04
+    # Release builds can take a long time, so leave some headroom to avoid
+    # having to restart the full workflow due to a timeout.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install Linux bwrap build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends binutils pkg-config libcap-dev
+
+      - name: Use hermetic Cargo home (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >> "$GITHUB_ENV"
+          echo "${cargo_home}/bin" >> "$GITHUB_PATH"
+          : > "${cargo_home}/config.toml"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        env:
+          TARGET: x86_64-unknown-linux-musl
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Avoid problematic aws-lc jitter entropy code path on musl builders.
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >> "$GITHUB_ENV"
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY_x86_64_unknown_linux_musl=1" >> "$GITHUB_ENV"
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+
+      - name: Build bwrap and export digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="x86_64-unknown-linux-musl"
+          cargo build --target "$target" --release --timings --bin bwrap
+
+          bwrap_path="target/${target}/release/bwrap"
+          if [[ ! -f "$bwrap_path" ]]; then
+            echo "bwrap binary ${bwrap_path} not found"
+            exit 1
+          fi
+
+          # Codex embeds this digest at build time and verifies the bundled
+          # bwrap resource before use. Strip bwrap before hashing so the digest
+          # covers the exact bytes that the release packages.
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "$GITHUB_ENV"
+          echo "Built bwrap ${bwrap_path} with sha256:${digest}"
+
+      - name: Cargo build (codex and codex-code-mode-host only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="x86_64-unknown-linux-musl"
+          cargo build --target "$target" --release --timings \
+            --bin codex \
+            --bin codex-code-mode-host
+
+      - name: Strip release binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="x86_64-unknown-linux-musl"
+          for binary in codex codex-code-mode-host; do
+            binary_path="target/${target}/release/${binary}"
+            if [[ ! -f "$binary_path" ]]; then
+              echo "Binary ${binary_path} not found"
+              exit 1
+            fi
+            strip --strip-debug --strip-unneeded "$binary_path"
+          done
+
+      - name: Download packaged zsh manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            -o "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Build Codex package archive
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-musl
+          BUNDLE: primary
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "$TARGET" \
+            --bundle "$BUNDLE" \
+            --entrypoint-dir "target/${TARGET}/release" \
+            --archive-dir "dist/${TARGET}" \
+            --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Upload canary package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-x86_64-unknown-linux-musl.tar.gz
+          # Single explicit file; no globs.
+          path: codex-rs/dist/x86_64-unknown-linux-musl/codex-package-x86_64-unknown-linux-musl.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [tag-check, build]
+    if: >-
+      ${{
+        always() &&
+        needs.tag-check.result == 'success' &&
+        needs.build.result == 'success'
+      }}
+    name: Create Lumi canary GitHub release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      # Only fork-scoped GITHUB_TOKEN write: required to create the release
+      # and upload its three assets. No secrets, environments, or id-token.
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download canary package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-package-x86_64-unknown-linux-musl.tar.gz
+          path: staging
+
+      - name: Stage and validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Release asset validation"
+
+          # Authoritative re-check: only exact rust-vX.Y.Z-lumi.N tags may
+          # reach the mutation point.
+          [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
+            || { echo "❌  Not a tag ref"; exit 1; }
+          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+-lumi\.[0-9]+$ ]] \
+            || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
+
+          version="${GITHUB_REF_NAME#rust-v}"
+          target="x86_64-unknown-linux-musl"
+          archive="staging/codex-package-${target}.tar.gz"
+
+          # 1. The single downloaded artifact must be present.
+          [[ -f "$archive" && ! -L "$archive" ]] \
+            || { echo "Missing downloaded package archive: ${archive}"; exit 1; }
+
+          # 2. Canonical checksum manifest: exactly one entry for the archive,
+          #    in standard sha256sum "<digest>  <name>" format that
+          #    lumi-install.sh parses.
+          manifest="staging/codex-package_SHA256SUMS"
+          (cd staging && sha256sum "codex-package-${target}.tar.gz" > codex-package_SHA256SUMS)
+          [[ "$(wc -l < "$manifest")" -eq 1 ]] \
+            || { echo "Checksum manifest must contain exactly one line"; exit 1; }
+          grep -q "  codex-package-${target}.tar.gz$" "$manifest" \
+            || { echo "Checksum manifest does not reference the package archive"; exit 1; }
+          cat "$manifest"
+
+          # 3. Installer asset: exact repository copy as lumi-install.sh, with
+          #    a POSIX syntax check.
+          cp scripts/install/lumi-install.sh staging/lumi-install.sh
+          sh -n staging/lumi-install.sh
+
+          # 4. Extract and validate the canonical package.
+          extract_dir="${RUNNER_TEMP}/lumi-canary-package"
+          rm -rf "$extract_dir"
+          mkdir -p "$extract_dir"
+          tar -xzf "$archive" -C "$extract_dir"
+
+          # Reject absolute members, `..` components, and special files — the
+          # same constraints lumi-install.sh enforces on every managed archive.
+          if ! tar -tvzf "$archive" 2>/dev/null | awk '
+            {
+              type = substr($1, 1, 1)
+              if (type != "-" && type != "d") { exit 1 }
+            }
+          '; then
+            echo "Package archive contains unsafe entry types" >&2
+            exit 1
+          fi
+
+          # Canonical metadata, using the same grep checks as
+          # lumi-install.sh's validate_package_metadata plus the
+          # layoutVersion written by scripts/codex_package/layout.py.
+          pkgjson="${extract_dir}/codex-package.json"
+          [[ -f "$pkgjson" && ! -L "$pkgjson" ]] \
+            || { echo "Missing package metadata: codex-package.json"; exit 1; }
+          grep -q '"layoutVersion"[[:space:]]*:[[:space:]]*1' "$pkgjson" \
+            || { echo "Invalid package metadata field: layoutVersion"; exit 1; }
+          grep -q '"distribution"[[:space:]]*:[[:space:]]*"lumi"' "$pkgjson" \
+            || { echo "Invalid package metadata field: distribution"; exit 1; }
+          grep -q "\"version\"[[:space:]]*:[[:space:]]*\"${version}\"" "$pkgjson" \
+            || { echo "Invalid package metadata field: version"; exit 1; }
+          grep -q "\"target\"[[:space:]]*:[[:space:]]*\"${target}\"" "$pkgjson" \
+            || { echo "Invalid package metadata field: target"; exit 1; }
+          grep -q '"variant"[[:space:]]*:[[:space:]]*"codex"' "$pkgjson" \
+            || { echo "Invalid package metadata field: variant"; exit 1; }
+          grep -q '"entrypoint"[[:space:]]*:[[:space:]]*"bin/codex"' "$pkgjson" \
+            || { echo "Invalid package metadata field: entrypoint"; exit 1; }
+          grep -q '"resourcesDir"[[:space:]]*:[[:space:]]*"codex-resources"' "$pkgjson" \
+            || { echo "Invalid package metadata field: resourcesDir"; exit 1; }
+          grep -q '"pathDir"[[:space:]]*:[[:space:]]*"codex-path"' "$pkgjson" \
+            || { echo "Invalid package metadata field: pathDir"; exit 1; }
+
+          # Required regular executables: regular files, not symlinks.
+          for relative in \
+            "bin/codex" \
+            "bin/codex-code-mode-host" \
+            "codex-path/rg" \
+            "codex-resources/bwrap"
+          do
+            path="${extract_dir}/${relative}"
+            [[ -f "$path" && ! -L "$path" && -x "$path" ]] \
+              || { echo "Missing or invalid package file: ${relative}"; exit 1; }
+          done
+
+          # Exact binary version must equal the tag version.
+          binary_version="$( "${extract_dir}/bin/codex" --version 2>/dev/null \
+            | sed -n 's/.* \([0-9][0-9A-Za-z.+-]*\)$/\1/p' \
+            | head -n 1 )"
+          [[ -n "${binary_version}" ]] \
+            || { echo "codex --version produced no version"; exit 1; }
+          [[ "${binary_version}" == "${version}" ]] \
+            || { echo "Binary version ${binary_version} ≠ tag version ${version}"; exit 1; }
+          echo "✅  Package metadata and binary version agree (${version})"
+
+          # 5. Staging must contain exactly the three intended release files.
+          count="$(find staging -maxdepth 1 -type f | wc -l)"
+          [[ "$count" -eq 3 ]] \
+            || { echo "Expected exactly 3 files in staging, found ${count}"; exit 1; }
+          for name in \
+            "codex-package-${target}.tar.gz" \
+            "codex-package_SHA256SUMS" \
+            "lumi-install.sh"
+          do
+            [[ -f "staging/${name}" && ! -L "staging/${name}" ]] \
+              || { echo "Missing staged release file: ${name}"; exit 1; }
+          done
+
+          echo "✅  Staged exactly three assets for ${GITHUB_REF_NAME}"
+          echo "::endgroup::"
+
+      - name: Fail if the release already exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; refusing to mutate an immutable canary release." >&2
+            exit 1
+          fi
+          echo "Release ${GITHUB_REF_NAME} does not exist yet; proceeding."
+
+      - name: Create immutable GitHub prerelease
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: |-
+            Lumi Codex Linux x86_64 canary prerelease (${{ github.ref_name }}).
+
+            Assets:
+            - `codex-package-x86_64-unknown-linux-musl.tar.gz` — canonical Codex package for x86_64-unknown-linux-musl
+            - `codex-package_SHA256SUMS` — SHA-256 manifest for the package archive
+            - `lumi-install.sh` — Lumi Codex standalone installer/manager (Unix canary)
+
+            Note: this is a prerelease, so GitHub's `/releases/latest` never resolves to it.
+          files: |
+            staging/codex-package_SHA256SUMS
+            staging/lumi-install.sh
+            staging/codex-package-x86_64-unknown-linux-musl.tar.gz
+          fail_on_unmatched_files: true
+          # Never clobber assets on an existing release; the pre-check above
+          # already fails when the release exists.
+          overwrite_files: false
+          make_latest: false
+          prerelease: true
