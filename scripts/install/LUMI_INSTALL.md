@@ -22,11 +22,11 @@ to the real binary (required for code mode on macOS).
 
 ```sh
 # Version-pinned canary bootstrap (published release asset):
-curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.2/install.sh | \
-  sh -s -- --release 0.147.0-lumi.2
+curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.3/install.sh | \
+  sh -s -- --release 0.147.0-lumi.3
 
 # From a checkout:
-sh scripts/install/install.sh --release 0.147.0-lumi.2
+sh scripts/install/install.sh --release 0.147.0-lumi.3
 
 lumi-codex   # runs the installed Lumi Codex CLI
 ```
@@ -35,11 +35,11 @@ lumi-codex   # runs the installed Lumi Codex CLI
 
 ```powershell
 # Version-pinned canary bootstrap (published release asset):
-$env:LUMI_RELEASE = '0.147.0-lumi.2'
-irm https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.2/install.ps1 | iex
+$env:LUMI_RELEASE = '0.147.0-lumi.3'
+irm https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.3/install.ps1 | iex
 
 # From a checkout:
-powershell -ExecutionPolicy ByPass -File scripts\install\install.ps1 -Release 0.147.0-lumi.2
+powershell -ExecutionPolicy ByPass -File scripts\install\install.ps1 -Release 0.147.0-lumi.3
 
 lumi-codex   # runs the installed Lumi Codex CLI (lumi-codex.cmd)
 ```

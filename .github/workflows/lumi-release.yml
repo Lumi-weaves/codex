@@ -91,9 +91,11 @@ jobs:
     needs: tag-check
     name: Build canary package - ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    # Release builds can take a long time, so leave some headroom to avoid
-    # having to restart the full workflow due to a timeout.
-    timeout-minutes: 90
+    # Standard hosted macOS runners can spend well over 90 minutes compiling
+    # and linking the full release graph from a cold checkout. Keep enough
+    # headroom for the slowest target plus packaging without using a billable
+    # larger runner.
+    timeout-minutes: 180
     permissions:
       contents: read
     defaults:

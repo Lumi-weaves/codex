@@ -14,6 +14,13 @@ Linux runner could not link the ARM musl package with its host `musl-gcc`.
 It published no release assets. The next successful tag is therefore still a
 build and packaging canary, not a stable release.
 
+`rust-v0.147.0-lumi.2` proved the standard native ARM runner route: both Linux
+targets and Windows x86_64 completed, while the remaining cold macOS builds
+and Windows ARM packaging reached the workflow's original 90-minute timeout.
+That run also stopped before the release mutation point and published no
+release assets. Later canaries retain the standard runners with a wider build
+watchdog.
+
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Windows Authenticode signing,
 Linux signatures, provenance attestation, or a stable update channel.
