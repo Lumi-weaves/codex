@@ -7,7 +7,7 @@ and what must be proven before a canary is promoted.
 
 ## Current maturity
 
-The delivery workflow is implemented on `codex/lumi-public-delivery`.
+The delivery workflow and active Lumi product line live on `main`.
 `rust-v0.147.0-lumi.1` passed its tag gate but stopped before the release
 mutation point: paid macOS larger runners could not start, and the hosted x64
 Linux runner could not link the ARM musl package with its host `musl-gcc`.
@@ -29,6 +29,24 @@ standard-runner route and keep the release mutation point unchanged.
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Windows Authenticode signing,
 Linux signatures, provenance attestation, or a stable update channel.
+
+## Product line and upstream tracking
+
+`main` is the canonical Lumi Codex line: default checkouts, ongoing downstream
+work, documentation, and release tags all converge there. Its history is not
+periodically rebased onto OpenAI's moving `main` branch.
+
+The `upstream` remote tracks `openai/codex`. Published upstream tags such as
+`rust-v0.147.0` are the immutable integration bases. To adopt a later stable
+release, create a temporary sync branch from Lumi `main`, merge the selected
+upstream tag, reconcile and validate the downstream patch set, then
+fast-forward the accepted result back to `main`. Alpha tags and arbitrary
+upstream `main` snapshots do not silently advance the product line.
+
+Lumi release tags such as `rust-v0.147.0-lumi.4` remain immutable publication
+snapshots. A `lumi/release-X.Y.Z` branch is kept only when that older line is
+still supported for backports; official upstream tags already provide the
+historical source baselines and do not need duplicate tracking branches.
 
 ## Adopted upstream contract
 

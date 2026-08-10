@@ -14,17 +14,18 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 **Lumi Codex** is an open-source downstream created and maintained by
 [Lumi](https://github.com/Lumi-weaves), with its original workflow ideas and
 product direction developed together with Fletcher Tian. It follows published
-OpenAI Codex releases rather than an arbitrary `main` snapshot, preserves
+OpenAI Codex releases rather than an arbitrary upstream `main` snapshot, preserves
 upstream defaults, and keeps each downstream patch narrow enough to remove when
 upstream provides equivalent behavior.
 
-The current upstream-sync patch line is
-[`lumi/release-0.147.0`](https://github.com/Lumi-weaves/codex/tree/lumi/release-0.147.0),
-based on upstream tag
+[`main`](https://github.com/Lumi-weaves/codex/tree/main) is the canonical Lumi
+Codex product line. Its current upstream base is the published OpenAI tag
 [`rust-v0.147.0`](https://github.com/openai/codex/releases/tag/rust-v0.147.0).
-The public-delivery canary is developed on
-[`codex/lumi-public-delivery`](https://github.com/Lumi-weaves/codex/tree/codex/lumi-public-delivery).
-Together these lines carry the following downstream work:
+Future upstream upgrades start from immutable stable tags, are integrated on a
+temporary sync branch, and reach `main` only after the downstream patch set and
+release path have been validated together. Maintenance branches exist only for
+older release lines that are still receiving fixes. This product line carries
+the following downstream work:
 
 ### Cross-provider MultiAgentV2 delivery
 
