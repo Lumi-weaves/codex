@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import tarfile
@@ -15,13 +17,14 @@ import unittest
 
 INSTALL_SCRIPT = Path(__file__).with_name("lumi-install.sh")
 TARGET = "x86_64-unknown-linux-musl"
+AARCH64_TARGET = "aarch64-unknown-linux-musl"
 VERSION = "0.147.0"
 OTHER_VERSION = "0.146.0"
+LUMI_VERSION = "0.147.0-lumi.1"
 
 METADATA_URL = (
     f"https://api.github.com/repos/Lumi-weaves/codex/releases/tags/rust-v{VERSION}"
 )
-LATEST_URL = "https://api.github.com/repos/Lumi-weaves/codex/releases/latest"
 CHECKSUM_URL = (
     f"https://github.com/Lumi-weaves/codex/releases/download/rust-v{VERSION}/"
     "codex-package_SHA256SUMS"
@@ -29,6 +32,10 @@ CHECKSUM_URL = (
 ARCHIVE_URL = (
     f"https://github.com/Lumi-weaves/codex/releases/download/rust-v{VERSION}/"
     f"codex-package-{TARGET}.tar.gz"
+)
+MANAGER_URL = (
+    f"https://github.com/Lumi-weaves/codex/releases/download/rust-v{VERSION}/"
+    "lumi-install.sh"
 )
 
 FAKE_CURL_SH = textwrap.dedent(
@@ -77,6 +84,13 @@ FAKE_CURL_SH = textwrap.dedent(
           exit 22
         fi
         ;;
+      https://github.com/Lumi-weaves/codex/releases/download/*/lumi-install.sh)
+        if [ -n "$LUMI_TEST_MANAGER_PATH" ]; then
+          cp "$LUMI_TEST_MANAGER_PATH" "$output"
+        else
+          exit 22
+        fi
+        ;;
       *)
         exit 22
         ;;
@@ -112,45 +126,91 @@ def create_official_codex(root: Path) -> Path:
     return path
 
 
+def canonical_package_metadata(version: str, target: str) -> str:
+    return json.dumps(
+        {
+            "distribution": "lumi",
+            "variant": "codex",
+            "entrypoint": "bin/codex",
+            "version": version,
+            "target": target,
+        }
+    ) + "\n"
+
+
+def package_files(package_dir: Path, version: str) -> None:
+    (package_dir / "bin").mkdir(parents=True, exist_ok=True)
+    (package_dir / "codex-path").mkdir(exist_ok=True)
+    (package_dir / "codex-resources").mkdir(exist_ok=True)
+    write_executable(
+        package_dir / "bin" / "codex",
+        f"#!/bin/sh\nprintf 'codex-cli {version}\\n'\n",
+    )
+    write_executable(
+        package_dir / "bin" / "codex-code-mode-host", "#!/bin/sh\nexit 0\n"
+    )
+    write_executable(package_dir / "codex-path" / "rg", "#!/bin/sh\nexit 0\n")
+    write_executable(
+        package_dir / "codex-resources" / "bwrap", "#!/bin/sh\nexit 0\n"
+    )
+
+
 def create_package_release(
     root: Path,
     *,
     version: str = VERSION,
     target: str = TARGET,
     incomplete: bool = False,
-    missing_bwrap: bool = False,
-) -> tuple[Path, Path, str]:
-    package_dir = root / f"package-{version}"
-    (package_dir / "bin").mkdir(parents=True)
-    (package_dir / "codex-path").mkdir()
-    (package_dir / "codex-resources").mkdir()
-    (package_dir / "codex-package.json").write_text("{}\n", encoding="utf-8")
-    write_executable(
-        package_dir / "bin" / "codex",
-        f"#!/bin/sh\nprintf 'codex-cli {version}\\n'\n",
+    metadata_override: dict[str, str] | None = None,
+    symlink_member: str | None = None,
+    traversal_member: str | None = None,
+    absolute_member: str | None = None,
+) -> tuple[Path, Path, str, Path]:
+    package_dir = root / f"package-{version}-{target.replace('/', '_')}"
+    package_files(package_dir, version)
+    metadata = dict(
+        distribution="lumi",
+        variant="codex",
+        entrypoint="bin/codex",
+        version=version,
+        target=target,
     )
-    write_executable(
-        package_dir / "bin" / "codex-code-mode-host",
-        "#!/bin/sh\nexit 0\n",
+    if metadata_override:
+        metadata.update(metadata_override)
+    (package_dir / "codex-package.json").write_text(
+        json.dumps(metadata) + "\n", encoding="utf-8"
     )
-    write_executable(package_dir / "codex-path" / "rg", "#!/bin/sh\nexit 0\n")
-    if not missing_bwrap:
-        write_executable(
-            package_dir / "codex-resources" / "bwrap", "#!/bin/sh\nexit 0\n"
-        )
     if incomplete:
         (package_dir / "bin" / "codex").unlink()
 
     asset = f"codex-package-{target}.tar.gz"
-    archive_path = root / f"archive-{version}.tar.gz"
+    archive_path = root / f"archive-{version}-{target}.tar.gz"
     with tarfile.open(archive_path, "w:gz") as archive:
-        for path in package_dir.iterdir():
+        for path in sorted(package_dir.iterdir()):
             archive.add(path, arcname=path.name)
+        if symlink_member:
+            info = tarfile.TarInfo(symlink_member)
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            archive.addfile(info)
+        if traversal_member:
+            data = b"evil"
+            info = tarfile.TarInfo(traversal_member)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        if absolute_member:
+            data = b"evil"
+            info = tarfile.TarInfo(absolute_member)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
     archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-    checksum_path = root / f"SHA256SUMS-{version}"
+    checksum_path = root / f"SHA256SUMS-{version}-{target}"
     checksum_path.write_text(f"{archive_digest}  {asset}\n", encoding="utf-8")
     checksum_digest = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
+    manager_path = root / f"lumi-install-{version}-{target}.sh"
+    manager_path.write_bytes(INSTALL_SCRIPT.read_bytes())
+    manager_digest = hashlib.sha256(manager_path.read_bytes()).hexdigest()
     metadata_json = json.dumps(
         {
             "assets": [
@@ -159,20 +219,30 @@ def create_package_release(
                     "name": "codex-package_SHA256SUMS",
                     "digest": f"sha256:{checksum_digest}",
                 },
+                {"name": "lumi-install.sh", "digest": f"sha256:{manager_digest}"},
             ],
             "tag_name": f"rust-v{version}",
         },
         indent=2,
     )
-    return archive_path, checksum_path, metadata_json
+    return archive_path, checksum_path, metadata_json, manager_path
+
+
+def metadata_without_manager_asset(metadata_json: str) -> str:
+    metadata = json.loads(metadata_json)
+    metadata["assets"] = [
+        asset for asset in metadata["assets"] if asset["name"] != "lumi-install.sh"
+    ]
+    return json.dumps(metadata)
 
 
 def release_metadata_with_decoys(
-    archive_path: Path, checksum_path: Path, version: str = VERSION
+    archive_path: Path, checksum_path: Path, manager_path: Path
 ) -> str:
     fake_digest = f"sha256:{'0' * 64}"
     archive_digest = f"sha256:{hashlib.sha256(archive_path.read_bytes()).hexdigest()}"
     checksum_digest = f"sha256:{hashlib.sha256(checksum_path.read_bytes()).hexdigest()}"
+    manager_digest = f"sha256:{hashlib.sha256(manager_path.read_bytes()).hexdigest()}"
     return json.dumps(
         {
             "body": (
@@ -195,8 +265,16 @@ def release_metadata_with_decoys(
                     "name": "codex-package_SHA256SUMS",
                     "digest": checksum_digest,
                 },
+                {
+                    "metadata": {
+                        "name": "lumi-install.sh",
+                        "digest": fake_digest,
+                    },
+                    "name": "lumi-install.sh",
+                    "digest": manager_digest,
+                },
             ],
-            "tag_name": f"rust-v{version}",
+            "tag_name": f"rust-v{VERSION}",
         },
         separators=(",", ":"),
     )
@@ -219,6 +297,7 @@ def make_env(
     metadata_json: str | None = None,
     checksum_path: Path | None = None,
     archive_path: Path | None = None,
+    manager_path: Path | None = None,
     metadata_failure: bool = False,
     archive_delay: str | None = None,
     archive_mode: str = "",
@@ -245,6 +324,7 @@ def make_env(
             ),
             "LUMI_TEST_CHECKSUM_PATH": str(checksum_path or ""),
             "LUMI_TEST_ARCHIVE_PATH": str(archive_path or ""),
+            "LUMI_TEST_MANAGER_PATH": str(manager_path or ""),
             "LUMI_TEST_METADATA_FAILURE": "1" if metadata_failure else "0",
             "LUMI_TEST_ARCHIVE_DELAY": archive_delay or "",
             "LUMI_TEST_ARCHIVE_MODE": archive_mode,
@@ -315,6 +395,7 @@ def release_metadata() -> str:
     assets.append(
         {"name": "codex-package_SHA256SUMS", "digest": f"sha256:{'b' * 64}"}
     )
+    assets.append({"name": "lumi-install.sh", "digest": f"sha256:{'c' * 64}"})
     return json.dumps(
         {"assets": assets, "body": "braces: { } [ ]", "tag_name": f"rust-v{VERSION}"},
         indent=2,
@@ -333,21 +414,71 @@ def receipt_keys(root: Path) -> dict[str, str]:
     return result
 
 
+def bashrc_has_block(root: Path) -> bool:
+    bashrc = root / "home" / ".bashrc"
+    if not bashrc.exists():
+        return False
+    return "# >>> Lumi Codex managed PATH >>>" in bashrc.read_text(encoding="utf-8")
+
+
+def default_install_env(
+    root: Path,
+    *,
+    release: str = VERSION,
+    archive: Path,
+    checksum: Path,
+    metadata: str,
+    manager: Path,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    return make_env(
+        root,
+        release=release,
+        metadata_json=metadata,
+        checksum_path=checksum,
+        archive_path=archive,
+        manager_path=manager,
+        extra=extra,
+    )
+
+
+def install_release(
+    root: Path,
+    archive: Path,
+    checksum: Path,
+    metadata: str,
+    manager: Path,
+    *,
+    release: str = VERSION,
+    args: list[str] | None = None,
+    extra: dict[str, str] | None = None,
+) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+    env = default_install_env(
+        root, release=release, archive=archive, checksum=checksum,
+        metadata=metadata, manager=manager, extra=extra,
+    )
+    result = run_manage(root, ["install", *(args or [])], env=env)
+    return result, read_requests(root)
+
+
 class LumiInstallShTest(unittest.TestCase):
-    def test_happy_install_creates_managed_root_and_activates(self) -> None:
+    def test_happy_install_is_side_by_side_with_verified_manager(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
 
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            result, requests = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                requests, [METADATA_URL, CHECKSUM_URL, ARCHIVE_URL, MANAGER_URL]
+            )
+            for request in requests:
+                self.assertIn("Lumi-weaves/codex", request)
+            self.assertNotIn("openai/codex", requests)
 
             lr = lumi_root(root)
             self.assertEqual(
                 os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-            self.assertTrue(
-                (lr / "releases" / f"{VERSION}-{TARGET}" / "bin" / "codex").exists()
             )
             self.assertEqual(
                 os.readlink(lr / "shim" / "codex"), "../current/bin/codex"
@@ -356,9 +487,29 @@ class LumiInstallShTest(unittest.TestCase):
                 os.readlink(lr / "shim" / "lumi-codex"),
                 "../manager/lumi-install.sh",
             )
-            self.assertTrue((lr / "manager" / "lumi-install.sh").is_file())
-            self.assertTrue(os.access(lr / "manager" / "lumi-install.sh", os.X_OK))
 
+            # Visible launcher at ${LUMI_INSTALL_DIR:-$HOME/.local/bin}/lumi-codex
+            launcher = root / "home" / ".local" / "bin" / "lumi-codex"
+            self.assertTrue(launcher.is_symlink())
+            self.assertEqual(os.readlink(launcher), str(lr / "manager" / "lumi-install.sh"))
+
+            # Manager copy is the verified release asset, not $0.
+            manager_copy = lr / "manager" / "lumi-install.sh"
+            self.assertTrue(manager_copy.is_file())
+            self.assertEqual(
+                hashlib.sha256(manager_copy.read_bytes()).hexdigest(),
+                hashlib.sha256(INSTALL_SCRIPT.read_bytes()).hexdigest(),
+            )
+
+            # Default install does NOT touch any profile and does not shadow codex.
+            self.assertFalse(bashrc_has_block(root))
+            keys = receipt_keys(root)
+            self.assertEqual(keys["activated"], "no")
+            self.assertEqual(keys["profile"], "-")
+            self.assertEqual(keys["launcher"], str(launcher))
+            self.assertEqual(keys["install_dir"], str(launcher.parent))
+
+            # Strict receipt schema.
             current_receipt = (lr / "receipts" / "current.receipt").read_text(
                 encoding="utf-8"
             )
@@ -366,7 +517,6 @@ class LumiInstallShTest(unittest.TestCase):
                 current_receipt.startswith("LUMI-CODEX-RECEIPT-V1\n"),
                 current_receipt,
             )
-            keys = receipt_keys(root)
             self.assertEqual(
                 set(keys),
                 {
@@ -387,18 +537,15 @@ class LumiInstallShTest(unittest.TestCase):
                     "launcher",
                     "shim",
                     "shim_dir",
+                    "install_dir",
                     "releases_dir",
                     "receipts_dir",
                     "tmp_dir",
                 },
             )
             self.assertEqual(keys["tag"], f"rust-v{VERSION}")
-            self.assertEqual(keys["version"], VERSION)
-            self.assertEqual(keys["target"], TARGET)
             self.assertEqual(keys["current"], f"{VERSION}-{TARGET}")
             self.assertEqual(keys["previous"], "-")
-            self.assertEqual(keys["activated"], "yes")
-            self.assertEqual(keys["profile"], str(root / "home" / ".bashrc"))
             self.assertEqual(len(keys["archive_sha256"]), 64)
             self.assertEqual(len(keys["bin_sha256"]), 64)
 
@@ -410,30 +557,25 @@ class LumiInstallShTest(unittest.TestCase):
                 release_receipt,
             )
 
-            bashrc = (root / "home" / ".bashrc").read_text(encoding="utf-8")
-            self.assertIn("# >>> Lumi Codex managed PATH >>>", bashrc)
-            self.assertIn("# <<< Lumi Codex managed PATH <<<", bashrc)
-            self.assertIn(f'export PATH="{lr}/shim:$PATH"', bashrc)
-
-    def test_happy_install_requests_fork_release_urls_only(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-
-            result, requests = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                requests,
-                [METADATA_URL, CHECKSUM_URL, ARCHIVE_URL],
+            # Launcher execs the managed CLI.
+            launched = subprocess.run(
+                [str(launcher), "--version"],
+                capture_output=True,
+                check=False,
+                env=make_env(root),
+                text=True,
             )
-            for request in requests:
-                self.assertIn("Lumi-weaves/codex", request)
-            self.assertNotIn("openai/codex", requests)
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            self.assertEqual(launched.stdout.strip(), f"codex-cli {VERSION}")
+
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+            self.assertIn("doctor: OK", doctor.stdout)
 
     def test_install_preserves_official_codex_byte_for_byte(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
             official = official_codex_path(root)
             official.parent.mkdir(parents=True, exist_ok=True)
             official_bytes = os.urandom(4096)
@@ -441,7 +583,7 @@ class LumiInstallShTest(unittest.TestCase):
             official.chmod(0o755)
             before = hashlib.sha256(official_bytes).hexdigest()
 
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(hashlib.sha256(official.read_bytes()).hexdigest(), before)
             self.assertFalse((root / "official-marker").exists())
@@ -449,40 +591,35 @@ class LumiInstallShTest(unittest.TestCase):
             uninstall = run_manage(root, ["uninstall"])
             self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
             self.assertEqual(hashlib.sha256(official.read_bytes()).hexdigest(), before)
+            self.assertFalse((root / "home" / ".local" / "bin" / "lumi-codex").exists())
 
-    def test_install_no_activate_then_activate_deactivate_selection(self) -> None:
+    def test_activate_flag_and_activate_deactivate_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            env = make_env(
-                root,
-                metadata_json=metadata,
-                checksum_path=checksum,
-                archive_path=archive,
-            )
+            archive, checksum, metadata, manager = create_package_release(root)
             bashrc = root / "home" / ".bashrc"
 
-            result = run_manage(root, ["install", "--no-activate"], env=env)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertFalse(bashrc.exists())
-            self.assertEqual(receipt_keys(root)["activated"], "no")
-            self.assertEqual(receipt_keys(root)["profile"], "-")
+            self.assertFalse(bashrc_has_block(root))
 
-            result = run_manage(root, ["activate"], env=env)
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, args=["--activate"]
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("# >>> Lumi Codex managed PATH >>>", bashrc.read_text())
+            self.assertTrue(bashrc_has_block(root))
             self.assertEqual(receipt_keys(root)["activated"], "yes")
             self.assertEqual(receipt_keys(root)["profile"], str(bashrc))
 
-            result = run_manage(root, ["activate"], env=env)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(bashrc.read_text().count("# >>> Lumi Codex managed PATH >>>"), 1)
-
+            # Official codex resolution restored after deactivate.
+            env = make_env(
+                root, metadata_json=metadata, checksum_path=checksum,
+                archive_path=archive, manager_path=manager,
+            )
             result = run_manage(root, ["deactivate"], env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertNotIn("Lumi Codex managed PATH", bashrc.read_text())
+            self.assertFalse(bashrc_has_block(root))
             self.assertEqual(receipt_keys(root)["activated"], "no")
-            self.assertEqual(receipt_keys(root)["profile"], "-")
 
             result = run_manage(root, ["deactivate"], env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -490,75 +627,346 @@ class LumiInstallShTest(unittest.TestCase):
 
             result = run_manage(root, ["activate"], env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("# >>> Lumi Codex managed PATH >>>", bashrc.read_text())
+            self.assertTrue(bashrc_has_block(root))
+            self.assertEqual(receipt_keys(root)["activated"], "yes")
 
-    def test_activate_deactivate_fail_closed_on_drifted_block(self) -> None:
+            result = run_manage(root, ["activate"], env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                bashrc.read_text().count("# >>> Lumi Codex managed PATH >>>"), 1
+            )
+
+            # --no-activate is gone; the flag must be rejected.
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, args=["--no-activate"]
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Unknown install argument", result.stderr)
+
+    def test_install_dir_absent_from_path_reports_exact_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
+            elsewhere = root / "elsewhere"
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                metadata,
+                manager,
+                extra={"LUMI_INSTALL_DIR": str(elsewhere)},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue((elsewhere / "lumi-codex").is_symlink())
+            self.assertIn(f"{elsewhere} is not on PATH", result.stderr)
+            self.assertIn(str(elsewhere / "lumi-codex"), result.stderr)
+
+    def test_piped_bootstrap_install_works(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
             env = make_env(
                 root,
                 metadata_json=metadata,
                 checksum_path=checksum,
                 archive_path=archive,
+                manager_path=manager,
             )
-            result = run_manage(root, ["install"], env=env)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            bashrc = root / "home" / ".bashrc"
-            original = bashrc.read_text()
-            drifted = original.replace(
-                f'export PATH="{lumi_root(root)}/shim:$PATH"',
-                'export PATH="/tmp/somewhere-else:$PATH"',
+            piped = subprocess.run(
+                ["/bin/sh"],
+                input=INSTALL_SCRIPT.read_bytes(),
+                capture_output=True,
+                check=False,
+                env=env,
             )
-            bashrc.write_text(drifted, encoding="utf-8")
+            self.assertEqual(piped.returncode, 0, piped.stderr.decode())
+            self.assertEqual(
+                os.readlink(lumi_root(root) / "current"),
+                f"releases/{VERSION}-{TARGET}",
+            )
+            self.assertEqual(
+                hashlib.sha256(
+                    (lumi_root(root) / "manager" / "lumi-install.sh").read_bytes()
+                ).hexdigest(),
+                hashlib.sha256(INSTALL_SCRIPT.read_bytes()).hexdigest(),
+            )
 
-            result = run_manage(root, ["activate"], env=env)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(bashrc.read_text(), drifted)
-
-            result = run_manage(root, ["deactivate"], env=env)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertEqual(bashrc.read_text(), drifted)
-
-            result = run_manage(root, ["doctor"], env=env)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("PROBLEMS FOUND", result.stdout)
-
-    def test_repeat_install_reuses_complete_release(self) -> None:
+    def test_public_install_requires_manager_asset_and_dev_mode_is_opt_in(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
+            no_manager_metadata = metadata_without_manager_asset(metadata)
 
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                no_manager_metadata,
+                manager,
+                extra={"LUMI_TEST_MANAGER_PATH": ""},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bootstrap asset lumi-install.sh", result.stderr)
+            self.assertFalse((lumi_root(root) / "releases").exists())
+
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                no_manager_metadata,
+                manager,
+                extra={
+                    "LUMI_TEST_MANAGER_PATH": "",
+                    "LUMI_DEV_MANAGER_SELF": str(INSTALL_SCRIPT),
+                },
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Developer mode", result.stderr)
+            self.assertEqual(
+                hashlib.sha256(
+                    (lumi_root(root) / "manager" / "lumi-install.sh").read_bytes()
+                ).hexdigest(),
+                hashlib.sha256(INSTALL_SCRIPT.read_bytes()).hexdigest(),
+            )
+
+    def test_lumi_semver_tag_version_installs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, version=LUMI_VERSION
+            )
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, release=LUMI_VERSION
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            release_dir = f"{LUMI_VERSION}-{TARGET}"
+            self.assertEqual(os.readlink(lumi_root(root) / "current"), f"releases/{release_dir}")
+            self.assertEqual(receipt_keys(root)["version"], LUMI_VERSION)
+
+    def test_invalid_lumi_semver_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, release="0.147.0-lumi"
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Invalid Codex release version", result.stderr)
+
+    def test_target_allowlist_rejects_unknown_and_traversal_before_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            for bad_target in ("bogus-target", "../../etc/passwd", "x86_64;rm"):
+                with self.subTest(target=bad_target):
+                    result, requests = install_release(
+                        root,
+                        archive,
+                        checksum,
+                        metadata,
+                        manager,
+                        args=["--target", bad_target],
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Unsupported target", result.stderr)
+                    self.assertEqual(requests, [])
+
+    def test_symlinked_root_and_control_char_root_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            real_root = root / "xdg" / "lumi-codex-real"
+            real_root.mkdir(parents=True)
+            (root / "xdg" / "lumi-codex").symlink_to("lumi-codex-real")
+
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symlinked root", result.stderr)
+            self.assertFalse((real_root / "releases").exists())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            evil_root = "/tmp/evil\nlumi-codex"
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                metadata,
+                manager,
+                extra={"LUMI_ROOT": evil_root},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("control characters", result.stderr)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            evil_install_dir = "/tmp/evil\nbin"
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                metadata,
+                manager,
+                extra={"LUMI_INSTALL_DIR": evil_install_dir},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("control characters", result.stderr)
+
+    def test_lumi_target_env_and_aarch64_target_install(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, target=AARCH64_TARGET
+            )
+            result, _ = install_release(
+                root,
+                archive,
+                checksum,
+                metadata,
+                manager,
+                args=["--target", AARCH64_TARGET],
+                extra={"LUMI_TARGET": "x86_64-unknown-linux-musl"},
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            release_dir = f"{VERSION}-{AARCH64_TARGET}"
+            self.assertEqual(os.readlink(lumi_root(root) / "current"), f"releases/{release_dir}")
+
+            with tempfile.TemporaryDirectory() as temp_dir2:
+                root2 = Path(temp_dir2)
+                archive2, checksum2, metadata2, manager2 = create_package_release(
+                    root2, target=AARCH64_TARGET
+                )
+                result2, _ = install_release(
+                    root2,
+                    archive2,
+                    checksum2,
+                    metadata2,
+                    manager2,
+                    release=VERSION,
+                    extra={"LUMI_TARGET": AARCH64_TARGET},
+                )
+                self.assertEqual(result2.returncode, 0, result2.stderr)
+
+    def test_archive_traversal_and_absolute_members_rejected(self) -> None:
+        for member in ("../escape", "/etc/escape"):
+            with self.subTest(member=member):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    if member.startswith("/"):
+                        archive, checksum, metadata, manager = create_package_release(
+                            root, absolute_member=member
+                        )
+                    else:
+                        archive, checksum, metadata, manager = create_package_release(
+                            root, traversal_member=member
+                        )
+                    result, _ = install_release(
+                        root, archive, checksum, metadata, manager
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("unsafe member paths", result.stderr)
+                    self.assertFalse((lumi_root(root) / "releases").exists())
+
+    def test_archive_symlink_member_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, symlink_member="bin/codex"
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unsafe entry types", result.stderr)
+            self.assertFalse((lumi_root(root) / "releases").exists())
+
+    def test_wrong_distribution_and_bad_metadata_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, metadata_override={"distribution": "other"}
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("completeness", result.stderr)
+            self.assertFalse((lumi_root(root) / "releases").exists())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, metadata_override={"version": OTHER_VERSION}
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("completeness", result.stderr)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root, metadata_override={"variant": "other"}
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("completeness", result.stderr)
+
+    def test_repeat_install_reuses_digest_verified_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
             (root / "requests.log").unlink()
 
-            result, requests = run_installer_with(root, archive, checksum, metadata)
+            result, requests = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(requests, [METADATA_URL])
-            self.assertIn("already installed and complete; reusing it", result.stdout)
-            releases = list((lumi_root(root) / "releases").iterdir())
-            self.assertEqual(len(releases), 1)
+            self.assertIn("digest-verified; reusing it", result.stdout)
+            self.assertEqual(len(list((lumi_root(root) / "releases").iterdir())), 1)
 
-    def test_upgrade_switches_current_and_tracks_previous(self) -> None:
+    def test_tampered_binary_is_repaired_by_reinstall(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
-            )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
-            )
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
 
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
+            codex = (
+                lumi_root(root) / "releases" / f"{VERSION}-{TARGET}" / "bin" / "codex"
+            )
+            codex.write_text(
+                f"#!/bin/sh\nprintf 'codex-cli {VERSION}\\n'\n# tampered\n",
+                encoding="utf-8",
+            )
+            codex.chmod(0o755)
+            (root / "requests.log").unlink()
+
+            result, requests = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(requests, [METADATA_URL, CHECKSUM_URL, ARCHIVE_URL, MANAGER_URL])
+            self.assertNotIn("tampered", codex.read_text(encoding="utf-8"))
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_upgrade_tracks_previous_and_rollback_swaps_both_directions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
+            )
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
+            )
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
             )
             self.assertEqual(first[0].returncode, 0, first[0].stderr)
-            second = run_installer_with(
+            second = install_release(
                 root,
                 second_archive,
                 second_checksum,
                 second_metadata,
+                second_manager,
                 release=OTHER_VERSION,
             )
             self.assertEqual(second[0].returncode, 0, second[0].stderr)
@@ -574,115 +982,117 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertEqual(keys["current"], f"{OTHER_VERSION}-{TARGET}")
             self.assertEqual(keys["previous"], f"{VERSION}-{TARGET}")
 
-    def test_checksum_bad_install_fails_without_switching(self) -> None:
+            result = run_manage(root, ["rollback"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
+            )
+            self.assertEqual(
+                os.readlink(lr / "previous"), f"releases/{OTHER_VERSION}-{TARGET}"
+            )
+
+            result = run_manage(root, ["rollback"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
+            )
+            self.assertEqual(
+                os.readlink(lr / "previous"), f"releases/{VERSION}-{TARGET}"
+            )
+
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_rollback_refuses_without_previous_or_with_missing_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lr = lumi_root(root)
+
+            result = run_manage(root, ["rollback"])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Nothing to roll back to", result.stderr)
+
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
+            second = install_release(
+                root,
+                second_archive,
+                second_checksum,
+                second_metadata,
+                second_manager,
+                release=OTHER_VERSION,
+            )
+            self.assertEqual(second[0].returncode, 0, second[0].stderr)
+            (lr / "receipts" / f"{VERSION}-{TARGET}.receipt").unlink()
+            result = run_manage(root, ["rollback"])
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Refusing rollback", result.stderr)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
+            )
+
+    def test_checksum_bad_and_metadata_failure_install_do_not_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
+            )
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
             )
             self.assertEqual(first[0].returncode, 0, first[0].stderr)
             before = receipt_keys(root)
 
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
-            result, _ = run_installer_with(
-                root,
-                second_archive,
-                second_checksum,
-                second_metadata,
-                release=OTHER_VERSION,
-                archive_mode="corrupt",
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("checksum", result.stderr)
-
-            lr = lumi_root(root)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-            self.assertFalse(
-                (lr / "releases" / f"{OTHER_VERSION}-{TARGET}").exists()
-            )
-            self.assertEqual(receipt_keys(root), before)
-
-    def test_incomplete_package_install_fails_without_switching(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
-            )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
-            )
-            self.assertEqual(first[0].returncode, 0, first[0].stderr)
-
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION, incomplete=True
-            )
-            result, _ = run_installer_with(
-                root,
-                second_archive,
-                second_checksum,
-                second_metadata,
-                release=OTHER_VERSION,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("completeness", result.stderr)
-
-            lr = lumi_root(root)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-            self.assertFalse(
-                (lr / "releases" / f"{OTHER_VERSION}-{TARGET}").exists()
-            )
-            self.assertEqual(receipt_keys(root)["current"], f"{VERSION}-{TARGET}")
-
-    def test_metadata_fetch_failure_fails_cleanly(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
             env = make_env(
                 root,
-                metadata_json=metadata,
-                checksum_path=checksum,
-                archive_path=archive,
-                metadata_failure=True,
+                release=OTHER_VERSION,
+                metadata_json=second_metadata,
+                checksum_path=second_checksum,
+                archive_path=second_archive,
+                manager_path=second_manager,
+                archive_mode="corrupt",
             )
-            result, requests = run_installer_with_env(root, env)
+            result = run_manage(root, ["install"], env=env)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("checksum", result.stderr)
+            lr = lumi_root(root)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
+            )
+            self.assertFalse((lr / "releases" / f"{OTHER_VERSION}-{TARGET}").exists())
+            self.assertEqual(receipt_keys(root), before)
+
+            env = make_env(root, metadata_failure=True)
+            result = run_manage(root, ["install"], env=env)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("release metadata", result.stderr)
-            self.assertEqual(requests, [METADATA_URL])
-            lr = lumi_root(root)
-            self.assertFalse((lr / "releases").exists())
-            self.assertFalse((lr / "receipts").exists())
-            self.assertFalse((lr / "current").exists())
 
-            result, _ = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(result.returncode, 0, result.stderr)
-
-    def test_list_reports_current_previous_and_activation(self) -> None:
+    def test_list_reports_current_previous_activation_and_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
             )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
             )
             self.assertEqual(first[0].returncode, 0, first[0].stderr)
-            second = run_installer_with(
+            second = install_release(
                 root,
                 second_archive,
                 second_checksum,
                 second_metadata,
+                second_manager,
                 release=OTHER_VERSION,
             )
             self.assertEqual(second[0].returncode, 0, second[0].stderr)
@@ -692,120 +1102,14 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertIn(f"current: {OTHER_VERSION}-{TARGET}", result.stdout)
             self.assertIn(f"previous: {VERSION}-{TARGET}", result.stdout)
             self.assertIn(f"  - {VERSION}-{TARGET}", result.stdout)
-            self.assertIn(f"  - {OTHER_VERSION}-{TARGET}", result.stdout)
-            self.assertIn("activation: enabled", result.stdout)
-
-    def test_rollback_swaps_both_directions(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
-            )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
-            )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
-            )
-            self.assertEqual(first[0].returncode, 0, first[0].stderr)
-
-            lr = lumi_root(root)
-            result = run_manage(root, ["rollback"])
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Nothing to roll back to", result.stderr)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-
-            second = run_installer_with(
-                root,
-                second_archive,
-                second_checksum,
-                second_metadata,
-                release=OTHER_VERSION,
-            )
-            self.assertEqual(second[0].returncode, 0, second[0].stderr)
-
-            result = run_manage(root, ["rollback"])
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-            self.assertEqual(
-                os.readlink(lr / "previous"), f"releases/{OTHER_VERSION}-{TARGET}"
-            )
-            keys = receipt_keys(root)
-            self.assertEqual(keys["current"], f"{VERSION}-{TARGET}")
-            self.assertEqual(keys["previous"], f"{OTHER_VERSION}-{TARGET}")
-
-            result = run_manage(root, ["rollback"])
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
-            )
-            self.assertEqual(
-                os.readlink(lr / "previous"), f"releases/{VERSION}-{TARGET}"
-            )
-
-            result = run_manage(root, ["doctor"])
-            self.assertEqual(result.returncode, 0, result.stdout)
-
-    def test_rollback_refuses_when_previous_receipt_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
-            )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
-            )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
-            )
-            self.assertEqual(first[0].returncode, 0, first[0].stderr)
-            second = run_installer_with(
-                root,
-                second_archive,
-                second_checksum,
-                second_metadata,
-                release=OTHER_VERSION,
-            )
-            self.assertEqual(second[0].returncode, 0, second[0].stderr)
-            lr = lumi_root(root)
-            (lr / "receipts" / f"{VERSION}-{TARGET}.receipt").unlink()
-
-            result = run_manage(root, ["rollback"])
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("Refusing rollback", result.stderr)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
-            )
-            self.assertEqual(
-                os.readlink(lr / "previous"), f"releases/{VERSION}-{TARGET}"
-            )
-
-    def test_activate_fails_closed_on_unknown_shim_symlink(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            result, _ = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            lr = lumi_root(root)
-            shim_codex = lr / "shim" / "codex"
-            shim_codex.unlink()
-            shim_codex.symlink_to("/usr/bin/codex")
-
-            result = run_manage(root, ["deactivate"])
-            self.assertEqual(result.returncode, 0, result.stderr)
-            result = run_manage(root, ["activate"])
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("unknown symlink", result.stderr)
+            self.assertIn("activation: disabled", result.stdout)
+            self.assertIn("launcher:", result.stdout)
 
     def test_doctor_clean_reports_official_codex_without_executing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
 
             doctor = run_manage(root, ["doctor"])
@@ -818,24 +1122,21 @@ class LumiInstallShTest(unittest.TestCase):
     def test_doctor_not_installed_reports_and_exits_zero(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            env = make_env(root)
-            result = run_manage(root, ["doctor"], env=env)
+            result = run_manage(root, ["doctor"], env=make_env(root))
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("not installed", result.stdout)
 
     def test_doctor_detects_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            first = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(first[0].returncode, 0, first[0].stderr)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
             lr = lumi_root(root)
 
-            # baseline clean
             clean = run_manage(root, ["doctor"])
             self.assertEqual(clean.returncode, 0, clean.stdout)
 
-            # tampered bin/codex content (hash mismatch)
             codex = lr / "releases" / f"{VERSION}-{TARGET}" / "bin" / "codex"
             codex.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
             codex.chmod(0o755)
@@ -844,12 +1145,12 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertIn("PROBLEMS FOUND", drifted.stdout)
             self.assertIn("bin/codex sha256", drifted.stdout)
 
-    def test_doctor_detects_corrupt_receipt_and_unknown_symlink(self) -> None:
+    def test_doctor_detects_corrupt_receipt_unknown_symlink_and_bad_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            first = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(first[0].returncode, 0, first[0].stderr)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
             lr = lumi_root(root)
 
             receipt = lr / "receipts" / "current.receipt"
@@ -876,25 +1177,39 @@ class LumiInstallShTest(unittest.TestCase):
             drifted = run_manage(root, ["doctor"])
             self.assertNotEqual(drifted.returncode, 0)
             self.assertIn("unknown symlink", drifted.stdout)
+            shim_codex.unlink()
+            shim_codex.symlink_to("../current/bin/codex")
+
+            # Unsafe current value in the receipt is confined and reported.
+            receipt.write_text(
+                receipt.read_text(encoding="utf-8").replace(
+                    f"current={VERSION}-{TARGET}", "current=../evil"
+                ),
+                encoding="utf-8",
+            )
+            drifted = run_manage(root, ["doctor"])
+            self.assertNotEqual(drifted.returncode, 0)
+            self.assertIn("unsafe", drifted.stdout)
 
     def test_doctor_detects_missing_previous_receipt_and_profile_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
             )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
             )
             self.assertEqual(first[0].returncode, 0, first[0].stderr)
-            second = run_installer_with(
+            second = install_release(
                 root,
                 second_archive,
                 second_checksum,
                 second_metadata,
+                second_manager,
                 release=OTHER_VERSION,
             )
             self.assertEqual(second[0].returncode, 0, second[0].stderr)
@@ -905,8 +1220,11 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertNotEqual(drifted.returncode, 0)
             self.assertIn("previous release", drifted.stdout)
 
-            # restore, then remove the activated profile block
-            run_installer_with(root, first_archive, first_checksum, first_metadata)
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager,
+                args=["--activate"],
+            )
+            self.assertEqual(first[0].returncode, 0, first[0].stderr)
             bashrc = root / "home" / ".bashrc"
             lines = [
                 line
@@ -922,7 +1240,7 @@ class LumiInstallShTest(unittest.TestCase):
     def test_uninstall_removes_owned_paths_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
             official = official_codex_path(root)
             official.parent.mkdir(parents=True, exist_ok=True)
             official_bytes = os.urandom(2048)
@@ -938,8 +1256,9 @@ class LumiInstallShTest(unittest.TestCase):
                 metadata_json=metadata,
                 checksum_path=checksum,
                 archive_path=archive,
+                manager_path=manager,
             )
-            result = run_manage(root, ["install"], env=env)
+            result = run_manage(root, ["install", "--activate"], env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(bashrc_has_block(root))
 
@@ -947,6 +1266,7 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertEqual(uninstall.returncode, 0, uninstall.stderr)
             self.assertFalse(lumi_root(root).exists())
             self.assertFalse(bashrc_has_block(root))
+            self.assertFalse((root / "home" / ".local" / "bin" / "lumi-codex").exists())
             self.assertEqual(
                 hashlib.sha256(official.read_bytes()).hexdigest(), official_hash
             )
@@ -955,11 +1275,11 @@ class LumiInstallShTest(unittest.TestCase):
             )
             self.assertTrue((root / "xdg").exists())
 
-    def test_uninstall_refuses_unknown_shim_symlink(self) -> None:
+    def test_uninstall_refuses_unknown_symlink_missing_receipt_and_drift(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
             lr = lumi_root(root)
 
@@ -970,91 +1290,138 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertNotEqual(uninstall.returncode, 0)
             self.assertIn("Refusing uninstall", uninstall.stderr)
             self.assertTrue((lr / "releases").exists())
-            self.assertTrue((lr / "receipts" / "current.receipt").exists())
+            shim_codex.unlink()
+            shim_codex.symlink_to("../current/bin/codex")
 
-    def test_uninstall_refuses_without_receipt(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            result, _ = run_installer_with(root, archive, checksum, metadata)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            lr = lumi_root(root)
             (lr / "receipts" / "current.receipt").unlink()
-
             uninstall = run_manage(root, ["uninstall"])
             self.assertNotEqual(uninstall.returncode, 0)
             self.assertIn("Refusing uninstall", uninstall.stderr)
             self.assertTrue((lr / "releases").exists())
 
-    def test_unknown_target_refused_without_state_change(self) -> None:
+    def test_uninstall_refuses_drifted_or_symlinked_profile_before_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            env = make_env(
-                root,
-                metadata_json=metadata,
-                checksum_path=checksum,
-                archive_path=archive,
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, args=["--activate"]
             )
-            result = run_manage(
-                root, ["install", "--target", "aarch64-unknown-linux-musl"], env=env
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("no package asset", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
             lr = lumi_root(root)
-            self.assertFalse((lr / "releases").exists())
-            self.assertFalse((lr / "receipts").exists())
-            self.assertFalse((lr / "current").exists())
+            bashrc = root / "home" / ".bashrc"
 
-            result = run_manage(root, ["install", "--target", "bogus-target"], env=env)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("no package asset", result.stderr)
+            drifted = bashrc.read_text(encoding="utf-8").replace(
+                f'export PATH="{lr}/shim:$PATH"',
+                'export PATH="/tmp/somewhere-else:$PATH"',
+            )
+            bashrc.write_text(drifted, encoding="utf-8")
+            uninstall = run_manage(root, ["uninstall"])
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("Refusing uninstall", uninstall.stderr)
+            self.assertIn("drifted", uninstall.stderr)
+            self.assertTrue((lr / "releases").exists())
+
+            bashrc.write_text(
+                bashrc.read_text(encoding="utf-8").replace(
+                    'export PATH="/tmp/somewhere-else:$PATH"',
+                    f'export PATH="{lr}/shim:$PATH"',
+                ),
+                encoding="utf-8",
+            )
+            bashrc_real = root / "home" / ".bashrc.real"
+            bashrc_real.write_text("real\n", encoding="utf-8")
+            bashrc.unlink()
+            bashrc.symlink_to(".bashrc.real")
+            uninstall = run_manage(root, ["uninstall"])
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("symlink", uninstall.stderr)
+            self.assertTrue((lr / "releases").exists())
+
+    def test_unknown_launcher_target_refused_on_uninstall(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            launcher = root / "home" / ".local" / "bin" / "lumi-codex"
+            launcher.unlink()
+            launcher.symlink_to("/usr/bin/codex")
+            uninstall = run_manage(root, ["uninstall"])
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("Refusing uninstall", uninstall.stderr)
+            self.assertTrue((lumi_root(root) / "releases").exists())
 
     def test_launcher_execs_current_codex_and_intercepts_manage(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
+            env = make_env(
+                root, metadata_json=metadata, checksum_path=checksum,
+                archive_path=archive, manager_path=manager,
+            )
+            launcher = root / "home" / ".local" / "bin" / "lumi-codex"
 
-            launched = run_shim(root, ["--version"])
+            launched = subprocess.run(
+                [str(launcher), "--version"], capture_output=True, check=False,
+                env=env, text=True,
+            )
             self.assertEqual(launched.returncode, 0, launched.stderr)
             self.assertEqual(launched.stdout.strip(), f"codex-cli {VERSION}")
 
-            launched = run_shim(root, [])
+            launched = subprocess.run(
+                [str(launcher)], capture_output=True, check=False, env=env, text=True
+            )
             self.assertEqual(launched.returncode, 0, launched.stderr)
             self.assertEqual(launched.stdout.strip(), f"codex-cli {VERSION}")
 
-            managed = run_shim(root, ["manage", "list"])
+            managed = subprocess.run(
+                [str(launcher), "manage", "list"], capture_output=True, check=False,
+                env=env, text=True,
+            )
             self.assertEqual(managed.returncode, 0, managed.stderr)
             self.assertIn(f"current: {VERSION}-{TARGET}", managed.stdout)
 
-            bogus = run_shim(root, ["manage", "bogus"])
+            bogus = subprocess.run(
+                [str(launcher), "manage", "bogus"], capture_output=True, check=False,
+                env=env, text=True,
+            )
             self.assertNotEqual(bogus.returncode, 0)
             self.assertIn("Unknown Lumi Codex action", bogus.stderr)
+
+            shim_launched = subprocess.run(
+                [str(lumi_root(root) / "shim" / "lumi-codex"), "--version"],
+                capture_output=True, check=False, env=env, text=True,
+            )
+            self.assertEqual(shim_launched.stdout.strip(), f"codex-cli {VERSION}")
 
     def test_metadata_decoys_do_not_confuse_asset_selection(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, _metadata = create_package_release(root)
+            archive, checksum, _metadata, manager = create_package_release(root)
             env = make_env(
                 root,
-                metadata_json=release_metadata_with_decoys(archive, checksum),
+                metadata_json=release_metadata_with_decoys(archive, checksum, manager),
                 checksum_path=checksum,
                 archive_path=archive,
+                manager_path=manager,
             )
-            result, requests = run_installer_with_env(root, env)
+            result = run_manage(root, ["install"], env=env)
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(requests, [METADATA_URL, CHECKSUM_URL, ARCHIVE_URL])
+            self.assertEqual(
+                read_requests(root),
+                [METADATA_URL, CHECKSUM_URL, ARCHIVE_URL, MANAGER_URL],
+            )
 
     def test_concurrent_installs_serialize_to_consistent_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
             )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
             env_a = make_env(
                 root,
@@ -1062,6 +1429,7 @@ class LumiInstallShTest(unittest.TestCase):
                 metadata_json=first_metadata,
                 checksum_path=first_checksum,
                 archive_path=first_archive,
+                manager_path=first_manager,
                 archive_delay="3",
             )
             env_b = make_env(
@@ -1070,6 +1438,7 @@ class LumiInstallShTest(unittest.TestCase):
                 metadata_json=second_metadata,
                 checksum_path=second_checksum,
                 archive_path=second_archive,
+                manager_path=second_manager,
                 archive_delay="3",
             )
 
@@ -1087,8 +1456,8 @@ class LumiInstallShTest(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
             )
-            out_a, err_a = proc_a.communicate(timeout=60)
-            out_b, err_b = proc_b.communicate(timeout=60)
+            out_a, err_a = proc_a.communicate(timeout=90)
+            out_b, err_b = proc_b.communicate(timeout=90)
             self.assertEqual(proc_a.returncode, 0, out_a + err_a)
             self.assertEqual(proc_b.returncode, 0, out_b + err_b)
 
@@ -1109,12 +1478,13 @@ class LumiInstallShTest(unittest.TestCase):
     def test_interruption_during_download_leaves_no_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive, checksum, metadata = create_package_release(root)
+            archive, checksum, metadata, manager = create_package_release(root)
             env = make_env(
                 root,
                 metadata_json=metadata,
                 checksum_path=checksum,
                 archive_path=archive,
+                manager_path=manager,
                 archive_delay="30",
             )
             proc = subprocess.Popen(
@@ -1139,38 +1509,41 @@ class LumiInstallShTest(unittest.TestCase):
             self.assertFalse((lr / "receipts").exists())
             self.assertFalse((lr / "current").exists())
             self.assertFalse(bashrc_has_block(root))
+            self.assertFalse((lr / "tmp" / "pending.journal").exists())
 
-            result, _ = run_installer_with(root, archive, checksum, metadata)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertEqual(result.returncode, 0, result.stderr)
             doctor = run_manage(root, ["doctor"])
             self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
 
-    def test_interruption_during_upgrade_keeps_previous_current(self) -> None:
+    def test_interruption_after_current_switch_reconciles_and_preserves_old_good(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            first_archive, first_checksum, first_metadata = create_package_release(
-                root, version=VERSION
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
             )
-            second_archive, second_checksum, second_metadata = create_package_release(
-                root, version=OTHER_VERSION
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
             )
-            first = run_installer_with(
-                root, first_archive, first_checksum, first_metadata
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
             )
             self.assertEqual(first[0].returncode, 0, first[0].stderr)
-            bashrc_before = (
-                root / "home" / ".bashrc"
-            ).read_text(encoding="utf-8")
-            keys_before = receipt_keys(root)
+            lr = lumi_root(root)
 
+            # Start an upgrade and SIGKILL the whole session right after the
+            # current symlink has switched but before the previous switch.
             env = make_env(
                 root,
                 release=OTHER_VERSION,
                 metadata_json=second_metadata,
                 checksum_path=second_checksum,
                 archive_path=second_archive,
-                archive_delay="30",
+                manager_path=second_manager,
             )
+            env["LUMI_TEST_SLOW_AFTER_SWITCH"] = "30"
             proc = subprocess.Popen(
                 ["/bin/sh", str(INSTALL_SCRIPT), "manage", "install"],
                 env=env,
@@ -1179,74 +1552,140 @@ class LumiInstallShTest(unittest.TestCase):
                 text=True,
                 start_new_session=True,
             )
-            deadline = time.monotonic() + 15
-            other_archive_url = (
-                f"https://github.com/Lumi-weaves/codex/releases/download/"
-                f"rust-v{OTHER_VERSION}/codex-package-{TARGET}.tar.gz"
-            )
+            deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
-                if other_archive_url in read_requests(root):
-                    break
+                try:
+                    if (
+                        os.readlink(lr / "current")
+                        == f"releases/{OTHER_VERSION}-{TARGET}"
+                    ):
+                        break
+                except FileNotFoundError:
+                    pass
                 time.sleep(0.05)
-            self.assertIn(other_archive_url, read_requests(root))
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
+            )
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             proc.communicate(timeout=10)
 
-            lr = lumi_root(root)
-            self.assertEqual(
-                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
-            )
-            self.assertEqual(receipt_keys(root), keys_before)
-            self.assertEqual(
-                (root / "home" / ".bashrc").read_text(encoding="utf-8"),
-                bashrc_before,
-            )
+            journal = lr / "tmp" / "pending.journal"
+            self.assertTrue(journal.exists())
+            # The crash happened before the previous switch: previous is still
+            # absent and the journal keeps the old-good release as its target.
+            self.assertFalse(os.path.lexists(lr / "previous"))
 
-            second = run_installer_with(
+            # Re-running the same install reconciles the journal deterministically.
+            result, _ = install_release(
                 root,
                 second_archive,
                 second_checksum,
                 second_metadata,
+                second_manager,
                 release=OTHER_VERSION,
             )
-            self.assertEqual(second[0].returncode, 0, second[0].stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Reconciled journal", result.stdout)
+            self.assertFalse(journal.exists())
             self.assertEqual(
                 os.readlink(lr / "current"), f"releases/{OTHER_VERSION}-{TARGET}"
             )
+            self.assertEqual(
+                os.readlink(lr / "previous"), f"releases/{VERSION}-{TARGET}"
+            )
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
 
+            # Old-good release is preserved as the rollback target.
+            result = run_manage(root, ["rollback"])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
+            )
 
-def bashrc_has_block(root: Path) -> bool:
-    bashrc = root / "home" / ".bashrc"
-    if not bashrc.exists():
-        return False
-    return "# >>> Lumi Codex managed PATH >>>" in bashrc.read_text(encoding="utf-8")
+    def test_tampered_journal_fails_closed_and_doctor_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            lr = lumi_root(root)
 
+            journal = lr / "tmp" / "pending.journal"
+            journal.parent.mkdir(parents=True, exist_ok=True)
+            journal.write_text(
+                "LUMI-CODEX-JOURNAL-V1\n"
+                "schema=1\n"
+                "op=install\n"
+                "current_old=0.147.0-x86_64-unknown-linux-musl\n"
+                "current_new=../../etc\n"
+                "previous_old=-\n"
+                "previous_new=-\n",
+                encoding="utf-8",
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("journal", result.stderr)
+            self.assertEqual(
+                os.readlink(lr / "current"), f"releases/{VERSION}-{TARGET}"
+            )
 
-def run_installer_with(
-    root: Path,
-    archive: Path,
-    checksum: Path,
-    metadata: str,
-    *,
-    release: str = VERSION,
-    archive_mode: str = "",
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    env = make_env(
-        root,
-        release=release,
-        metadata_json=metadata,
-        checksum_path=checksum,
-        archive_path=archive,
-        archive_mode=archive_mode,
-    )
-    return run_installer_with_env(root, env)
+            doctor = run_manage(root, ["doctor"])
+            self.assertNotEqual(doctor.returncode, 0)
+            self.assertIn("journal", doctor.stdout)
 
+            uninstall = run_manage(root, ["uninstall"])
+            self.assertNotEqual(uninstall.returncode, 0)
+            self.assertIn("journal", uninstall.stderr)
+            self.assertTrue((lr / "releases").exists())
 
-def run_installer_with_env(
-    root: Path, env: dict[str, str]
-) -> tuple[subprocess.CompletedProcess[str], list[str]]:
-    result = run_manage(root, ["install"], env=env)
-    return result, read_requests(root)
+    def test_valid_stale_journal_reconciled_by_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first_archive, first_checksum, first_metadata, first_manager = (
+                create_package_release(root, version=VERSION)
+            )
+            second_archive, second_checksum, second_metadata, second_manager = (
+                create_package_release(root, version=OTHER_VERSION)
+            )
+            first = install_release(
+                root, first_archive, first_checksum, first_metadata, first_manager
+            )
+            self.assertEqual(first[0].returncode, 0, first[0].stderr)
+            second = install_release(
+                root,
+                second_archive,
+                second_checksum,
+                second_metadata,
+                second_manager,
+                release=OTHER_VERSION,
+            )
+            self.assertEqual(second[0].returncode, 0, second[0].stderr)
+            lr = lumi_root(root)
+
+            # Simulate a completed-but-not-finalized journal: switches already
+            # applied, receipt still the old one.
+            journal = lr / "tmp" / "pending.journal"
+            journal.write_text(
+                "LUMI-CODEX-JOURNAL-V1\n"
+                "schema=1\n"
+                "op=rollback\n"
+                f"current_old={VERSION}-{TARGET}\n"
+                f"current_new={OTHER_VERSION}-{TARGET}\n"
+                f"previous_old={OTHER_VERSION}-{TARGET}\n"
+                f"previous_new={VERSION}-{TARGET}\n",
+                encoding="utf-8",
+            )
+            os.unlink(lr / "previous")
+            os.symlink(f"releases/{VERSION}-{TARGET}", lr / "previous")
+
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+            self.assertIn("Reconciled journal", doctor.stdout)
+            self.assertFalse(journal.exists())
+            keys = receipt_keys(root)
+            self.assertEqual(keys["current"], f"{OTHER_VERSION}-{TARGET}")
+            self.assertEqual(keys["previous"], f"{VERSION}-{TARGET}")
 
 
 if __name__ == "__main__":
