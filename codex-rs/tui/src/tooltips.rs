@@ -128,6 +128,7 @@ pub(crate) mod announcement {
     use codex_http_client::ClientRouteClass;
     use codex_http_client::HttpClientFactory;
     use codex_http_client::RouteAwareClientPool;
+    use codex_install_context::DISTRIBUTION;
     use codex_protocol::account::PlanType;
     use regex_lite::Regex;
     use serde::Deserialize;
@@ -139,6 +140,13 @@ pub(crate) mod announcement {
 
     /// Prewarm the cache of the announcement tip.
     pub(crate) fn prewarm(http_client_factory: HttpClientFactory) {
+        if DISTRIBUTION.is_lumi() {
+            // Lumi builds never fetch OpenAI's announcement tip from the
+            // official repository; record the refusal so later reads of the
+            // cache also stay empty.
+            let _ = ANNOUNCEMENT_TIP.set(None);
+            return;
+        }
         if ANNOUNCEMENT_TIP.get().is_some() {
             return;
         }
@@ -150,6 +158,9 @@ pub(crate) mod announcement {
 
     /// Fetch the announcement tip, return None if the prewarm is not done yet.
     pub(crate) fn fetch_announcement_tip(plan: Option<PlanType>) -> Option<String> {
+        if DISTRIBUTION.is_lumi() {
+            return None;
+        }
         ANNOUNCEMENT_TIP
             .get()
             .cloned()

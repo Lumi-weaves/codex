@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -95,6 +96,58 @@ class PackageLayoutTest(unittest.TestCase):
             )
 
             self.assertTrue((package_dir / "bin" / "codex-code-mode-host").is_file())
+
+    def test_package_metadata_declares_lumi_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_dir = root / "package"
+            package_dir.mkdir()
+            inputs = PackageInputs(
+                entrypoint_bin=touch_executable(root / "codex"),
+                code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                rg_bin=touch_executable(root / "rg"),
+                zsh_bin=None,
+                bwrap_bin=touch_executable(root / "bwrap"),
+                codex_command_runner_bin=None,
+                codex_windows_sandbox_setup_bin=None,
+            )
+            variant = PACKAGE_VARIANTS["codex"]
+            spec = TARGET_SPECS["x86_64-unknown-linux-musl"]
+
+            build_package_dir(package_dir, "1.2.3", variant, spec, inputs)
+            metadata = json.loads(
+                (package_dir / "codex-package.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["distribution"], "lumi")
+            validate_package_dir(package_dir, variant, spec, include_zsh=False)
+
+    def test_validate_rejects_package_without_lumi_distribution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            package_dir = root / "package"
+            package_dir.mkdir()
+            inputs = PackageInputs(
+                entrypoint_bin=touch_executable(root / "codex"),
+                code_mode_host_bin=touch_executable(root / "codex-code-mode-host"),
+                rg_bin=touch_executable(root / "rg"),
+                zsh_bin=None,
+                bwrap_bin=touch_executable(root / "bwrap"),
+                codex_command_runner_bin=None,
+                codex_windows_sandbox_setup_bin=None,
+            )
+            variant = PACKAGE_VARIANTS["codex"]
+            spec = TARGET_SPECS["x86_64-unknown-linux-musl"]
+            build_package_dir(package_dir, "1.2.3", variant, spec, inputs)
+
+            metadata_path = package_dir / "codex-package.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            del metadata["distribution"]
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError, "Invalid package metadata field 'distribution'"
+            ):
+                validate_package_dir(package_dir, variant, spec, include_zsh=False)
 
 
 def touch_executable(path: Path) -> Path:

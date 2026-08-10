@@ -84,6 +84,7 @@ def build_package_dir(
 
     metadata = {
         "layoutVersion": LAYOUT_VERSION,
+        "distribution": "lumi",
         "version": version,
         "target": spec.target,
         "variant": variant.name,
@@ -120,6 +121,7 @@ def validate_package_dir(
 
     expected_metadata = {
         "layoutVersion": LAYOUT_VERSION,
+        "distribution": "lumi",
         "target": spec.target,
         "variant": variant.name,
         "entrypoint": f"bin/{variant.entrypoint_name(spec)}",
