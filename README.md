@@ -68,31 +68,46 @@ behaves like upstream.
 
 Lumi builds identify themselves with a `-lumi.N` version and refuse every
 official OpenAI update action, background update check, doctor update probe,
-and announcement feed. Linux canary releases are installed independently as
-`lumi-codex`; they do not modify `CODEX_HOME` or shadow an existing `codex`
-unless the user explicitly activates the reversible Lumi shim.
+and announcement feed. Canary releases are installed independently as
+`lumi-codex` through the canonical Codex precompiled-package installer flow,
+fork-aware for Lumi: they download only from the `Lumi-weaves/codex` GitHub
+Releases, install into a Lumi-owned root
+(`${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex`), verify the checksum
+manifest against the GitHub release-metadata digest and the package archive
+against the manifest, and never modify `CODEX_HOME`, an existing `codex`
+binary, a shell profile, or PATH.
 
 After the `rust-v0.147.0-lumi.1` canary assets have been published, its
 version-pinned one-command install is:
 
 ```shell
-curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.1/lumi-install.sh | \
-  sh -s -- manage install --release 0.147.0-lumi.1
+curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.1/install.sh | \
+  sh -s -- --release 0.147.0-lumi.1
 ```
 
-The command is intentionally version-pinned because GitHub's `latest` endpoint
-does not select prereleases. Until that tag exists, build from source instead;
-do not treat the command above as a live release URL.
+```powershell
+$env:LUMI_RELEASE = '0.147.0-lumi.1'
+irm https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.1/install.ps1 | iex
+```
+
+The commands are intentionally version-pinned because GitHub's `latest`
+endpoint does not select prereleases. Until that tag exists, build from source
+instead; do not treat them as live release URLs.
 
 ```shell
-lumi-codex manage doctor
-lumi-codex manage activate    # optional: make `codex` resolve to Lumi in new shells
-lumi-codex manage deactivate  # restore the prior resolution
-lumi-codex manage rollback
-lumi-codex manage uninstall
+lumi-codex
 ```
 
-See the [installer safety and recovery contract](./scripts/install/LUMI_INSTALL.md).
+`lumi-codex` is a tiny launcher that execs the verified
+`<root>/current/bin/codex`, so the packaged resources and the code-mode host
+stay adjacent to the real binary. The Windows installer
+(`scripts/install/install.ps1`) mirrors the fork repo, tag, root, and version
+behavior and consumes the x86_64 or arm64 Windows package published with every
+canary; an incomplete release fails closed. The earlier Lumi
+canary manager actions (doctor, activate, rollback, uninstall) were removed
+with the manager; see the
+[installer documentation](./scripts/install/LUMI_INSTALL.md) for the full
+flow, layout, and safety model.
 The TUI can also cooperate with an explicitly user-started official app-server
 from the same upstream `MAJOR.MINOR.PATCH` release; version mismatch or missing
 identity fails before thread/session traffic. This is not Desktop discovery,
@@ -100,7 +115,10 @@ replacement, or lifecycle ownership. See
 [remote app-server compatibility](./codex-rs/app-server/README.md#remote-client-compatibility).
 
 The OpenAI install commands below install upstream Codex and do not include the
-Lumi patches. See [Installing & building](./docs/install.md) to build the fork.
+Lumi patches; they are served from OpenAI's own hosts. The Lumi fork installer
+in this repository (`scripts/install/install.sh`, published as `install.sh`) downloads only from the `Lumi-weaves/codex` GitHub Releases
+and never uses the OpenAI mirror. See
+[Installing & building](./docs/install.md) to build the fork.
 
 ---
 

@@ -1,32 +1,43 @@
 #!/bin/sh
 
+# Lumi Codex standalone installer (canonical Codex package flow, fork-aware).
+#
+# Installs Lumi Codex package releases published on the Lumi-weaves/codex
+# GitHub Releases into an independent Lumi-owned root
+# (${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex), side-by-side with any
+# official or package-managed Codex install. It never writes to CODEX_HOME,
+# never touches a `codex` binary or shell profile, and installs only a visible
+# `lumi-codex` launcher that execs <root>/current/bin/codex so packaged
+# resources and the code-mode host stay adjacent to the real binary.
+#
+# The flow is the canonical precompiled-package installer: GitHub release
+# metadata (tag + per-asset SHA-256 digests), a codex-package_SHA256SUMS
+# checksum manifest, staged immutable version directories under
+# <root>/releases, an atomic `current` symlink switch, an install lock, and
+# exact binary-version verification. The GitHub release-metadata digest is
+# the trust anchor (no artifact signing yet) and the checksum manifest is the
+# second layer; downloads that fail one layer are re-verified against the
+# GitHub release metadata before the install fails closed.
+
 set -eu
 
-RELEASE="${CODEX_RELEASE:-latest}"
-NON_INTERACTIVE="${CODEX_NON_INTERACTIVE:-false}"
-DEFAULT_PREFER_RELEASES_OPENAI_COM="true"
-PREFER_RELEASES_OPENAI_COM="${CODEX_INSTALLER_USE_RELEASES_OPENAI_COM:-$DEFAULT_PREFER_RELEASES_OPENAI_COM}"
-RELEASES_BASE_URL="https://releases.openai.com/codex"
+RELEASE="${LUMI_RELEASE:-latest}"
 RELEASES_CONNECT_TIMEOUT=10
 RELEASES_METADATA_TIMEOUT=30
 RELEASES_ASSET_TIMEOUT=300
-release_source="github"
-
-BIN_DIR="${CODEX_INSTALL_DIR:-$HOME/.local/bin}"
-BIN_PATH="$BIN_DIR/codex"
-CODE_MODE_HOST_BIN_PATH="$BIN_DIR/codex-code-mode-host"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-STANDALONE_ROOT="$CODEX_HOME_DIR/packages/standalone"
-RELEASES_DIR="$STANDALONE_ROOT/releases"
-CURRENT_LINK="$STANDALONE_ROOT/current"
-LOCK_FILE="$STANDALONE_ROOT/install.lock"
-LOCK_DIR="$STANDALONE_ROOT/install.lock.d"
+TARGET_ALLOWLIST="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin"
 LOCK_STALE_AFTER_SECS=600
 
-path_action="already"
-path_profile=""
-conflict_manager=""
-conflict_path=""
+BIN_DIR="${LUMI_INSTALL_DIR:-$HOME/.local/bin}"
+BIN_PATH="$BIN_DIR/lumi-codex"
+ROOT="${LUMI_ROOT:-${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex}"
+RELEASES_DIR="$ROOT/releases"
+CURRENT_LINK="$ROOT/current"
+LOCK_FILE="$ROOT/install.lock"
+LOCK_DIR="$ROOT/install.lock.d"
+
+target="${LUMI_TARGET:-}"
+platform_label=""
 lock_kind=""
 tmp_dir=""
 
@@ -62,10 +73,57 @@ validate_version() {
     return
   fi
 
-  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?$'; then
-    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]." >&2
+  # Codex SemVer plus the optional Lumi canary suffix, e.g. 0.147.0-lumi.1.
+  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?(-lumi\.[0-9]+)?$'; then
+    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]][-lumi.N]." >&2
     return 1
   fi
+}
+
+has_unsafe_chars() {
+  value="$1"
+
+  case "$value" in
+    *"'"*) return 0 ;;
+  esac
+
+  if printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+    return 0
+  fi
+
+  # grep is line-oriented and never sees the line terminator, so count
+  # embedded newlines explicitly.
+  if [ "$(printf '%s' "$value" | tr -cd '\n' | wc -c)" != 0 ]; then
+    return 0
+  fi
+
+  return 1
+}
+
+validate_abs_path() {
+  value="$1"
+  label="$2"
+
+  case "$value" in
+    /*) ;;
+    *) echo "$label must be an absolute path (got: $value)" >&2; exit 1 ;;
+  esac
+  if has_unsafe_chars "$value"; then
+    echo "$label contains control characters or quotes; refusing." >&2
+    exit 1
+  fi
+}
+
+validate_target() {
+  case " $TARGET_ALLOWLIST " in
+    *" $target "*) ;;
+    *)
+      echo "Unsupported target: $target. Supported targets: $TARGET_ALLOWLIST." >&2
+      exit 1
+      ;;
+  esac
+  printf '%s' "$target" | grep -Eq '^[a-z0-9_]+(-[a-z0-9_]+)*$' ||
+    { echo "Target contains unsafe characters: $target" >&2; exit 1; }
 }
 
 parse_args() {
@@ -79,15 +137,31 @@ parse_args() {
         RELEASE="$2"
         shift
         ;;
+      --target)
+        if [ "$#" -lt 2 ]; then
+          echo "--target requires a value." >&2
+          exit 1
+        fi
+        target="$2"
+        shift
+        ;;
       --help | -h)
         cat <<EOF
-Usage: install.sh [--release VERSION]
+Usage: install.sh [--release VERSION] [--target TARGET]
 
 Environment:
-  CODEX_RELEASE          Version to install; overridden by --release.
-  CODEX_NON_INTERACTIVE  Set to 1, true, or yes to skip prompts.
-  CODEX_INSTALLER_USE_RELEASES_OPENAI_COM
-                         Set to 0, false, or no to use GitHub Releases.
+  LUMI_RELEASE          Version to install; overridden by --release. Accepts
+                        latest or Lumi tags such as x.y.z-lumi.N or
+                        rust-vx.y.z-lumi.N.
+  LUMI_TARGET           Package target to install (default: detected
+                        platform). One of: $TARGET_ALLOWLIST
+  LUMI_INSTALL_DIR      Directory for the visible lumi-codex launcher
+                        (default: \$HOME/.local/bin).
+  LUMI_ROOT             Lumi Codex install root (default:
+                        \${XDG_DATA_HOME:-\$HOME/.local/share}/lumi-codex).
+
+Installs side-by-side: no PATH or shell profile changes, no official codex
+binary, CODEX_HOME, or auth/config is touched.
 EOF
         exit 0
         ;;
@@ -105,30 +179,16 @@ download_file() {
   output="$2"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_ASSET_TIMEOUT" "$url" -o "$output"
-        ;;
-      *)
-        curl -fsSL "$url" -o "$output"
-        ;;
-    esac
+    curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_ASSET_TIMEOUT" "$url" -o "$output"
     return
   fi
 
   if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_ASSET_TIMEOUT" -O "$output" "$url"
-        ;;
-      *)
-        wget -q -O "$output" "$url"
-        ;;
-    esac
+    wget -q -t 1 -T "$RELEASES_ASSET_TIMEOUT" -O "$output" "$url"
     return
   fi
 
-  echo "curl or wget is required to install Codex." >&2
+  echo "curl or wget is required to install Lumi Codex." >&2
   exit 1
 }
 
@@ -136,40 +196,30 @@ download_text() {
   url="$1"
 
   if command -v curl >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_METADATA_TIMEOUT" "$url"
-        ;;
-      *)
-        curl -fsSL "$url"
-        ;;
-    esac
+    curl -fsSL --connect-timeout "$RELEASES_CONNECT_TIMEOUT" --max-time "$RELEASES_METADATA_TIMEOUT" "$url"
     return
   fi
 
   if command -v wget >/dev/null 2>&1; then
-    case "$url" in
-      "$RELEASES_BASE_URL"/*)
-        wget -q -t 1 -T "$RELEASES_METADATA_TIMEOUT" -O - "$url"
-        ;;
-      *)
-        wget -q -O - "$url"
-        ;;
-    esac
+    wget -q -t 1 -T "$RELEASES_METADATA_TIMEOUT" -O - "$url"
     return
   fi
 
-  echo "curl or wget is required to install Codex." >&2
+  echo "curl or wget is required to install Lumi Codex." >&2
   exit 1
 }
 
+# Download and verify one asset. GitHub Releases is the only source, so when
+# the first-layer digest (or the required manifest lookup) fails, re-resolve
+# the GitHub release metadata and verify the already-downloaded bytes against
+# the GitHub release-asset digest -- the fork's trust anchor -- before
+# failing closed.
 download_file_with_fallback() {
   primary_url="$1"
-  fallback_url="$2"
-  output="$3"
-  expected_digest="$4"
-  fallback_asset="$5"
-  required_manifest_asset="${6:-}"
+  output="$2"
+  expected_digest="$3"
+  fallback_asset="$4"
+  required_manifest_asset="${5:-}"
 
   if download_file "$primary_url" "$output" &&
     verify_archive_digest "$output" "$expected_digest" &&
@@ -177,17 +227,7 @@ download_file_with_fallback() {
     return
   fi
 
-  if [ -z "$fallback_url" ]; then
-    return 1
-  fi
-
-  warn "Could not download or verify $primary_url; retrying from GitHub Releases."
-  download_file "$fallback_url" "$output"
-  if verify_archive_digest "$output" "$expected_digest" &&
-    { [ -z "$required_manifest_asset" ] || package_archive_digest "$required_manifest_asset" "$output" >/dev/null; }; then
-    return
-  fi
-
+  warn "Could not download or verify $primary_url; re-verifying against GitHub release metadata."
   resolve_release_from_github "$resolved_version"
   fallback_digest="$(release_asset_digest "$fallback_asset")"
   verify_archive_digest "$output" "$fallback_digest"
@@ -307,27 +347,20 @@ release_url_for_asset() {
   asset="$1"
   resolved_version="$2"
 
-  printf 'https://github.com/openai/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
-}
-
-releases_url_for_asset() {
-  asset="$1"
-  resolved_version="$2"
-
-  printf '%s/releases/%s/%s\n' "$RELEASES_BASE_URL" "$resolved_version" "$asset"
+  printf 'https://github.com/Lumi-weaves/codex/releases/download/rust-v%s/%s\n' "$resolved_version" "$asset"
 }
 
 release_metadata_url() {
   resolved_version="$1"
 
-  printf 'https://api.github.com/repos/openai/codex/releases/tags/rust-v%s\n' "$resolved_version"
+  printf 'https://api.github.com/repos/Lumi-weaves/codex/releases/tags/rust-v%s\n' "$resolved_version"
 }
 
 parse_downloaded_release_metadata() {
   requested_release="$1"
   source_name="$2"
   if ! release_metadata="$(printf '%s\n' "$release_json" | parse_release_metadata)"; then
-    echo "Could not parse $source_name release metadata for Codex $requested_release." >&2
+    echo "Could not parse $source_name release metadata for Lumi Codex $requested_release." >&2
     return 1
   fi
 }
@@ -339,7 +372,7 @@ resolve_metadata_version() {
     *) metadata_version="" ;;
   esac
   if [ -z "$metadata_version" ]; then
-    echo "Failed to resolve the latest Codex release version." >&2
+    echo "Failed to resolve the latest Lumi Codex release version." >&2
     return 1
   fi
   validate_version "$metadata_version"
@@ -349,7 +382,7 @@ resolve_release_from_github() {
   normalized_version="$1"
   if [ "$normalized_version" = "latest" ]; then
     requested_release="latest"
-    metadata_url="https://api.github.com/repos/openai/codex/releases/latest"
+    metadata_url="https://api.github.com/repos/Lumi-weaves/codex/releases/latest"
   else
     resolved_version="$normalized_version"
     requested_release="$resolved_version"
@@ -357,7 +390,11 @@ resolve_release_from_github() {
   fi
 
   if ! release_json="$(download_text "$metadata_url")"; then
-    echo "Could not fetch GitHub release metadata for Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
+    if [ "$normalized_version" = "latest" ]; then
+      echo "Could not resolve a stable Lumi Codex release. GitHub excludes prereleases from /releases/latest; pin a canary with --release x.y.z-lumi.N." >&2
+      exit 1
+    fi
+    echo "Could not fetch GitHub release metadata for Lumi Codex $requested_release. GitHub API may be unavailable or rate limited." >&2
     exit 1
   fi
 
@@ -367,52 +404,11 @@ resolve_release_from_github() {
     resolve_metadata_version
     resolved_version="$metadata_version"
   fi
-
-  release_source="github"
-}
-
-resolve_release_from_releases() {
-  normalized_version="$1"
-
-  if [ "$normalized_version" = "latest" ]; then
-    requested_release="latest"
-    metadata_url="$RELEASES_BASE_URL/channels/latest"
-  else
-    requested_release="$normalized_version"
-    metadata_url="$RELEASES_BASE_URL/releases/$normalized_version/release.json"
-  fi
-
-  if ! release_json="$(download_text "$metadata_url")"; then
-    return 1
-  fi
-
-  if ! parse_downloaded_release_metadata "$requested_release" "releases.openai.com"; then
-    return 1
-  fi
-  if ! resolve_metadata_version; then
-    return 1
-  fi
-  if [ "$normalized_version" != "latest" ] && [ "$metadata_version" != "$normalized_version" ]; then
-    echo "Release metadata version did not match requested Codex version $normalized_version." >&2
-    return 1
-  fi
-  resolved_version="$metadata_version"
-  release_source="releases.openai.com"
 }
 
 resolve_release() {
   normalized_version="$(normalize_version "$RELEASE")"
   validate_version "$normalized_version"
-
-  case "$PREFER_RELEASES_OPENAI_COM" in
-    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
-      if resolve_release_from_releases "$normalized_version" &&
-        select_release_assets; then
-        return
-      fi
-      warn "releases.openai.com is unavailable; falling back to GitHub Releases."
-      ;;
-  esac
 
   resolve_release_from_github "$normalized_version"
   select_release_assets
@@ -461,36 +457,18 @@ release_asset_digest() {
 }
 
 select_release_assets() {
-  package_asset="codex-package-$vendor_target.tar.gz"
+  package_asset="codex-package-$target.tar.gz"
   checksum_asset="codex-package_SHA256SUMS"
-  download_fallback_url=""
-  checksum_fallback_url=""
 
-  if release_asset_exists "$package_asset" &&
-    release_asset_exists "$checksum_asset"; then
-    install_layout="package"
-    asset="$package_asset"
-  elif release_asset_exists "codex-npm-$npm_tag-$resolved_version.tgz"; then
-    install_layout="legacy-platform-npm"
-    asset="codex-npm-$npm_tag-$resolved_version.tgz"
-  else
-    echo "Could not find Codex package or platform npm release assets for Codex $resolved_version." >&2
+  if ! release_asset_exists "$package_asset" ||
+    ! release_asset_exists "$checksum_asset"; then
+    echo "Could not find Codex package or checksum manifest release assets for Lumi Codex $resolved_version (target $target)." >&2
     return 1
   fi
 
-  if [ "$release_source" = "releases.openai.com" ]; then
-    download_url="$(releases_url_for_asset "$asset" "$resolved_version")"
-    download_fallback_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(releases_url_for_asset "$checksum_asset" "$resolved_version")"
-      checksum_fallback_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  else
-    download_url="$(release_url_for_asset "$asset" "$resolved_version")"
-    if [ "$install_layout" = "package" ]; then
-      checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
-    fi
-  fi
+  asset="$package_asset"
+  download_url="$(release_url_for_asset "$asset" "$resolved_version")"
+  checksum_url="$(release_url_for_asset "$checksum_asset" "$resolved_version")"
 }
 
 package_archive_digest() {
@@ -536,7 +514,7 @@ file_sha256() {
     return
   fi
 
-  echo "sha256sum, shasum, or openssl is required to verify the Codex download." >&2
+  echo "sha256sum, shasum, or openssl is required to verify the Lumi Codex download." >&2
   exit 1
 }
 
@@ -546,7 +524,7 @@ verify_archive_digest() {
   actual_digest="$(file_sha256 "$archive_path")"
 
   if [ "$actual_digest" != "$expected_digest" ]; then
-    echo "Downloaded Codex archive checksum did not match expected digest." >&2
+    echo "Downloaded Lumi Codex archive checksum did not match expected digest." >&2
     echo "expected: $expected_digest" >&2
     echo "actual:   $actual_digest" >&2
     return 1
@@ -555,119 +533,9 @@ verify_archive_digest() {
 
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    echo "$1 is required to install Codex." >&2
+    echo "$1 is required to install Lumi Codex." >&2
     exit 1
   fi
-}
-
-pick_profile() {
-  # Use the same shell-specific split Homebrew documents because there is no
-  # universal startup file across macOS/Linux login and interactive shells.
-  case "$os:${SHELL:-}" in
-    darwin:*/zsh)
-      printf '%s\n' "$HOME/.zprofile"
-      ;;
-    darwin:*/bash)
-      printf '%s\n' "$HOME/.bash_profile"
-      ;;
-    linux:*/zsh)
-      printf '%s\n' "$HOME/.zshrc"
-      ;;
-    linux:*/bash)
-      printf '%s\n' "$HOME/.bashrc"
-      ;;
-    *)
-      printf '%s\n' "$HOME/.profile"
-      ;;
-  esac
-}
-
-add_to_path() {
-  path_action="already"
-  path_profile=""
-
-  case ":$PATH:" in
-    *":$BIN_DIR:"*)
-      if [ -z "$conflict_manager" ]; then
-        return
-      fi
-      ;;
-  esac
-
-  profile="$(pick_profile)"
-  path_profile="$profile"
-  begin_marker="# >>> Codex installer >>>"
-  end_marker="# <<< Codex installer <<<"
-  path_line="export PATH=\"$BIN_DIR:\$PATH\""
-
-  if [ -f "$profile" ] && grep -F "$begin_marker" "$profile" >/dev/null 2>&1; then
-    if grep -F "$path_line" "$profile" >/dev/null 2>&1; then
-      path_action="configured"
-      return
-    fi
-
-    if grep -F "$end_marker" "$profile" >/dev/null 2>&1; then
-      rewrite_path_block "$profile" "$begin_marker" "$end_marker" "$path_line"
-      path_action="updated"
-      return
-    fi
-  fi
-
-  append_path_block "$profile" "$begin_marker" "$end_marker" "$path_line"
-  path_action="added"
-}
-
-append_path_block() {
-  profile="$1"
-  begin_marker="$2"
-  end_marker="$3"
-  path_line="$4"
-
-  {
-    printf '\n%s\n' "$begin_marker"
-    printf '%s\n' "$path_line"
-    printf '%s\n' "$end_marker"
-  } >>"$profile"
-}
-
-rewrite_path_block() {
-  profile="$1"
-  begin_marker="$2"
-  end_marker="$3"
-  path_line="$4"
-  tmp_profile="$tmp_dir/profile.$$.tmp"
-
-  awk -v begin="$begin_marker" -v end="$end_marker" -v line="$path_line" '
-    BEGIN {
-      in_block = 0
-      replaced = 0
-    }
-    $0 == begin {
-      if (!replaced) {
-        print begin
-        print line
-        print end
-        replaced = 1
-      }
-      in_block = 1
-      next
-    }
-    in_block {
-      if ($0 == end) {
-        in_block = 0
-      }
-      next
-    }
-    {
-      print
-    }
-    END {
-      if (in_block != 0) {
-        exit 1
-      }
-    }
-  ' "$profile" >"$tmp_profile"
-  mv "$tmp_profile" "$profile"
 }
 
 mkdir_lock_is_stale() {
@@ -695,7 +563,7 @@ mkdir_lock_is_stale() {
 }
 
 acquire_install_lock() {
-  mkdir -p "$STANDALONE_ROOT"
+  mkdir -p "$ROOT"
 
   if [ "$os" = "darwin" ] && command -v lockf >/dev/null 2>&1; then
     : >>"$LOCK_FILE"
@@ -736,13 +604,13 @@ release_install_lock() {
 }
 
 cleanup_stale_install_artifacts() {
-  mkdir -p "$RELEASES_DIR" "$STANDALONE_ROOT"
+  mkdir -p "$RELEASES_DIR" "$ROOT"
 
   find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -name '.staging.*' -exec rm -rf {} +
-  find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
+  find "$ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
   if [ -d "$BIN_DIR" ]; then
-    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex.*' -exec rm -f {} +
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.lumi-codex.*' -exec rm -f {} +
   fi
 }
 
@@ -792,143 +660,36 @@ current_installed_version() {
   return 0
 }
 
-resolve_existing_codex() {
-  command -v codex 2>/dev/null || true
-}
+# Reject absolute members, empty names, and any `..` component, and allow
+# only regular files and directories inside package archives. This keeps the
+# canonical tar extraction from ever writing outside the staging directory.
+validate_archive_members() {
+  archive="$1"
 
-classify_existing_codex() {
-  existing_path="$1"
-
-  if [ -z "$existing_path" ] || [ "$existing_path" = "$BIN_PATH" ]; then
+  if ! tar -tzf "$archive" 2>/dev/null | awk '
+    {
+      name = $0
+      if (name == "" || substr(name, 1, 1) == "/") { bad = 1 }
+      n = split(name, parts, "/")
+      for (i = 1; i <= n; i++) {
+        if (parts[i] == "..") { bad = 1 }
+      }
+      if (bad) exit 1
+    }
+    END { if (bad) exit 1 }
+  '; then
+    echo "Package archive contains unsafe member paths (absolute or .. traversal); refusing." >&2
     return 1
   fi
 
-  case "$existing_path" in
-    /opt/homebrew/* | /usr/local/*)
-      if [ "$os" = "darwin" ]; then
-        printf 'brew\n'
-        return 0
-      fi
-      ;;
-  esac
-
-  if [ -f "$existing_path" ] && grep -F "#!/usr/bin/env node" "$existing_path" >/dev/null 2>&1; then
-    case "$existing_path" in
-      *".bun"*)
-        printf 'bun\n'
-        ;;
-      *)
-        printf 'npm\n'
-        ;;
-    esac
-    return 0
-  fi
-
-  return 1
-}
-
-prompt_yes_no() {
-  prompt="$1"
-
-  case "$NON_INTERACTIVE" in
-    1 | [Tt][Rr][Uu][Ee] | [Yy][Ee][Ss])
-      return 1
-      ;;
-  esac
-
-  if ( : </dev/tty ) 2>/dev/null; then
-    printf '%s [y/N] ' "$prompt" >/dev/tty
-    if ! IFS= read -r answer </dev/tty; then
-      return 1
-    fi
-  elif [ -t 0 ]; then
-    printf '%s [y/N] ' "$prompt"
-    if ! IFS= read -r answer; then
-      return 1
-    fi
-  else
+  if ! tar -tvzf "$archive" 2>/dev/null | awk '
+    {
+      type = substr($1, 1, 1)
+      if (type != "-" && type != "d") { exit 1 }
+    }
+  '; then
+    echo "Package archive contains unsafe entry types (symlinks or special files); refusing." >&2
     return 1
-  fi
-
-  case "$answer" in
-    y | Y | yes | YES)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
-}
-
-print_launch_instructions() {
-  case "$path_action" in
-    added)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
-      step "PATH was added to $path_profile"
-      ;;
-    updated)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
-      step "PATH was updated in $path_profile"
-      ;;
-    configured)
-      step "Current terminal: export PATH=\"$BIN_DIR:\$PATH\" && codex"
-      step "Future terminals: open a new terminal and run: codex"
-      step "PATH is already configured in $path_profile"
-      ;;
-    *)
-      step "Current terminal: codex"
-      step "Future terminals: open a new terminal and run: codex"
-      ;;
-  esac
-}
-
-maybe_launch_codex_now() {
-  if prompt_yes_no "Start Codex now?"; then
-    step "Launching Codex"
-    "$BIN_PATH"
-  fi
-}
-
-detect_conflicting_install() {
-  existing_path="$(resolve_existing_codex)"
-  manager="$(classify_existing_codex "$existing_path" || true)"
-
-  if [ -z "$manager" ]; then
-    return
-  fi
-
-  conflict_manager="$manager"
-  conflict_path="$existing_path"
-  step "Detected existing $manager-managed Codex at $existing_path"
-  warn "Multiple managed Codex installs can be ambiguous because PATH order decides which one runs."
-}
-
-handle_conflicting_install() {
-  if [ -z "$conflict_manager" ]; then
-    return
-  fi
-
-  case "$conflict_manager" in
-    brew)
-      uninstall_cmd="brew uninstall --cask codex"
-      ;;
-    bun)
-      uninstall_cmd="bun remove -g @openai/codex"
-      ;;
-    *)
-      uninstall_cmd="npm uninstall -g @openai/codex"
-      ;;
-  esac
-
-  if prompt_yes_no "Uninstall the existing $conflict_manager-managed Codex now?"; then
-    step "Running: $uninstall_cmd"
-    if ! sh -c "$uninstall_cmd"; then
-      warn "Failed to uninstall the existing $conflict_manager-managed Codex. Continuing with the standalone install."
-    fi
-  else
-    warn "Leaving the existing $conflict_manager-managed Codex installed. PATH order will determine which codex runs."
   fi
 }
 
@@ -950,34 +711,13 @@ install_package_release() {
   fi
   ln -sf "bin/codex" "$stage_release/codex"
 
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
-    rm -rf "$release_dir"
+  # Fail closed instead of deleting a foreign file or symlink at the release
+  # path; a plain directory is our own incomplete state and is replaced.
+  if [ -L "$release_dir" ] || { [ -e "$release_dir" ] && [ ! -d "$release_dir" ]; }; then
+    echo "Refusing to replace unexpected non-directory at $release_dir" >&2
+    exit 1
   fi
-  mv "$stage_release" "$release_dir"
-}
-
-install_legacy_platform_npm_release() {
-  release_dir="$1"
-  archive_path="$2"
-  target="$3"
-  stage_release="$RELEASES_DIR/.staging.$(basename "$release_dir").$$"
-  extract_dir="$tmp_dir/extract"
-  vendor_root="$extract_dir/package/vendor/$target"
-
-  mkdir -p "$RELEASES_DIR"
-  rm -rf "$stage_release" "$extract_dir"
-  mkdir -p "$stage_release/codex-resources" "$extract_dir"
-  tar -xzf "$archive_path" -C "$extract_dir"
-
-  cp "$vendor_root/codex/codex" "$stage_release/codex"
-  cp "$vendor_root/path/rg" "$stage_release/codex-resources/rg"
-  chmod 0755 "$stage_release/codex" "$stage_release/codex-resources/rg"
-  if [ -f "$vendor_root/codex-resources/bwrap" ]; then
-    cp "$vendor_root/codex-resources/bwrap" "$stage_release/codex-resources/bwrap"
-    chmod 0755 "$stage_release/codex-resources/bwrap"
-  fi
-
-  if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
+  if [ -e "$release_dir" ]; then
     rm -rf "$release_dir"
   fi
   mv "$stage_release" "$release_dir"
@@ -987,82 +727,104 @@ release_dir_is_complete() {
   release_dir="$1"
   expected_version="$2"
   expected_target="$3"
-  layout="$4"
 
   [ -d "$release_dir" ] &&
     [ "$(basename "$release_dir")" = "$expected_version-$expected_target" ] ||
     return 1
 
-  case "$layout" in
-    package)
-      [ -f "$release_dir/codex-package.json" ] &&
-        [ -x "$release_dir/bin/codex" ] &&
-        [ -x "$release_dir/bin/codex-code-mode-host" ] &&
-        [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-path/rg" ] ||
+  # Archive-shipped executables must be regular files, not symlinks.
+  [ -f "$release_dir/codex-package.json" ] && [ ! -L "$release_dir/codex-package.json" ] &&
+    [ -f "$release_dir/bin/codex" ] && [ ! -L "$release_dir/bin/codex" ] &&
+    [ -x "$release_dir/bin/codex" ] &&
+    [ -f "$release_dir/bin/codex-code-mode-host" ] && [ ! -L "$release_dir/bin/codex-code-mode-host" ] &&
+    [ -x "$release_dir/bin/codex-code-mode-host" ] &&
+    [ -x "$release_dir/codex" ] &&
+    [ -f "$release_dir/codex-path/rg" ] && [ ! -L "$release_dir/codex-path/rg" ] &&
+    [ -x "$release_dir/codex-path/rg" ] ||
+    return 1
+
+  case "$expected_target" in
+    *linux*)
+      [ -f "$release_dir/codex-resources/bwrap" ] && [ ! -L "$release_dir/codex-resources/bwrap" ] &&
+        [ -x "$release_dir/codex-resources/bwrap" ] ||
         return 1
-      ;;
-    legacy-platform-npm)
-      [ -x "$release_dir/codex" ] &&
-        [ -x "$release_dir/codex-resources/rg" ] ||
-        return 1
-      ;;
-    *)
-      return 1
       ;;
   esac
 
-  case "$layout:$expected_target" in
-    package:*linux* | legacy-platform-npm:*linux*)
-      [ -x "$release_dir/codex-resources/bwrap" ] || return 1
-      ;;
-  esac
-
-  installed_version="$(version_from_binary "$release_dir/bin/codex" || version_from_binary "$release_dir/codex" || true)"
+  installed_version="$(version_from_binary "$release_dir/bin/codex" || true)"
   [ "$installed_version" = "$expected_version" ]
 }
 
 update_current_link() {
   release_dir="$1"
-  tmp_link="$STANDALONE_ROOT/.current.$$"
 
+  # Fail closed on foreign or non-symlink state at <root>/current; only a
+  # symlink pointing inside our releases directory may be retargeted.
+  if [ -e "$CURRENT_LINK" ] || [ -L "$CURRENT_LINK" ]; then
+    if [ ! -L "$CURRENT_LINK" ]; then
+      echo "Refusing to replace non-symlink at $CURRENT_LINK" >&2
+      exit 1
+    fi
+    case "$(readlink "$CURRENT_LINK" 2>/dev/null || true)" in
+      "$RELEASES_DIR"/*) ;;
+      *)
+        echo "Refusing to retarget foreign symlink at $CURRENT_LINK" >&2
+        exit 1
+        ;;
+    esac
+  fi
+
+  tmp_link="$ROOT/.current.$$"
   replace_path_with_symlink "$CURRENT_LINK" "$release_dir" "$tmp_link"
 }
 
-release_codex_relative_path() {
-  release_dir="$1"
-
-  if [ -x "$release_dir/bin/codex" ]; then
-    printf 'bin/codex\n'
-  else
-    printf 'codex\n'
-  fi
+launcher_contents() {
+  printf '%s\n' '#!/bin/sh'
+  printf '%s\n' '# Lumi Codex launcher: execs the verified package entrypoint so'
+  printf '%s\n' '# code-mode host and packaged resources stay adjacent to the real binary.'
+  printf "exec '%s/current/bin/codex' \"\$@\"\n" "$ROOT"
 }
 
-update_visible_command() {
-  release_dir="$1"
+install_visible_launcher() {
   mkdir -p "$BIN_DIR"
-  tmp_link="$BIN_DIR/.codex.$$"
-  codex_relative_path="$(release_codex_relative_path "$release_dir")"
+  desired="$(launcher_contents)"
 
-  replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$codex_relative_path" "$tmp_link"
-
-  if [ "$os" = "darwin" ] && [ -x "$release_dir/bin/codex-code-mode-host" ]; then
-    replace_path_with_symlink \
-      "$CODE_MODE_HOST_BIN_PATH" \
-      "$CURRENT_LINK/bin/codex-code-mode-host" \
-      "$tmp_link"
-  elif [ "$(readlink "$CODE_MODE_HOST_BIN_PATH" 2>/dev/null || true)" = \
-    "$CURRENT_LINK/bin/codex-code-mode-host" ]; then
-    rm -f "$CODE_MODE_HOST_BIN_PATH"
+  if [ -e "$BIN_PATH" ] || [ -L "$BIN_PATH" ]; then
+    if [ -L "$BIN_PATH" ] || [ ! -f "$BIN_PATH" ]; then
+      echo "Refusing to replace non-regular file at $BIN_PATH (not a Lumi Codex launcher)." >&2
+      exit 1
+    fi
+    if [ "$(cat "$BIN_PATH" 2>/dev/null || true)" != "$desired" ]; then
+      echo "Refusing to overwrite unexpected file at $BIN_PATH; remove it or point LUMI_INSTALL_DIR elsewhere." >&2
+      exit 1
+    fi
   fi
+
+  tmp_launcher="$BIN_DIR/.lumi-codex.$$"
+  rm -f "$tmp_launcher"
+  printf '%s\n' "$desired" >"$tmp_launcher"
+  chmod 0755 "$tmp_launcher"
+  mv -f "$tmp_launcher" "$BIN_PATH"
 }
 
 verify_visible_command() {
   "$BIN_PATH" --version >/dev/null
-  if [ "$os" = "darwin" ] && [ "$install_layout" = "package" ]; then
-    [ -x "$CODE_MODE_HOST_BIN_PATH" ]
+  if [ "$os" = "darwin" ]; then
+    [ -x "$CURRENT_LINK/bin/codex-code-mode-host" ]
   fi
+}
+
+print_launch_instructions() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*)
+      step "Current terminal: lumi-codex"
+      step "Future terminals: open a new terminal and run: lumi-codex"
+      ;;
+    *)
+      step "Add $BIN_DIR to your PATH, or run the launcher directly:"
+      step "  $BIN_PATH"
+      ;;
+  esac
 }
 
 parse_args "$@"
@@ -1070,6 +832,18 @@ parse_args "$@"
 require_command mktemp
 require_command tar
 
+validate_abs_path "$ROOT" "LUMI_ROOT"
+validate_abs_path "$BIN_DIR" "LUMI_INSTALL_DIR"
+if [ -L "$ROOT" ]; then
+  echo "Refusing to operate on symlinked root $ROOT (remove the symlink or point LUMI_ROOT at a real directory)." >&2
+  exit 1
+fi
+if [ -L "$BIN_DIR" ]; then
+  echo "Refusing to install the launcher through symlinked directory $BIN_DIR." >&2
+  exit 1
+fi
+
+os=""
 case "$(uname -s)" in
   Darwin)
     os="darwin"
@@ -1077,69 +851,71 @@ case "$(uname -s)" in
   Linux)
     os="linux"
     ;;
-  *)
+esac
+
+if [ -z "$target" ]; then
+  if [ -z "$os" ]; then
     echo "install.sh supports macOS and Linux. Use install.ps1 on Windows." >&2
     exit 1
-    ;;
-esac
+  fi
 
-case "$(uname -m)" in
-  x86_64 | amd64)
-    arch="x86_64"
-    ;;
-  arm64 | aarch64)
-    arch="aarch64"
-    ;;
-  *)
-    echo "Unsupported architecture: $(uname -m)" >&2
-    exit 1
-    ;;
-esac
+  case "$(uname -m)" in
+    x86_64 | amd64)
+      arch="x86_64"
+      ;;
+    arm64 | aarch64)
+      arch="aarch64"
+      ;;
+    *)
+      echo "Unsupported architecture: $(uname -m)" >&2
+      exit 1
+      ;;
+  esac
 
-if [ "$os" = "darwin" ] && [ "$arch" = "x86_64" ]; then
-  if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
-    arch="aarch64"
+  if [ "$os" = "darwin" ] && [ "$arch" = "x86_64" ]; then
+    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
+      arch="aarch64"
+    fi
+  fi
+
+  if [ "$os" = "darwin" ]; then
+    if [ "$arch" = "aarch64" ]; then
+      target="aarch64-apple-darwin"
+    else
+      target="x86_64-apple-darwin"
+    fi
+  else
+    if [ "$arch" = "aarch64" ]; then
+      target="aarch64-unknown-linux-musl"
+    else
+      target="x86_64-unknown-linux-musl"
+    fi
   fi
 fi
 
-if [ "$os" = "darwin" ]; then
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="darwin-arm64"
-    vendor_target="aarch64-apple-darwin"
-    platform_label="macOS (Apple Silicon)"
-  else
-    npm_tag="darwin-x64"
-    vendor_target="x86_64-apple-darwin"
-    platform_label="macOS (Intel)"
-  fi
-else
-  if [ "$arch" = "aarch64" ]; then
-    npm_tag="linux-arm64"
-    vendor_target="aarch64-unknown-linux-musl"
-    platform_label="Linux (ARM64)"
-  else
-    npm_tag="linux-x64"
-    vendor_target="x86_64-unknown-linux-musl"
-    platform_label="Linux (x64)"
-  fi
-fi
+validate_target
+
+case "$target" in
+  x86_64-unknown-linux-musl) platform_label="Linux (x64)" ;;
+  aarch64-unknown-linux-musl) platform_label="Linux (ARM64)" ;;
+  x86_64-apple-darwin) platform_label="macOS (Intel)" ;;
+  aarch64-apple-darwin) platform_label="macOS (Apple Silicon)" ;;
+esac
 
 resolve_release
-release_name="$resolved_version-$vendor_target"
+release_name="$resolved_version-$target"
 release_dir="$RELEASES_DIR/$release_name"
 current_version="$(current_installed_version)"
 
 if [ -n "$current_version" ] && [ "$current_version" != "$resolved_version" ]; then
-  step "Updating Codex CLI from $current_version to $resolved_version"
+  step "Updating Lumi Codex CLI from $current_version to $resolved_version"
 elif [ -n "$current_version" ]; then
-  step "Updating Codex CLI"
+  step "Updating Lumi Codex CLI"
 else
-  step "Installing Codex CLI"
+  step "Installing Lumi Codex CLI"
 fi
 step "Detected platform: $platform_label"
 step "Resolved version: $resolved_version"
-
-detect_conflicting_install
 
 tmp_dir="$(mktemp -d)"
 cleanup() {
@@ -1153,7 +929,7 @@ trap cleanup EXIT INT TERM
 acquire_install_lock
 cleanup_stale_install_artifacts
 
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$target"; then
   if [ -e "$release_dir" ] || [ -L "$release_dir" ]; then
     warn "Found incomplete existing release at $release_dir; reinstalling."
   fi
@@ -1161,49 +937,25 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target"
   archive_path="$tmp_dir/$asset"
   checksum_path="$tmp_dir/$checksum_asset"
 
-  step "Downloading Codex CLI"
-  if [ "$install_layout" = "package" ]; then
-    checksum_digest="$(release_asset_digest "$checksum_asset")"
-    download_file_with_fallback "$checksum_url" "$checksum_fallback_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
-    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
-  else
-    expected_digest="$(release_asset_digest "$asset")"
-  fi
-  download_file_with_fallback "$download_url" "$download_fallback_url" "$archive_path" "$expected_digest" "$asset"
+  step "Downloading Lumi Codex CLI"
+  checksum_digest="$(release_asset_digest "$checksum_asset")"
+  download_file_with_fallback "$checksum_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
+  expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+  download_file_with_fallback "$download_url" "$archive_path" "$expected_digest" "$asset"
+  validate_archive_members "$archive_path"
 
   step "Installing standalone package to $release_dir"
-  if [ "$install_layout" = "package" ]; then
-    install_package_release "$release_dir" "$archive_path"
-  else
-    install_legacy_platform_npm_release "$release_dir" "$archive_path" "$vendor_target"
-  fi
+  install_package_release "$release_dir" "$archive_path"
 fi
-if ! release_dir_is_complete "$release_dir" "$resolved_version" "$vendor_target" "$install_layout"; then
+if ! release_dir_is_complete "$release_dir" "$resolved_version" "$target"; then
   echo "Installed Codex command did not report expected version $resolved_version." >&2
   exit 1
 fi
 update_current_link "$release_dir"
-update_visible_command "$release_dir"
-add_to_path
+install_visible_launcher
 verify_visible_command
 release_install_lock
-handle_conflicting_install
 
-case "$path_action" in
-  added)
-    print_launch_instructions
-    ;;
-  updated)
-    print_launch_instructions
-    ;;
-  configured)
-    print_launch_instructions
-    ;;
-  *)
-    step "$BIN_DIR is already on PATH"
-    print_launch_instructions
-    ;;
-esac
+print_launch_instructions
 
-printf 'Codex CLI %s installed successfully.\n' "$resolved_version"
-maybe_launch_codex_now
+printf 'Lumi Codex CLI %s installed successfully.\n' "$resolved_version"
