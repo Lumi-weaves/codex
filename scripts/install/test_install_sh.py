@@ -69,7 +69,9 @@ class InstallShTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn(f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout)
+            self.assertIn(
+                f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout
+            )
             launcher = root / "install-bin" / "lumi-codex"
             self.assertTrue(launcher.is_file())
             env = os.environ.copy()
@@ -127,7 +129,9 @@ class InstallShTest(unittest.TestCase):
                 ],
             )
             self.assertIn(f"Resolved version: {VERSION}", result.stdout)
-            self.assertIn(f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout)
+            self.assertIn(
+                f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout
+            )
 
     def test_lumi_semver_tags_are_accepted(self) -> None:
         for release in (f"rust-v{LUMI_VERSION}", LUMI_VERSION):
@@ -154,7 +158,10 @@ class InstallShTest(unittest.TestCase):
                     )
                     self.assertIn(f"Resolved version: {LUMI_VERSION}", result.stdout)
                     release_dir = (
-                        root / "lumi-root" / "releases" / f"{LUMI_VERSION}-x86_64-unknown-linux-musl"
+                        root
+                        / "lumi-root"
+                        / "releases"
+                        / f"{LUMI_VERSION}-x86_64-unknown-linux-musl"
                     )
                     self.assertTrue((release_dir / "bin" / "codex").is_file())
 
@@ -292,12 +299,18 @@ class InstallShTest(unittest.TestCase):
                         requests,
                     )
                     self.assertIn(f"Detected platform: {label}", result.stdout)
-                    release_dir = root / "lumi-root" / "releases" / f"{VERSION}-{target}"
+                    release_dir = (
+                        root / "lumi-root" / "releases" / f"{VERSION}-{target}"
+                    )
                     self.assertTrue((release_dir / "bin" / "codex").is_file())
-                    self.assertTrue((release_dir / "bin" / "codex-code-mode-host").is_file())
+                    self.assertTrue(
+                        (release_dir / "bin" / "codex-code-mode-host").is_file()
+                    )
                     self.assertTrue((release_dir / "codex").is_symlink())
                     if target.endswith("linux-musl"):
-                        self.assertTrue((release_dir / "codex-resources" / "bwrap").is_file())
+                        self.assertTrue(
+                            (release_dir / "codex-resources" / "bwrap").is_file()
+                        )
 
     def test_explicit_target_override_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -323,7 +336,11 @@ class InstallShTest(unittest.TestCase):
             )
 
     def test_unknown_or_unsafe_target_rejected_before_any_request(self) -> None:
-        for target in ("../../evil", "x86_64-pc-windows-msvc", "codex-package-$(id).tar.gz"):
+        for target in (
+            "../../evil",
+            "x86_64-pc-windows-msvc",
+            "codex-package-$(id).tar.gz",
+        ):
             with self.subTest(target=target):
                 result, requests = run_installer(VERSION, target_override=target)
                 self.assertNotEqual(result.returncode, 0)
@@ -338,7 +355,9 @@ class InstallShTest(unittest.TestCase):
             bin_dir = home / ".local" / "bin"
             bin_dir.mkdir(parents=True)
             official_codex = bin_dir / "codex"
-            official_codex.write_text("#!/bin/sh\necho official codex\n", encoding="utf-8")
+            official_codex.write_text(
+                "#!/bin/sh\necho official codex\n", encoding="utf-8"
+            )
             official_codex.chmod(0o755)
             official_codex_bytes = official_codex.read_bytes()
 
@@ -347,7 +366,7 @@ class InstallShTest(unittest.TestCase):
             codex_home = root / "official-codex-home"
             codex_home.mkdir()
             config = codex_home / "config.toml"
-            config.write_text("model = \"official\"\n", encoding="utf-8")
+            config.write_text('model = "official"\n', encoding="utf-8")
             config_bytes = config.read_bytes()
 
             result, _requests = run_installer_in(
@@ -380,7 +399,9 @@ class InstallShTest(unittest.TestCase):
             self.assertTrue(launcher.is_file())
             self.assertTrue(os.access(launcher, os.X_OK))
             # The default Lumi root is used and stays out of CODEX_HOME.
-            self.assertTrue((home / ".local" / "share" / "lumi-codex" / "current").is_symlink())
+            self.assertTrue(
+                (home / ".local" / "share" / "lumi-codex" / "current").is_symlink()
+            )
             self.assertFalse((codex_home / "packages").exists())
 
     def test_launcher_execs_the_real_current_codex(self) -> None:
@@ -454,7 +475,9 @@ class InstallShTest(unittest.TestCase):
             install_bin = root / "install-bin"
             current = root / "lumi-root" / "current"
             self.assertTrue((current / "bin" / "codex-code-mode-host").is_file())
-            self.assertTrue(os.access(current / "bin" / "codex-code-mode-host", os.X_OK))
+            self.assertTrue(
+                os.access(current / "bin" / "codex-code-mode-host", os.X_OK)
+            )
             # No official-named visible commands are created.
             self.assertEqual(
                 sorted(p.name for p in install_bin.iterdir()),
@@ -493,10 +516,10 @@ class InstallShTest(unittest.TestCase):
                     f"rust-v{VERSION}/codex-package-x86_64-unknown-linux-musl.tar.gz",
                 ],
             )
+            self.assertIn("re-verifying against GitHub release metadata", result.stderr)
             self.assertIn(
-                "re-verifying against GitHub release metadata", result.stderr
+                f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout
             )
-            self.assertIn(f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout)
 
     def test_wrong_manifest_archive_digest_falls_back_to_github_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -525,10 +548,10 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(len(requests), 4)
             self.assertEqual(requests[3], requests[0])
+            self.assertIn("re-verifying against GitHub release metadata", result.stderr)
             self.assertIn(
-                "re-verifying against GitHub release metadata", result.stderr
+                f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout
             )
-            self.assertIn(f"Lumi Codex CLI {VERSION} installed successfully.", result.stdout)
 
     def test_corrupt_downloads_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -619,8 +642,8 @@ class InstallShTest(unittest.TestCase):
             with self.subTest(members=members):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     root = Path(temp_dir)
-                    archive_path, checksum_path, metadata_json = (
-                        create_archive_release(root, members)
+                    archive_path, checksum_path, metadata_json = create_archive_release(
+                        root, members
                     )
 
                     result, _requests = run_installer_in(
@@ -632,15 +655,9 @@ class InstallShTest(unittest.TestCase):
                     )
 
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(
-                        "unsafe member paths", result.stderr
-                    )
+                    self.assertIn("unsafe member paths", result.stderr)
                     self.assertFalse(
-                        any(
-                            (root / "lumi-root" / "releases").glob(
-                                f"{VERSION}-*"
-                            )
-                        )
+                        any((root / "lumi-root" / "releases").glob(f"{VERSION}-*"))
                     )
 
     def test_archive_symlink_and_hardlink_members_rejected(self) -> None:
@@ -648,8 +665,8 @@ class InstallShTest(unittest.TestCase):
             with self.subTest(entry_type=entry_type):
                 with tempfile.TemporaryDirectory() as temp_dir:
                     root = Path(temp_dir)
-                    archive_path, checksum_path, metadata_json = (
-                        create_archive_release(root, [], special=entry_type)
+                    archive_path, checksum_path, metadata_json = create_archive_release(
+                        root, [], special=entry_type
                     )
 
                     result, _requests = run_installer_in(
@@ -661,15 +678,9 @@ class InstallShTest(unittest.TestCase):
                     )
 
                     self.assertNotEqual(result.returncode, 0)
-                    self.assertIn(
-                        "unsafe entry types", result.stderr
-                    )
+                    self.assertIn("unsafe entry types", result.stderr)
                     self.assertFalse(
-                        any(
-                            (root / "lumi-root" / "releases").glob(
-                                f"{VERSION}-*"
-                            )
-                        )
+                        any((root / "lumi-root" / "releases").glob(f"{VERSION}-*"))
                     )
 
     def test_binary_version_mismatch_fails_closed(self) -> None:
@@ -936,7 +947,9 @@ class InstallShTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(
                         requests,
-                        ["https://api.github.com/repos/Lumi-weaves/codex/releases/latest"],
+                        [
+                            "https://api.github.com/repos/Lumi-weaves/codex/releases/latest"
+                        ],
                     )
                     self.assertIn(message, result.stderr)
 
@@ -1283,9 +1296,7 @@ def recompact_metadata(metadata_json: str) -> str:
     return json.dumps(metadata, separators=(",", ":"))
 
 
-def release_metadata_with_decoys(
-    archive_path: Path, checksum_path: Path
-) -> str:
+def release_metadata_with_decoys(archive_path: Path, checksum_path: Path) -> str:
     archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
     checksum_digest = hashlib.sha256(checksum_path.read_bytes()).hexdigest()
     fake_digest = f"sha256:{'0' * 64}"
@@ -1329,9 +1340,7 @@ def syntax_check(path: Path) -> None:
         text=True,
     )
     if result.returncode != 0:
-        raise AssertionError(
-            f"sh -n failed for {path.name}: {result.stderr}"
-        )
+        raise AssertionError(f"sh -n failed for {path.name}: {result.stderr}")
 
 
 if __name__ == "__main__":
