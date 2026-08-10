@@ -673,6 +673,56 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
 }
 
 #[tokio::test]
+async fn list_background_terminals_registers_only_with_unified_exec_tools() {
+    let enabled = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+    })
+    .await;
+
+    enabled.assert_visible_contains(&["exec_command", "write_stdin", "list_background_terminals"]);
+    enabled.assert_registered_contains(&["list_background_terminals"]);
+    let exec_command_description = match enabled.visible_spec("exec_command") {
+        ToolSpec::Function(tool) => tool.description.as_str(),
+        other => panic!("expected function tool spec, got {other:?}"),
+    };
+    assert!(exec_command_description.contains("completion can wake a continuation"));
+
+    let disabled = probe(|turn| {
+        set_feature(turn, Feature::ShellTool, /*enabled*/ false);
+    })
+    .await;
+    disabled.assert_visible_lacks(&["list_background_terminals"]);
+    disabled.assert_registered_lacks(&["list_background_terminals"]);
+}
+
+#[tokio::test]
+async fn guardian_shell_tools_omit_lifecycle_guidance() {
+    let plan = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.session_source = codex_protocol::protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::Other(
+                crate::guardian::GUARDIAN_REVIEWER_NAME.to_string(),
+            ),
+        );
+    })
+    .await;
+
+    let ToolSpec::Function(exec_command) = plan.visible_spec("exec_command") else {
+        panic!("expected function tool spec");
+    };
+    assert!(
+        !exec_command
+            .description
+            .contains("completion can wake a continuation"),
+        "guardian exec_command spec should stay bare"
+    );
+    plan.assert_visible_lacks(&["list_background_terminals"]);
+}
+
+#[tokio::test]
 async fn login_shell_parameter_follows_selected_environment() {
     for (tool_name, guardian) in [
         ("shell_command", false),

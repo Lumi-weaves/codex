@@ -53,6 +53,7 @@ pub(crate) struct ExecCommandHandlerOptions {
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
     pub(crate) include_shell_parameter: bool,
+    pub(crate) include_lifecycle_guidance: bool,
 }
 
 pub struct ExecCommandHandler {
@@ -67,6 +68,7 @@ impl Default for ExecCommandHandler {
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
                 include_shell_parameter: true,
+                include_lifecycle_guidance: true,
             },
         }
     }
@@ -91,6 +93,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             },
             self.options.include_environment_id,
             self.options.include_shell_parameter,
+            self.options.include_lifecycle_guidance,
         )
     }
 

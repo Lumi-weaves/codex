@@ -1,11 +1,17 @@
+use super::list_background_terminals::ListBackgroundTerminalsResult;
 use super::*;
 use crate::shell::ShellType;
 use crate::shell::default_user_shell;
 use codex_exec_server::Environment;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::AskForApproval;
 use codex_tools::UnifiedExecShellMode;
 use codex_tools::ZshForkConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
+use codex_utils_path_uri::PathUri;
+use core_test_support::skip_if_sandbox;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
@@ -311,7 +317,7 @@ async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
     };
     let (session, turn) = make_session_and_context().await;
     let turn = Arc::new(turn);
-    let handler = WriteStdinHandler;
+    let handler = WriteStdinHandler::default();
 
     assert_eq!(
         handler.pre_tool_use_payload(&ToolInvocation {
@@ -438,7 +444,7 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
         hook_command: Some("sleep 1; echo finished".to_string()),
     };
     let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
-    let handler = WriteStdinHandler;
+    let handler = WriteStdinHandler::default();
 
     assert_eq!(
         handler.post_tool_use_payload(&invocation, &output),
@@ -484,7 +490,7 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
     };
     let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;
     let invocation_a = invocation_for_payload("write_stdin", "write-call-a", payload).await;
-    let handler = WriteStdinHandler;
+    let handler = WriteStdinHandler::default();
 
     let payloads = [
         handler.post_tool_use_payload(&invocation_b, &output_b),
@@ -508,4 +514,233 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
             }),
         ]
     );
+}
+
+fn list_background_terminals_output_text(output: &dyn crate::tools::context::ToolOutput) -> String {
+    let response = output.to_response_item(
+        "list-call",
+        &ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+    );
+    match response {
+        ResponseInputItem::FunctionCallOutput { output, .. } => match output.body {
+            FunctionCallOutputBody::Text(text) => text,
+            FunctionCallOutputBody::ContentItems(items) => {
+                codex_protocol::models::function_call_output_content_items_to_text(&items)
+                    .unwrap_or_default()
+            }
+        },
+        other => panic!("expected function output, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_background_terminals_returns_empty_result_with_no_live_terminals() {
+    let payload = ToolPayload::Function {
+        arguments: "{}".to_string(),
+    };
+    let invocation =
+        invocation_for_payload("list_background_terminals", "list-call", payload).await;
+
+    let output = ListBackgroundTerminalsHandler
+        .handle(invocation)
+        .await
+        .expect("list handler should succeed");
+
+    assert_eq!(
+        list_background_terminals_output_text(output.as_ref()),
+        r#"{"terminals":[]}"#
+    );
+}
+
+#[test]
+fn list_background_terminals_result_renders_existing_fields() {
+    use crate::codex_thread::BackgroundTerminalInfo;
+
+    let result = ListBackgroundTerminalsResult::from_terminals(&[
+        BackgroundTerminalInfo {
+            item_id: "call-1".to_string(),
+            process_id: "42".to_string(),
+            command: "sleep 60".to_string(),
+            cwd: PathUri::parse("file:///repo").expect("valid path uri"),
+        },
+        BackgroundTerminalInfo {
+            item_id: "call-2".to_string(),
+            process_id: "7".to_string(),
+            command: "bash -i".to_string(),
+            cwd: PathUri::parse("file:///repo/sub").expect("valid path uri"),
+        },
+    ]);
+
+    assert_eq!(
+        serde_json::to_value(&result).expect("result should serialize"),
+        serde_json::json!({
+            "terminals": [
+                {
+                    "session_id": 42,
+                    "item_id": "call-1",
+                    "command": "sleep 60",
+                    "cwd": "/repo",
+                },
+                {
+                    "session_id": 7,
+                    "item_id": "call-2",
+                    "command": "bash -i",
+                    "cwd": "/repo/sub",
+                },
+            ]
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_background_terminals_lists_live_terminals() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    let (session, mut turn_context_raw) = make_session_and_context().await;
+    Arc::make_mut(&mut turn_context_raw.config)
+        .permissions
+        .approval_policy
+        .set(AskForApproval::Never)
+        .expect("test setup should allow updating approval policy");
+    Arc::make_mut(&mut turn_context_raw.config)
+        .permissions
+        .set_permission_profile(codex_protocol::models::PermissionProfile::Disabled)
+        .expect("test setup should allow disabling the permission profile");
+    let TurnEnvironmentState::Ready(environment) =
+        &mut turn_context_raw.environments.environments[0]
+    else {
+        panic!("primary environment should be ready");
+    };
+    environment.config.permission_profile = turn_context_raw
+        .config
+        .permissions
+        .permission_profile_state()
+        .snapshot();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn_context_raw);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+    let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
+
+    let exec_handler = ExecCommandHandler::default();
+    for (index, command) in ["sleep 30", "sleep 31"].iter().enumerate() {
+        let invocation = ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn),
+            step_context: StepContext::for_test(Arc::clone(&turn)),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: format!("exec-call-{index}"),
+            tool_name: codex_tools::ToolName::plain("exec_command"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "cmd": command,
+                    "yield_time_ms": 500,
+                    "tty": false,
+                })
+                .to_string(),
+            },
+        };
+        let output = exec_handler.handle(invocation).await?;
+        // The command outlives the short yield, so the exec returns a live
+        // session id instead of an exit code.
+        assert!(
+            list_background_terminals_output_text(output.as_ref()).contains("session ID"),
+            "expected a running session for {command}"
+        );
+    }
+
+    let list_output = ListBackgroundTerminalsHandler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn),
+            step_context,
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: "list-call".to_string(),
+            tool_name: codex_tools::ToolName::plain("list_background_terminals"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        })
+        .await?;
+
+    let listed: serde_json::Value =
+        serde_json::from_str(&list_background_terminals_output_text(list_output.as_ref()))?;
+    let terminals = listed["terminals"]
+        .as_array()
+        .expect("result should carry a terminals array");
+    assert_eq!(terminals.len(), 2);
+    let commands = terminals
+        .iter()
+        .map(|terminal| {
+            terminal["command"]
+                .as_str()
+                .expect("command should be a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(commands, ["sleep 30", "sleep 31"]);
+    let item_ids = terminals
+        .iter()
+        .map(|terminal| {
+            terminal["item_id"]
+                .as_str()
+                .expect("item_id should be a string")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(item_ids, ["exec-call-0", "exec-call-1"]);
+    for terminal in terminals {
+        assert!(
+            terminal["session_id"]
+                .as_i64()
+                .expect("session_id should be a number")
+                > 0,
+            "session id should be positive"
+        );
+        assert!(
+            !terminal["cwd"]
+                .as_str()
+                .expect("cwd should be a string")
+                .is_empty(),
+            "cwd should not be empty"
+        );
+    }
+
+    // Terminate both live terminals and confirm the list drains.
+    for terminal in terminals {
+        let process_id = terminal["session_id"]
+            .as_i64()
+            .expect("session_id should be a number") as i32;
+        assert!(
+            session
+                .services
+                .unified_exec_manager
+                .terminate_process(process_id)
+                .await
+        );
+    }
+    let list_output = ListBackgroundTerminalsHandler
+        .handle(ToolInvocation {
+            session,
+            turn: turn.clone(),
+            step_context: StepContext::for_test(turn),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker,
+            call_id: "list-call-2".to_string(),
+            tool_name: codex_tools::ToolName::plain("list_background_terminals"),
+            source: ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+        })
+        .await?;
+    assert_eq!(
+        list_background_terminals_output_text(list_output.as_ref()),
+        r#"{"terminals":[]}"#
+    );
+
+    Ok(())
 }
