@@ -675,7 +675,14 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
 #[tokio::test]
 async fn list_background_terminals_registers_only_with_unified_exec_tools() {
     let enabled = probe(|turn| {
-        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_features(
+            turn,
+            &[
+                Feature::ShellTool,
+                Feature::UnifiedExec,
+                Feature::UnifiedExecCompletionWake,
+            ],
+        );
         set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
         turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
     })
@@ -688,6 +695,22 @@ async fn list_background_terminals_registers_only_with_unified_exec_tools() {
         other => panic!("expected function tool spec, got {other:?}"),
     };
     assert!(exec_command_description.contains("completion can wake a continuation"));
+
+    let wake_disabled = probe(|turn| {
+        set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
+        turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
+    })
+    .await;
+    wake_disabled.assert_visible_contains(&["list_background_terminals"]);
+    let ToolSpec::Function(exec_command) = wake_disabled.visible_spec("exec_command") else {
+        panic!("expected function tool spec");
+    };
+    assert!(
+        !exec_command
+            .description
+            .contains("completion can wake a continuation")
+    );
 
     let disabled = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);

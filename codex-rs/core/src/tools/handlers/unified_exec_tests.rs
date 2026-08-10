@@ -558,7 +558,7 @@ async fn list_background_terminals_returns_empty_result_with_no_live_terminals()
 fn list_background_terminals_result_renders_existing_fields() {
     use crate::codex_thread::BackgroundTerminalInfo;
 
-    let result = ListBackgroundTerminalsResult::from_terminals(&[
+    let result = ListBackgroundTerminalsResult::try_from_terminals(&[
         BackgroundTerminalInfo {
             item_id: "call-1".to_string(),
             process_id: "42".to_string(),
@@ -571,7 +571,8 @@ fn list_background_terminals_result_renders_existing_fields() {
             command: "bash -i".to_string(),
             cwd: PathUri::parse("file:///repo/sub").expect("valid path uri"),
         },
-    ]);
+    ])
+    .expect("numeric process ids should convert");
 
     assert_eq!(
         serde_json::to_value(&result).expect("result should serialize"),

@@ -480,6 +480,13 @@ impl CodexThread {
         self.session.list_background_terminals().await
     }
 
+    /// Number of yielded background terminals whose task-level completion is
+    /// still awaited. Unlike the live-process list, this token survives until
+    /// a completion event has entered the serialized session ingress.
+    pub async fn awaited_background_terminal_count(&self) -> usize {
+        self.session.awaited_terminal_count().await
+    }
+
     pub async fn terminate_background_terminal(&self, process_id: i32) -> bool {
         self.session.terminate_background_terminal(process_id).await
     }

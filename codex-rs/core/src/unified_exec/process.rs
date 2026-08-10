@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
@@ -65,6 +66,28 @@ pub(crate) struct OutputHandles {
     pub(crate) output_closed: Arc<AtomicBool>,
     pub(crate) output_closed_notify: Arc<Notify>,
     pub(crate) cancellation_token: CancellationToken,
+    /// Total bytes appended to `output_buffer` since process creation.
+    ///
+    /// Writers advance this while holding the output-buffer lock, after the
+    /// bytes are appended. Readers can therefore drain the buffer and load the
+    /// corresponding offset under the same lock without losing a boundary.
+    pub(crate) produced_offset: Arc<AtomicU64>,
+    /// Highest produced offset drained into an `exec_command` or
+    /// `write_stdin` result.
+    pub(crate) observed_offset: Arc<AtomicU64>,
+    /// Highest produced offset represented by an automatic TTY-attention
+    /// notification. It stays ahead of `observed_offset` until the model
+    /// drains that output, preventing repeated wakes for one unread batch.
+    pub(crate) attention_notified_through: Arc<AtomicU64>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) struct OutputAttentionSnapshot {
+    pub(super) observed_offset: u64,
+    pub(super) produced_offset: u64,
+    pub(super) total_output_bytes: usize,
+    pub(super) omitted_output_bytes: usize,
+    pub(super) output_excerpt: Vec<u8>,
 }
 
 struct OutputTaskGuard {
@@ -127,6 +150,9 @@ impl UnifiedExecProcess {
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
             cancellation_token: CancellationToken::new(),
+            produced_offset: Arc::new(AtomicU64::new(0)),
+            observed_offset: Arc::new(AtomicU64::new(0)),
+            attention_notified_through: Arc::new(AtomicU64::new(0)),
         };
         let output_drained = Arc::new(Notify::new());
         let (output_tx, _) = broadcast::channel(64);
@@ -190,6 +216,39 @@ impl UnifiedExecProcess {
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
+    }
+
+    /// Claim one unread output batch for an automatic TTY-attention event.
+    ///
+    /// The process interaction lock must be held by the caller. The claim is
+    /// refused while an earlier attention batch remains unread, and the
+    /// returned excerpt is a non-destructive bounded snapshot so a subsequent
+    /// `write_stdin` can still collect the output.
+    pub(super) async fn claim_output_attention(
+        &self,
+        max_excerpt_bytes: usize,
+    ) -> Option<OutputAttentionSnapshot> {
+        let output = &self.output;
+        let guard = output.output_buffer.lock().await;
+        let produced_offset = output.produced_offset.load(Ordering::Acquire);
+        let observed_offset = output.observed_offset.load(Ordering::Acquire);
+        let already_notified = output.attention_notified_through.load(Ordering::Acquire);
+        if produced_offset <= observed_offset || already_notified > observed_offset {
+            return None;
+        }
+
+        let (output_excerpt, omitted_output_bytes) = guard.bounded_excerpt(max_excerpt_bytes);
+        let total_output_bytes = guard.total_bytes();
+        output
+            .attention_notified_through
+            .store(produced_offset, Ordering::Release);
+        Some(OutputAttentionSnapshot {
+            observed_offset,
+            produced_offset,
+            total_output_bytes,
+            omitted_output_bytes,
+            output_excerpt,
+        })
     }
 
     /// Claim the async completion for this process.
@@ -456,6 +515,8 @@ impl UnifiedExecProcess {
             output_closed,
             output_closed_notify,
             cancellation_token,
+            produced_offset,
+            ..
         } = output_handles;
         let process = started.process;
         let mut events = process.subscribe_events();
@@ -529,6 +590,10 @@ impl UnifiedExecProcess {
                         let bytes = chunk.chunk.into_inner();
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(bytes.clone());
+                        produced_offset.fetch_add(
+                            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                            Ordering::Release,
+                        );
                         drop(guard);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -572,6 +637,10 @@ impl UnifiedExecProcess {
                         let bytes = chunk.chunk.into_inner();
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(bytes.clone());
+                        produced_offset.fetch_add(
+                            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                            Ordering::Release,
+                        );
                         drop(guard);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -621,6 +690,7 @@ impl UnifiedExecProcess {
             output_notify,
             output_closed,
             output_closed_notify,
+            produced_offset,
             ..
         } = output_handles;
         tokio::spawn(async move {
@@ -633,6 +703,10 @@ impl UnifiedExecProcess {
                     Ok(chunk) => {
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(chunk.clone());
+                        produced_offset.fetch_add(
+                            u64::try_from(chunk.len()).unwrap_or(u64::MAX),
+                            Ordering::Release,
+                        );
                         drop(guard);
                         let _ = output_tx.send(chunk);
                         output_notify.notify_waiters();

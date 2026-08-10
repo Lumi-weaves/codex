@@ -906,7 +906,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                     turn_context,
                     context.environments,
                 ),
-                include_lifecycle_guidance: true,
+                include_lifecycle_guidance: features.enabled(Feature::UnifiedExecCompletionWake),
             }));
             registry.add(WriteStdinHandler::new(
                 /*include_lifecycle_guidance*/ true,

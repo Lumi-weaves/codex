@@ -1900,6 +1900,9 @@ impl ThreadRequestProcessor {
             .map_err(|err| {
                 internal_error(format!("failed to clean background terminals: {err}"))
             })?;
+        self.thread_watch_manager
+            .note_background_terminal_count(&thread_id.to_string(), 0)
+            .await;
         Ok(ThreadBackgroundTerminalsCleanResponse {})
     }
 
@@ -1948,6 +1951,12 @@ impl ThreadRequestProcessor {
 
         let (_, thread) = self.load_thread(&thread_id).await?;
         let terminated = thread.terminate_background_terminal(process_id).await;
+        if terminated {
+            let remaining = thread.awaited_background_terminal_count().await;
+            self.thread_watch_manager
+                .note_background_terminal_count(&thread_id.to_string(), remaining)
+                .await;
+        }
         Ok(ThreadBackgroundTerminalsTerminateResponse { terminated })
     }
 

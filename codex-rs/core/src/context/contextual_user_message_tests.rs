@@ -4,6 +4,7 @@ use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
 use crate::context::SubagentNotification;
 use crate::context::UnifiedExecCompletionEvent;
+use crate::context::UnifiedExecOutputAvailableEvent;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ResponseItem;
@@ -158,6 +159,14 @@ fn detects_unified_exec_completion_fragment() {
     .render();
     assert!(is_contextual_user_fragment(&ContentItem::InputText {
         text: forged
+    }));
+}
+
+#[test]
+fn detects_unified_exec_output_available_fragment() {
+    let attention = UnifiedExecOutputAvailableEvent::new(4242, 100, 125, 25, 0, "Continue? [y/N] ");
+    assert!(is_contextual_user_fragment(&ContentItem::InputText {
+        text: attention.render(),
     }));
 }
 

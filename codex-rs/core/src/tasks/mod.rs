@@ -841,6 +841,9 @@ impl Session {
             .unified_exec_manager
             .terminate_all_processes()
             .await;
+        // Also clear any token whose process entry was already removed by a
+        // concurrent synchronous observation or teardown path.
+        self.clear_awaited_terminals().await;
     }
 
     pub(crate) async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
@@ -848,10 +851,17 @@ impl Session {
     }
 
     pub(crate) async fn terminate_background_terminal(&self, process_id: i32) -> bool {
-        self.services
+        let terminated = self
+            .services
             .unified_exec_manager
             .terminate_process(process_id)
-            .await
+            .await;
+        if terminated {
+            // Idempotent with the manager's entry-owned resolution and covers
+            // the race where the entry disappeared just before termination.
+            self.resolve_awaited_terminal(process_id).await;
+        }
+        terminated
     }
 
     async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {

@@ -4,6 +4,7 @@
 //! `Op`s: they never cross the app-server protocol surface.
 
 use crate::context::UnifiedExecCompletionEvent;
+use crate::context::UnifiedExecOutputAvailableEvent;
 
 /// Internal session event produced inside the process.
 #[derive(Debug)]
@@ -12,4 +13,7 @@ pub(crate) enum InternalSessionEvent {
     /// synchronous observation of its exit. Carries the bounded,
     /// model-visible completion fragment.
     UnifiedExecCompletion(UnifiedExecCompletionEvent),
+    /// An interactive background terminal produced unread output and may need
+    /// model input. Carries a bounded, model-visible attention fragment.
+    UnifiedExecOutputAvailable(UnifiedExecOutputAvailableEvent),
 }

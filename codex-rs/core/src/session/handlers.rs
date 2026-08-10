@@ -341,6 +341,18 @@ async fn handle_internal_session_event(
             sess.resolve_awaited_terminal(process_id).await;
             sess.maybe_start_turn_for_pending_work().await;
         }
+        super::internal_event::InternalSessionEvent::UnifiedExecOutputAvailable(attention) => {
+            sess.input_queue
+                .enqueue_pending_session_input(
+                    TurnInput::ResponseItem(crate::context::ContextualUserFragment::into(
+                        attention,
+                    )),
+                    /*trigger_turn*/ true,
+                    /*parent_turn_id*/ None,
+                )
+                .await;
+            sess.maybe_start_turn_for_pending_work().await;
+        }
     }
 }
 
@@ -637,6 +649,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
         .unified_exec_manager
         .terminate_all_processes()
         .await;
+    sess.clear_awaited_terminals().await;
     if let Err(err) = sess.services.code_mode_service.shutdown().await {
         warn!("failed to shutdown code mode session: {err}");
     }

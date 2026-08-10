@@ -86,8 +86,11 @@ impl AwaitedTerminals {
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn clear(&self) {
-        self.state.lock().await.awaited.clear();
+    pub(crate) async fn clear(&self) -> bool {
+        let mut state = self.state.lock().await;
+        let changed = !state.awaited.is_empty();
+        state.awaited.clear();
+        changed
     }
 
     /// Record the final message of a `TurnComplete` that was held non-final
@@ -139,7 +142,8 @@ mod tests {
         assert_eq!(registry.count().await, 1);
         assert!(!registry.resolve(99).await, "unknown id resolves to false");
 
-        registry.clear().await;
+        assert!(registry.clear().await);
+        assert!(!registry.clear().await, "clearing twice is unchanged");
         assert!(registry.is_empty().await);
         assert_eq!(registry.count().await, 0);
     }

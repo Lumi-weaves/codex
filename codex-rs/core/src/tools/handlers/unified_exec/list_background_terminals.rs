@@ -47,13 +47,12 @@ impl ListBackgroundTerminalsHandler {
         }
 
         let terminals = session.list_background_terminals().await;
-        let content =
-            serde_json::to_string(&ListBackgroundTerminalsResult::from_terminals(&terminals))
-                .map_err(|err| {
-                    FunctionCallError::Fatal(format!(
-                        "failed to serialize list_background_terminals response: {err}"
-                    ))
-                })?;
+        let result = ListBackgroundTerminalsResult::try_from_terminals(&terminals)?;
+        let content = serde_json::to_string(&result).map_err(|err| {
+            FunctionCallError::Fatal(format!(
+                "failed to serialize list_background_terminals response: {err}"
+            ))
+        })?;
 
         Ok(boxed_tool_output(FunctionToolOutput::from_text(
             content,
@@ -78,19 +77,26 @@ pub(crate) struct ListBackgroundTerminalsResult {
 }
 
 impl ListBackgroundTerminalsResult {
-    pub(crate) fn from_terminals(terminals: &[BackgroundTerminalInfo]) -> Self {
-        Self {
-            terminals: terminals
-                .iter()
-                .map(|terminal| BackgroundTerminalEntry {
-                    // The manager always stores the numeric process id as a
-                    // string; the fallback is unreachable in practice.
-                    session_id: terminal.process_id.parse().unwrap_or(0),
+    pub(crate) fn try_from_terminals(
+        terminals: &[BackgroundTerminalInfo],
+    ) -> Result<Self, FunctionCallError> {
+        let terminals = terminals
+            .iter()
+            .map(|terminal| {
+                let session_id = terminal.process_id.parse().map_err(|err| {
+                    FunctionCallError::Fatal(format!(
+                        "background terminal has invalid process id {:?}: {err}",
+                        terminal.process_id
+                    ))
+                })?;
+                Ok(BackgroundTerminalEntry {
+                    session_id,
                     item_id: terminal.item_id.clone(),
                     command: terminal.command.clone(),
                     cwd: terminal.cwd.inferred_native_path_string(),
                 })
-                .collect(),
-        }
+            })
+            .collect::<Result<Vec<_>, FunctionCallError>>()?;
+        Ok(Self { terminals })
     }
 }

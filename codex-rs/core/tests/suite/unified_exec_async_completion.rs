@@ -5,6 +5,7 @@
 use anyhow::Result;
 use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
@@ -32,6 +33,7 @@ use tokio::time::Duration;
 use wiremock::ResponseTemplate;
 
 const COMPLETION_MARKER: &str = "<unified_exec_completion>";
+const OUTPUT_AVAILABLE_MARKER: &str = "<unified_exec_output_available>";
 const EVENT_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn completion_feature_config(config: &mut codex_core::config::Config) {
@@ -79,6 +81,10 @@ async fn submit_turn(test: &TestCodex, prompt: &str) -> Result<()> {
 }
 
 fn request_contains_completion_marker(body: &Value) -> bool {
+    request_contains_marker(body, COMPLETION_MARKER)
+}
+
+fn request_contains_marker(body: &Value, marker: &str) -> bool {
     let Some(input) = body.get("input").and_then(Value::as_array) else {
         return false;
     };
@@ -86,7 +92,7 @@ fn request_contains_completion_marker(body: &Value) -> bool {
     for item in input {
         collect_text(item, &mut text);
     }
-    text.contains(COMPLETION_MARKER)
+    text.contains(marker)
 }
 
 fn collect_text(value: &Value, out: &mut String) {
@@ -187,10 +193,19 @@ async fn background_completion_wakes_idle_turn_when_enabled() -> Result<()> {
         .await
         .expect("begin event should carry a process id for a long-lived session");
     wait_for_turn_complete(&test).await;
+    assert_eq!(
+        test.codex.agent_status().await,
+        AgentStatus::Running,
+        "visible final text ends the turn, but the task stays non-final while its terminal is awaited"
+    );
     wait_for_exec_command_end(&test, call_id).await;
     // The completion wakes a fresh regular turn; its sampling is the 3rd
     // model request and carries the bounded completion fragment.
     wait_for_turn_complete(&test).await;
+    assert!(matches!(
+        test.codex.agent_status().await,
+        AgentStatus::Completed(_)
+    ));
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3, "exactly one auto-woken turn");
@@ -281,6 +296,138 @@ async fn background_completion_sampled_serially_while_turn_busy() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_output_wakes_idle_turn_for_stdin() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX shell read fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(completion_feature_config);
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let start_call_id = "uexec-async-attention-start";
+    let write_call_id = "uexec-async-attention-write";
+    let start_args = json!({
+        "cmd": "sleep 1; printf 'Continue? [y/N] '; read answer; printf 'ANSWER=%s' \"$answer\"",
+        "yield_time_ms": 250,
+        "tty": true,
+    });
+    let write_args = json!({
+        "chars": "y\n",
+        "session_id": 1000,
+        "yield_time_ms": 2000,
+    });
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(
+                start_call_id,
+                "exec_command",
+                &serde_json::to_string(&start_args)?,
+            ),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-1", "I am waiting for the interactive terminal."),
+            ev_completed("resp-2"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_function_call(
+                write_call_id,
+                "write_stdin",
+                &serde_json::to_string(&write_args)?,
+            ),
+            ev_completed("resp-3"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-4"),
+            ev_assistant_message("msg-2", "The interactive terminal accepted the answer."),
+            ev_completed("resp-4"),
+        ]),
+    ];
+    let response_mock = mount_sse_sequence(&server, responses).await;
+    submit_turn(&test, "start the interactive command and answer its prompt").await?;
+
+    wait_for_exec_command_begin(&test, start_call_id).await;
+    wait_for_turn_complete(&test).await;
+    wait_for_exec_command_end(&test, start_call_id).await;
+    wait_for_turn_complete(&test).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(
+        requests.len(),
+        4,
+        "one attention wake and no duplicate completion wake"
+    );
+    assert!(
+        request_contains_marker(&requests[2].body_json(), OUTPUT_AVAILABLE_MARKER),
+        "the idle continuation should receive the interactive-output attention fragment"
+    );
+    assert!(
+        !request_contains_completion_marker(&requests[3].body_json()),
+        "write_stdin observed the exit synchronously, so no completion wake is needed"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interactive_exit_during_attention_debounce_emits_completion_only() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(completion_feature_config);
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let call_id = "uexec-async-attention-exit-race";
+    let args = json!({
+        "cmd": "sleep 1; printf 'LAST-OUTPUT'; sleep 0.05",
+        "yield_time_ms": 250,
+        "tty": true,
+    });
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-1", "I am waiting."),
+            ev_completed("resp-2"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_assistant_message("msg-2", "The terminal completed."),
+            ev_completed("resp-3"),
+        ]),
+    ];
+    let response_mock = mount_sse_sequence(&server, responses).await;
+    submit_turn(&test, "run the interactive command").await?;
+
+    wait_for_exec_command_begin(&test, call_id).await;
+    wait_for_turn_complete(&test).await;
+    wait_for_exec_command_end(&test, call_id).await;
+    wait_for_turn_complete(&test).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(
+        requests.len(),
+        3,
+        "exit should supersede the pending attention wake"
+    );
+    assert!(request_contains_completion_marker(&requests[2].body_json()));
+    assert!(!request_contains_marker(
+        &requests[2].body_json(),
+        OUTPUT_AVAILABLE_MARKER
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
@@ -321,6 +468,10 @@ async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<
     // The watcher still emits the terminal end item event for the terminated
     // process (existing behavior), but no completion fragment and no turn.
     wait_for_exec_command_end(&test, call_id).await;
+    assert!(matches!(
+        test.codex.agent_status().await,
+        AgentStatus::Completed(_)
+    ));
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let requests = response_mock.requests();
@@ -487,6 +638,10 @@ async fn disabled_feature_preserves_existing_behavior() -> Result<()> {
 
     wait_for_exec_command_begin(&test, call_id).await;
     wait_for_turn_complete(&test).await;
+    assert!(matches!(
+        test.codex.agent_status().await,
+        AgentStatus::Completed(_)
+    ));
     // The background exit still emits its ExecCommandEnd item event...
     wait_for_exec_command_end(&test, call_id).await;
     // ...but no automatic turn is woken.
