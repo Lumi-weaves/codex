@@ -147,6 +147,92 @@ Signing, notarization, stable/latest metadata, additional package managers, and
 fleet cutover are later decisions. They are not implied by a successful
 unsigned canary.
 
+## Manual shadow workflow and just-in-time runner activation
+
+The shadow workflow `.github/workflows/lumi-release-shadow-worker.yml` is
+manual-only and never triggered by automation in this repository. A human
+controller on an external trusted machine inspects an authorized
+`workflow_dispatch` run and provisions a one-shot self-hosted runner through
+`scripts/release/lumi_shadow_dispatch_jit.py` (the JIT dispatcher). Nothing
+in this repository stores or derives credentials; activation requires a
+short-lived GitHub token with the narrowest API authority (read repository
+actions state, create JIT runner configurations), granted by the operator at
+activation time and never committed. Permissions and real activation are
+deliberately deferred to tomorrow's separate activation step.
+
+Activation contract:
+
+- the dispatcher hardcodes repository `Lumi-weaves/codex` and workflow path
+  `.github/workflows/lumi-release-shadow-worker.yml`; the workflow static
+  test locks the exact job names and per-run label formulas on both sides;
+- the token is read only from the fixed environment variable
+  `LUMI_GITHUB_TOKEN`; it is never accepted as an argument, written to a
+  file, echoed, or included in any error output, and it is stripped (with
+  `GH_TOKEN`, `GITHUB_TOKEN`, and any TOKEN/AUTHORIZATION-bearing variable)
+  from the runner child process environment;
+- before the single POST, the dispatcher fail-closed verifies: the exact
+  run id/attempt, `workflow_dispatch` event, `main` head branch, exact
+  40-hex `head_sha`, the workflow id resolving to the exact shadow workflow
+  path, `refs/heads/main` matching the run commit, the run still live, the
+  gate job `Resolve source to exact commit` completed/success, and the
+  chosen job (`Build and validate shadow packages (aarch64)` or
+  `Build and validate shadow package (x86_64)`) queued, unassigned, and
+  carrying exactly the run's deterministic label
+  `lumi-shadow-arm64-<run-id>-<attempt>` or
+  `lumi-shadow-x86_64-<run-id>-<attempt>` (only the documented GitHub-added
+  read-only label `self-hosted` is tolerated in the job's label list);
+- the attempt-specific jobs are re-read immediately before the single
+  non-retried `generate-jitconfig` POST, which requests the deterministic
+  runner name, the explicit runner group, exactly the expected label, and
+  work folder `_work`;
+- the returned runner must match the requested name, be idle, and carry the
+  expected label as its only custom label (GitHub-added read-only labels
+  are allowed); the `encoded_jit_config` must be nonempty, at most 65536
+  bytes (the shared conservative 64KiB hard cap both host controllers
+  enforce, well under the Linux execve single-string limit), canonical
+  base64. It is then streamed exactly once (plus one newline) to the
+  runner command's stdin. It is never decoded, logged, stored, or echoed,
+  and the dispatcher never polls, backgrounds, registers a runner, or
+  makes any further API call.
+
+The dispatcher and `LUMI_GITHUB_TOKEN` stay only on the trusted local
+control host (Omen for the x86_64 target, the control host's SSH session
+for the arm64 target). Export the token from tomorrow's credential/session
+setup first, never inline; the runner child receives only the encoded
+config on stdin, and SSH stdin carries only that encoded config. Examples
+use placeholders only; never put the token in shell history, dotfiles, or
+the repository.
+
+Local Omen control host, x86_64 target (the mydotfiles Omen controller
+`omen-codex-build-worker` runs the one-shot JIT runner; it stays attached
+until the runner exits):
+
+    export LUMI_GITHUB_TOKEN   # from tomorrow's credential/session setup
+    python3 scripts/release/lumi_shadow_dispatch_jit.py \
+      --run-id <RUN_ID> --run-attempt <ATTEMPT> --target x86_64 \
+      --runner-group-id <RUNNER_GROUP_ID> -- \
+      /path/to/mydotfiles/system/omen-codex-build-worker/bin/omen-codex-build-worker \
+      runner-run-jit
+
+Trusted local control host, arm64 target over SSH. The dispatcher runs on
+the control host; `ssh` is the runner child and its stdin carries only the
+encoded config. The remote helper path is deployed tomorrow (placeholder
+beneath); the helper is the mydotfiles Mac controller
+`macmini-codex-build-worker`, never actions-runner/run.sh. The SSH session
+stays attached until the runner exits:
+
+    export LUMI_GITHUB_TOKEN   # from tomorrow's credential/session setup
+    python3 scripts/release/lumi_shadow_dispatch_jit.py \
+      --run-id <RUN_ID> --run-attempt <ATTEMPT> --target arm64 \
+      --runner-group-id <RUNNER_GROUP_ID> -- \
+      ssh -T lumi-builder@macmini \
+      /Users/lumi-builder/.local/bin/macmini-codex-build-worker runner-run-jit
+
+The controller session stays attached until the one-shot runner exits; the
+dispatcher propagates the runner's exit status. The encoded config is
+ephemeral by design: it exists only in the dispatcher's memory and the
+runner's stdin.
+
 ## Privacy and fleet boundary
 
 The public distribution contains no private prompts, relationship skills,
@@ -162,6 +248,8 @@ artifact passes the first-tag gate above.
 ## Relevant source
 
 - [Release workflow](../.github/workflows/lumi-release.yml)
+- [Shadow workflow](../.github/workflows/lumi-release-shadow-worker.yml)
+- [JIT dispatcher](../scripts/release/lumi_shadow_dispatch_jit.py)
 - [Installer behavior and safety model](../scripts/install/LUMI_INSTALL.md)
 - [Unix installer](../scripts/install/install.sh)
 - [Windows installer](../scripts/install/install.ps1)

@@ -12,7 +12,10 @@
 #     --rg-bin/--zsh-bin overrides into the canonical package wrapper;
 #   * apt uses exact Acquire::http::Proxy / Acquire::https::Proxy args;
 #   * every network curl on the path is bounded (finite retry/connect/max-time)
-#     and downloads remain checksum-verified.
+#     and downloads remain checksum-verified;
+#   * the JIT dispatcher (lumi_shadow_dispatch_jit.py) hardcodes the exact
+#     workflow job names, per-run label formulas, and workflow path, so the
+#     external controller can never route to a renamed job or label.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,9 +27,10 @@ fetch_helper="${here}/lumi_shadow_fetch_dotslash.py"
 install_rust="${here}/lumi_shadow_install_rust.sh"
 curl_wrapper="${here}/lumi_shadow_curl.sh"
 config="${here}/lumi_shadow_actionlint.yaml"
+dispatcher="${here}/lumi_shadow_dispatch_jit.py"
 
 for file in "${workflow}" "${build_script}" "${x86_build_script}" "${swap_script}" \
-  "${fetch_helper}" "${install_rust}" "${curl_wrapper}" "${config}"; do
+  "${fetch_helper}" "${install_rust}" "${curl_wrapper}" "${config}" "${dispatcher}"; do
   [[ -f "${file}" ]] || { echo "FAIL: missing file: ${file}" >&2; exit 1; }
 done
 
@@ -312,5 +316,35 @@ grep -q '63c8477512eedd1fa625d8545139435d9773c2fae8f897123dcb643aa4dd7a76' "${wo
   || { echo "FAIL: x86 smoke digest missing from workflow docs" >&2; exit 1; }
 grep -q '35f9bb0540b9f7819a2ec6f88df516773973099d' "${x86_build_script}" \
   || { echo "FAIL: x86 smoke source missing from helper docs" >&2; exit 1; }
+
+# 19. JIT dispatcher coupling: the external controller depends on the exact
+#     gate/job names and per-run label formulas. Lock both the workflow and
+#     the dispatcher constants so activation can never target a renamed job
+#     or a changed label formula.
+for job_name in \
+  'Resolve source to exact commit' \
+  'Build and validate shadow packages (aarch64)' \
+  'Build and validate shadow package (x86_64)'; do
+  # Only job-level name: lines count (step names like '... commit SHA'
+  # contain the gate name as a substring and must not match).
+  count="$(grep -E '^[[:space:]]*name:' "${workflow}" \
+    | sed 's/^[[:space:]]*//' | grep -Fxc "name: ${job_name}")"
+  [[ "${count}" -eq 1 ]] \
+    || { echo "FAIL: job name '${job_name}' must appear exactly once" >&2; exit 1; }
+  grep -Fq "${job_name}" "${dispatcher}" \
+    || { echo "FAIL: dispatcher lacks job name '${job_name}'" >&2; exit 1; }
+done
+for formula in \
+  'lumi-shadow-arm64-${{ github.run_id }}-${{ github.run_attempt }}' \
+  'lumi-shadow-x86_64-${{ github.run_id }}-${{ github.run_attempt }}'; do
+  [[ "$(grep -Fc "runs-on: ${formula}" "${workflow}")" -eq 1 ]] \
+    || { echo "FAIL: runs-on formula '${formula}' must appear exactly once" >&2; exit 1; }
+done
+grep -Fq 'lumi-shadow-arm64-' "${dispatcher}" \
+  || { echo "FAIL: dispatcher lacks the arm64 label prefix" >&2; exit 1; }
+grep -Fq 'lumi-shadow-x86_64-' "${dispatcher}" \
+  || { echo "FAIL: dispatcher lacks the x86_64 label prefix" >&2; exit 1; }
+grep -Fq '.github/workflows/lumi-release-shadow-worker.yml' "${dispatcher}" \
+  || { echo "FAIL: dispatcher lacks the exact workflow path" >&2; exit 1; }
 
 echo "workflow static contract test OK"
