@@ -6,26 +6,37 @@
 # GitHub Releases into an independent, immutable root under XDG_DATA_HOME
 # (or ~/.local/share), alongside any package-managed official Codex install.
 #
-# The visible `lumi-codex` launcher normally execs <root>/current/bin/codex
-# and intercepts only `lumi-codex manage <action>`:
+# The visible `lumi-codex` launcher (installed at
+# ${LUMI_INSTALL_DIR:-$HOME/.local/bin}/lumi-codex) normally execs
+# <root>/current/bin/codex and intercepts only `lumi-codex manage <action>`:
 #   install (default), doctor, list, rollback, activate, deactivate, uninstall
 #
 # Safety model:
 #   - fork-only downloads from Lumi-weaves/codex GitHub Releases
 #   - canonical codex-package archives verified against codex-package_SHA256SUMS
+#     and the GitHub release-metadata digests (the canary trust anchor: no
+#     artifact signing yet, so the GitHub release digest is the anchor)
+#   - the manager copy is the verified `lumi-install.sh` release asset
+#     (works when bootstrapped via `curl ... | sh`; $0 is never copied)
 #   - immutable release directories under <root>/releases
 #   - strict schema/magic receipts prove ownership of every managed path
-#   - lock + staging + complete-package validation + atomic symlink switch
-#     (fails closed; never falls back to a non-atomic switch)
-#   - activation only appends an exactly owned, uniquely marked PATH block
-#     for the Lumi shim directory; official binaries are never overwritten
-#   - uninstall touches only receipt-proven owned paths and never CODEX_HOME
-#     or official package-managed Codex binaries
+#   - lock + staging + archive-member + package-metadata + completeness
+#     validation + atomic symlink switch (fails closed; no non-atomic fallback)
+#   - a prepared-operation journal is written before switching `current`, so a
+#     SIGKILL immediately after the switch cannot lose the old release as the
+#     rollback target; valid journals are reconciled deterministically,
+#     tampered journals fail closed
+#   - default installs are side-by-side: no PATH changes and no `codex`
+#     shadowing; `--activate`/`manage activate` opt in to the owned shim PATH
+#     block, `manage deactivate` removes exactly that block
+#   - uninstall touches only receipt-proven owned paths (including the visible
+#     launcher) and never CODEX_HOME or official package-managed binaries
 
 set -eu
 
 SCHEMA_VERSION=1
 RECEIPT_MAGIC="LUMI-CODEX-RECEIPT-V1"
+JOURNAL_MAGIC="LUMI-CODEX-JOURNAL-V1"
 PROFILE_BEGIN="# >>> Lumi Codex managed PATH >>>"
 PROFILE_END="# <<< Lumi Codex managed PATH <<<"
 RELEASES_API_BASE="https://api.github.com/repos/Lumi-weaves/codex"
@@ -34,17 +45,23 @@ RELEASES_CONNECT_TIMEOUT=10
 RELEASES_METADATA_TIMEOUT=30
 RELEASES_ASSET_TIMEOUT=300
 LOCK_STALE_AFTER_SECS=600
+MANAGER_ASSET="lumi-install.sh"
+TARGET_ALLOWLIST="x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
 
 RELEASE_RECEIPT_KEYS="schema root tag version target archive archive_sha256 bin_sha256 release_dir"
-CURRENT_RECEIPT_KEYS="$RELEASE_RECEIPT_KEYS current previous activated profile manager launcher shim shim_dir releases_dir receipts_dir tmp_dir"
+CURRENT_RECEIPT_KEYS="$RELEASE_RECEIPT_KEYS current previous activated profile manager launcher shim shim_dir install_dir releases_dir receipts_dir tmp_dir"
+JOURNAL_KEYS="schema op current_old current_new previous_old previous_new"
 
 root=""
-self_path=""
+releases_dir=""
+receipts_dir=""
 mode=""
 action=""
 release="${LUMI_RELEASE:-latest}"
-target=""
-no_activate=0
+target="${LUMI_TARGET:-}"
+install_dir=""
+launcher=""
+activate_install=0
 profile=""
 path_line=""
 tmp_dir=""
@@ -78,21 +95,30 @@ Usage:
   lumi-codex manage doctor             Verify confinement, packages, receipts, launcher and PATH
   lumi-codex manage list               List managed releases and activation state
   lumi-codex manage rollback           Switch back to the previous release
-  lumi-codex manage activate           Add the owned Lumi Codex shim PATH block
+  lumi-codex manage activate           Add the owned Lumi Codex shim PATH block (shadows codex)
   lumi-codex manage deactivate         Remove exactly the owned Lumi Codex PATH block
   lumi-codex manage uninstall          Remove the managed install (never touches official Codex)
 
 install options:
   --release VERSION   Release to install (default: latest; env: LUMI_RELEASE)
+                      Accepts tags such as rust-v0.147.0-lumi.1
   --target TARGET     Package target (default: x86_64-unknown-linux-musl; env: LUMI_TARGET)
-  --no-activate       Install without modifying any shell profile
+                      Linux canary allowlist: x86_64-unknown-linux-musl,
+                      aarch64-unknown-linux-musl
+  --activate          Opt in to the owned shim PATH block after install
+                      (default is side-by-side: no PATH change, codex is not shadowed)
 
 Environment:
   LUMI_ROOT           Override the managed root (default: \${XDG_DATA_HOME:-\$HOME/.local/share}/lumi-codex)
+  LUMI_INSTALL_DIR    Where the visible lumi-codex launcher is installed
+                      (default: \$HOME/.local/bin)
   LUMI_PROFILE        Override the shell profile to activate (default: \$HOME/.bashrc, .zshrc, or .profile)
+  LUMI_DEV_MANAGER_SELF  Developer/test mode: use this local file as the manager
+                      source instead of the verified lumi-install.sh release asset
 
 The installer only downloads from Lumi-weaves/codex GitHub Releases and never
-touches CODEX_HOME or package-managed official Codex binaries.
+touches CODEX_HOME or package-managed official Codex binaries. The GitHub
+release asset digest is the canary trust anchor (no artifact signing yet).
 EOF
 }
 
@@ -120,10 +146,59 @@ validate_version() {
     return
   fi
 
-  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?$'; then
-    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]." >&2
+  # Codex SemVer plus optional Lumi suffix, e.g. 0.147.0-lumi.1.
+  if ! printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-alpha(\.[0-9]+){0,2}|-beta(\.[0-9]+)?)?(-lumi\.[0-9]+)?$'; then
+    echo "Invalid Codex release version: $version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]][-lumi.N]." >&2
     return 1
   fi
+}
+
+safe_rel_name() {
+  # Strict safe name for receipt/journal values that become path components:
+  # no empty, no leading dot, no slash, only [A-Za-z0-9._-].
+  case "$1" in
+    "" | .* | */* | *[!A-Za-z0-9._-]*)
+      return 1
+      ;;
+  esac
+}
+
+has_control_chars() {
+  value="$1"
+  if printf '%s' "$value" | grep -q '[[:cntrl:]]'; then
+    return 0
+  fi
+  # grep is line-oriented and never sees the line terminator, so count
+  # embedded newlines explicitly.
+  if [ "$(printf '%s' "$value" | tr -cd '\n' | wc -c)" != 0 ]; then
+    return 0
+  fi
+  return 1
+}
+
+validate_abs_path() {
+  value="$1"
+  label="$2"
+
+  case "$value" in
+    /*) ;;
+    *) die "$label must be an absolute path (got: $value)" ;;
+  esac
+  if has_control_chars "$value"; then
+    die "$label contains control characters; refusing."
+  fi
+}
+
+validate_target() {
+  case " $TARGET_ALLOWLIST " in
+    *" $target "*)
+      ;;
+    *)
+      die "Unsupported target: $target. Linux canary allowlist: $TARGET_ALLOWLIST (use --target or LUMI_TARGET)."
+      ;;
+  esac
+  printf '%s' "$target" | grep -Eq '^[a-z0-9_]+(-[a-z0-9_]+)*$' ||
+    die "Target contains unsafe characters: $target"
 }
 
 download_file() {
@@ -408,21 +483,32 @@ resolve_root() {
     root="${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex"
   fi
 
-  case "$root" in
-    /*) ;;
-    *) die "LUMI_ROOT must be an absolute path (got: $root)" ;;
-  esac
+  validate_abs_path "$root" "LUMI_ROOT"
 
   releases_dir="$root/releases"
   receipts_dir="$root/receipts"
 }
 
-resolve_self() {
-  if command -v readlink >/dev/null 2>&1; then
-    self_path="$(readlink -f "$0" 2>/dev/null || true)"
+resolve_install_dir() {
+  if [ -n "${LUMI_INSTALL_DIR:-}" ]; then
+    install_dir="$LUMI_INSTALL_DIR"
+  else
+    install_dir="$HOME/.local/bin"
   fi
-  if [ -z "$self_path" ]; then
-    self_path="$0"
+
+  validate_abs_path "$install_dir" "LUMI_INSTALL_DIR"
+  launcher="$install_dir/lumi-codex"
+}
+
+validate_root_for_mutation() {
+  if [ -L "$root" ]; then
+    die "Refusing to operate on symlinked root $root (remove the symlink or point LUMI_ROOT at a real directory)."
+  fi
+}
+
+validate_install_dir_for_mutation() {
+  if [ -L "$install_dir" ]; then
+    die "Refusing to install the launcher through symlinked directory $install_dir."
   fi
 }
 
@@ -493,12 +579,12 @@ cleanup_stale_artifacts() {
 
 switch_link() {
   name="$1"
-  target="$2"
+  link_target="$2"
   mkdir -p "$root/tmp"
   tmp_link="$root/tmp/.$name.$$"
 
   rm -f "$tmp_link"
-  ln -s "$target" "$tmp_link"
+  ln -s "$link_target" "$tmp_link"
 
   if mv -Tf "$tmp_link" "$root/$name" 2>/dev/null; then
     return
@@ -514,11 +600,11 @@ switch_link() {
 
 ensure_owned_symlink() {
   path="$1"
-  target="$2"
+  link_target="$2"
 
   if [ -L "$path" ]; then
     current_target="$(readlink "$path" 2>/dev/null || true)"
-    if [ "$current_target" = "$target" ]; then
+    if [ "$current_target" = "$link_target" ]; then
       return 0
     fi
     die "Refusing to overwrite unknown symlink $path -> $current_target"
@@ -528,7 +614,7 @@ ensure_owned_symlink() {
     die "Refusing to overwrite non-symlink path $path"
   fi
 
-  ln -s "$target" "$path"
+  ln -s "$link_target" "$path"
 }
 
 profile_block_state() {
@@ -564,7 +650,14 @@ profile_block_state() {
   ' "$profile"
 }
 
+assert_profile_not_symlink() {
+  if [ -L "$profile" ]; then
+    die "Refusing to modify symlinked profile $profile (replace the symlink with a regular file or set LUMI_PROFILE)."
+  fi
+}
+
 profile_activate() {
+  assert_profile_not_symlink
   case "$(profile_block_state)" in
     exact)
       step "Lumi Codex PATH already configured in $profile"
@@ -594,6 +687,7 @@ profile_activate() {
 }
 
 profile_deactivate() {
+  assert_profile_not_symlink
   case "$(profile_block_state)" in
     none)
       step "Lumi Codex PATH is not configured (nothing to remove)."
@@ -675,6 +769,7 @@ write_release_receipt() {
   bin_digest="$2"
   archive_digest="$3"
 
+  safe_rel_name "$rel" || die "Refusing to write release receipt for unsafe name: $rel"
   mkdir -p "$root/tmp" "$root/receipts"
   tmp="$root/tmp/release.receipt.$$"
   {
@@ -697,8 +792,14 @@ write_current_receipt() {
   prev_dir="$2"
   activated_state="$3"
   profile_path="$4"
-  rpath="$root/receipts/$cur_dir.receipt"
 
+  safe_rel_name "$cur_dir" || die "Refusing to write current receipt for unsafe name: $cur_dir"
+  case "$prev_dir" in
+    -) ;;
+    *) safe_rel_name "$prev_dir" || die "Refusing to write current receipt for unsafe previous: $prev_dir" ;;
+  esac
+
+  rpath="$root/receipts/$cur_dir.receipt"
   [ -f "$rpath" ] || die "Missing release receipt $rpath; cannot write current receipt."
 
   mkdir -p "$root/tmp" "$root/receipts"
@@ -719,9 +820,10 @@ write_current_receipt() {
     printf 'activated=%s\n' "$activated_state"
     printf 'profile=%s\n' "$profile_path"
     printf 'manager=%s\n' 'manager/lumi-install.sh'
-    printf 'launcher=%s\n' 'shim/lumi-codex'
+    printf 'launcher=%s\n' "$launcher"
     printf 'shim=%s\n' 'shim/codex'
     printf 'shim_dir=%s\n' 'shim'
+    printf 'install_dir=%s\n' "$install_dir"
     printf 'releases_dir=%s\n' 'releases'
     printf 'receipts_dir=%s\n' 'receipts'
     printf 'tmp_dir=%s\n' 'tmp'
@@ -733,11 +835,13 @@ update_activation() {
   new_activated="$1"
   new_profile="$2"
 
-  cur="$(receipt_key "$root/receipts/current.receipt" current)"
-  prev="$(receipt_key "$root/receipts/current.receipt" previous)"
-  [ -n "$cur" ] || die "current.receipt is invalid."
+  receipt="$root/receipts/current.receipt"
+  cur="$(receipt_key "$receipt" current)"
+  prev="$(receipt_key "$receipt" previous)"
+  safe_rel_name "$cur" || die "current.receipt contains an unsafe current value; refusing."
   case "$prev" in
-    - | "") prev="-" ;;
+    -) ;;
+    *) safe_rel_name "$prev" || die "current.receipt contains an unsafe previous value; refusing." ;;
   esac
   write_current_receipt "$cur" "$prev" "$new_activated" "$new_profile"
 }
@@ -752,18 +856,67 @@ version_from_binary() {
   "$codex_path" --version 2>/dev/null | sed -n 's/.* \([0-9][0-9A-Za-z.+-]*\)$/\1/p' | head -n 1
 }
 
+validate_archive_members() {
+  archive="$1"
+
+  # Names: reject absolute members, empty names, and any `..` component.
+  if ! tar -tzf "$archive" 2>/dev/null | awk '
+    {
+      name = $0
+      if (name == "" || substr(name, 1, 1) == "/") { bad = 1 }
+      n = split(name, parts, "/")
+      for (i = 1; i <= n; i++) {
+        if (parts[i] == "..") { bad = 1 }
+      }
+      if (bad) exit 1
+    }
+    END { if (bad) exit 1 }
+  '; then
+    echo "Package archive contains unsafe member paths (absolute or .. traversal); refusing." >&2
+    return 1
+  fi
+
+  # Types: only regular files (-) and directories (d); reject symlinks,
+  # hardlinks, devices, and fifos.
+  if ! tar -tvzf "$archive" 2>/dev/null | awk '
+    {
+      type = substr($1, 1, 1)
+      if (type != "-" && type != "d") { exit 1 }
+    }
+  '; then
+    echo "Package archive contains unsafe entry types (symlinks or special files); refusing." >&2
+    return 1
+  fi
+}
+
+validate_package_metadata() {
+  pkgjson="$1"
+  expected_version="$2"
+  expected_target="$3"
+
+  [ -f "$pkgjson" ] && [ ! -L "$pkgjson" ] || return 1
+  grep -q '"distribution"[[:space:]]*:[[:space:]]*"lumi"' "$pkgjson" || return 1
+  grep -q '"variant"[[:space:]]*:[[:space:]]*"codex"' "$pkgjson" || return 1
+  grep -q '"entrypoint"[[:space:]]*:[[:space:]]*"bin/codex"' "$pkgjson" || return 1
+  grep -q "\"version\"[[:space:]]*:[[:space:]]*\"$expected_version\"" "$pkgjson" || return 1
+  grep -q "\"target\"[[:space:]]*:[[:space:]]*\"$expected_target\"" "$pkgjson" || return 1
+}
+
 release_dir_is_complete() {
   dir="$1"
   expected_version="$2"
   expected_target="$3"
 
   [ -d "$dir" ] || return 1
-  [ -f "$dir/codex-package.json" ] &&
-    [ -x "$dir/bin/codex" ] &&
-    [ -x "$dir/bin/codex-code-mode-host" ] &&
+  [ -f "$dir/codex-package.json" ] && [ ! -L "$dir/codex-package.json" ] &&
+    [ -f "$dir/bin/codex" ] && [ ! -L "$dir/bin/codex" ] &&
+    [ -f "$dir/bin/codex-code-mode-host" ] && [ ! -L "$dir/bin/codex-code-mode-host" ] &&
+    [ -f "$dir/codex-path/rg" ] && [ ! -L "$dir/codex-path/rg" ] &&
+    [ -f "$dir/codex-resources/bwrap" ] && [ ! -L "$dir/codex-resources/bwrap" ] &&
     [ -x "$dir/codex" ] &&
-    [ -x "$dir/codex-path/rg" ] &&
-    [ -x "$dir/codex-resources/bwrap" ] || return 1
+    [ "$(readlink "$dir/codex" 2>/dev/null || true)" = "bin/codex" ] || return 1
+
+  validate_package_metadata "$dir/codex-package.json" "$expected_version" "$expected_target" || return 1
 
   installed_version="$(version_from_binary "$dir/bin/codex" || true)"
   [ -n "$installed_version" ] || return 1
@@ -809,18 +962,23 @@ resolve_release() {
   if ! release_asset_exists "$checksum_asset"; then
     die "Release $tag is missing the checksum manifest $checksum_asset."
   fi
+  if [ -z "${LUMI_DEV_MANAGER_SELF:-}" ] && ! release_asset_exists "$MANAGER_ASSET"; then
+    die "Release $tag is missing the bootstrap asset $MANAGER_ASSET (needed to install a verified manager copy)."
+  fi
 }
 
 release_is_proven() {
   rel="$1"
 
+  safe_rel_name "$rel" || return 1
   [ -d "$releases_dir/$rel" ] || return 1
-  release_dir_is_complete "$releases_dir/$rel" "$version" "$target" || return 1
   rpath="$receipts_dir/$rel.receipt"
   validate_receipt "$rpath" "$RELEASE_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" || return 1
   [ "$(receipt_key "$rpath" version)" = "$version" ] || return 1
   [ "$(receipt_key "$rpath" target)" = "$target" ] || return 1
   [ "$(receipt_key "$rpath" release_dir)" = "$rel" ] || return 1
+  release_dir_is_complete "$releases_dir/$rel" "$version" "$target" || return 1
+  [ "$(file_sha256 "$releases_dir/$rel/bin/codex")" = "$(receipt_key "$rpath" bin_sha256)" ] || return 1
 }
 
 download_and_stage() {
@@ -841,11 +999,26 @@ download_and_stage() {
   verify_archive_digest "$tmp_dir/archive.tar.gz" "$expected_digest" ||
     die "Downloaded archive checksum did not match codex-package_SHA256SUMS; aborting without switching."
 
+  if [ -z "${LUMI_DEV_MANAGER_SELF:-}" ]; then
+    step "Downloading $MANAGER_ASSET"
+    download_file "$(release_url_for_asset "$MANAGER_ASSET")" "$tmp_dir/lumi-install.sh" ||
+      die "Could not download $MANAGER_ASSET."
+    verify_archive_digest "$tmp_dir/lumi-install.sh" "$(release_asset_digest "$MANAGER_ASSET")" ||
+      die "Downloaded $MANAGER_ASSET digest did not match release metadata."
+    sh -n "$tmp_dir/lumi-install.sh" ||
+      die "Downloaded $MANAGER_ASSET fails the shell syntax check; refusing to install it as the manager."
+  fi
+
+  validate_archive_members "$tmp_dir/archive.tar.gz" ||
+    die "Aborting without switching."
+
   mkdir -p "$root/tmp"
   stage="$root/tmp/.staging.$rel.$$"
   rm -rf "$stage"
   mkdir -p "$stage"
-  tar -xzf "$tmp_dir/archive.tar.gz" -C "$stage"
+  if ! tar --no-same-owner --no-same-permissions -xzf "$tmp_dir/archive.tar.gz" -C "$stage" 2>/dev/null; then
+    tar -xzf "$tmp_dir/archive.tar.gz" -C "$stage"
+  fi
   [ -f "$stage/bin/codex" ] && chmod 0755 "$stage/bin/codex"
   [ -f "$stage/bin/codex-code-mode-host" ] && chmod 0755 "$stage/bin/codex-code-mode-host"
   [ -f "$stage/codex-path/rg" ] && chmod 0755 "$stage/codex-path/rg"
@@ -869,14 +1042,202 @@ download_and_stage() {
   mv "$stage" "$releases_dir/$rel"
 }
 
+write_journal() {
+  op="$1"
+  cur_old="$2"
+  cur_new="$3"
+  prev_old="$4"
+  prev_new="$5"
+
+  mkdir -p "$root/tmp"
+  tmp="$root/tmp/pending.journal.$$"
+  {
+    printf '%s\n' "$JOURNAL_MAGIC"
+    printf 'schema=%s\n' "$SCHEMA_VERSION"
+    printf 'op=%s\n' "$op"
+    printf 'current_old=%s\n' "$cur_old"
+    printf 'current_new=%s\n' "$cur_new"
+    printf 'previous_old=%s\n' "$prev_old"
+    printf 'previous_new=%s\n' "$prev_new"
+  } >"$tmp"
+  mv -f "$tmp" "$root/tmp/pending.journal"
+}
+
+validate_journal() {
+  path="$1"
+
+  [ -f "$path" ] || return 1
+  [ "$(sed -n '1p' "$path")" = "$JOURNAL_MAGIC" ] || return 1
+
+  if ! awk -v allowed="$JOURNAL_KEYS" '
+    NR == 1 { next }
+    {
+      line = $0
+      eq = index(line, "=")
+      if (eq <= 1) { bad = 1; next }
+      key = substr(line, 1, eq - 1)
+      value = substr(line, eq + 1)
+      if (value == "") { bad = 1 }
+      if (seen[key]++) { bad = 1 }
+      if (!((" " allowed " ") ~ (" " key " "))) { bad = 1 }
+      keys = keys " " key
+    }
+    END {
+      if (bad) exit 1
+      n = split(allowed, req, " ")
+      for (i = 1; i <= n; i++) {
+        if (!((" " keys " ") ~ (" " req[i] " "))) exit 1
+      }
+      exit 0
+    }
+  ' "$path"; then
+    return 1
+  fi
+
+  op="$(receipt_key "$path" op)"
+  case "$op" in
+    install | rollback) ;;
+    *) return 1 ;;
+  esac
+  for key in current_old current_new previous_old previous_new; do
+    value="$(receipt_key "$path" "$key")"
+    case "$value" in
+      -) ;;
+      *) safe_rel_name "$value" || return 1 ;;
+    esac
+  done
+}
+
+journal_value() {
+  receipt_key "$root/tmp/pending.journal" "$1"
+}
+
+current_symlink_rel() {
+  value="$(readlink "$root/current" 2>/dev/null || true)"
+  case "$value" in
+    releases/*) printf '%s\n' "$(basename "$value")" ;;
+    "") printf '%s\n' "-" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+previous_symlink_rel() {
+  value="$(readlink "$root/previous" 2>/dev/null || true)"
+  case "$value" in
+    releases/*) printf '%s\n' "$(basename "$value")" ;;
+    "") printf '%s\n' "-" ;;
+    *) printf '%s\n' "$value" ;;
+  esac
+}
+
+reconcile_journal() {
+  journal="$root/tmp/pending.journal"
+  [ -f "$journal" ] || return 0
+
+  if ! validate_journal "$journal"; then
+    die "Pending operation journal at $journal is missing, invalid, or tampered; refusing to continue (run doctor for details)."
+  fi
+
+  op="$(journal_value op)"
+  cur_old="$(journal_value current_old)"
+  cur_new="$(journal_value current_new)"
+  prev_old="$(journal_value previous_old)"
+  prev_new="$(journal_value previous_new)"
+  actual_cur="$(current_symlink_rel)"
+  actual_prev="$(previous_symlink_rel)"
+
+  value_in_set() {
+    value="$1"
+    set_a="$2"
+    set_b="$3"
+    [ "$value" = "$set_a" ] || [ "$value" = "$set_b" ]
+  }
+
+  if value_in_set "$actual_cur" "$cur_old" "$cur_new" &&
+    value_in_set "$actual_prev" "$prev_old" "$prev_new"; then
+    :
+  else
+    die "Pending operation journal state does not match the actual symlinks; refusing to reconcile tampered state."
+  fi
+
+  if [ "$actual_cur" = "$cur_old" ] && [ "$actual_prev" = "$prev_old" ]; then
+    # The first switch never happened; the operation was abandoned before mutation.
+    rm -f "$journal"
+    step "Reconciled abandoned journal (no switch happened); removed it."
+    return 0
+  fi
+
+  # At least the current switch happened. Validate the intended target release
+  # before finalizing so a corrupt target cannot be accepted.
+  cur_rpath="$receipts_dir/$cur_new.receipt"
+  cur_version="$(receipt_key "$cur_rpath" version)"
+  cur_target="$(receipt_key "$cur_rpath" target)"
+  if ! release_dir_is_complete "$releases_dir/$cur_new" "$cur_version" "$cur_target"; then
+    die "Journal target release $cur_new is incomplete or invalid; refusing to finalize."
+  fi
+
+  if [ "$actual_prev" != "$prev_new" ]; then
+    # Crash between the current switch and the previous switch: complete it.
+    if [ "$prev_new" = "-" ]; then
+      rm -f "$root/previous"
+    else
+      switch_link previous "releases/$prev_new"
+    fi
+    step "Reconciled interrupted journal: completed previous switch to $prev_new."
+  fi
+
+  receipt="$root/receipts/current.receipt"
+  if validate_receipt "$receipt" "$CURRENT_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS"; then
+    activated="$(receipt_key "$receipt" activated)"
+    profile="$(receipt_key "$receipt" profile)"
+  else
+    activated="no"
+    profile="-"
+  fi
+  write_current_receipt "$cur_new" "$prev_new" "$activated" "$profile"
+  rm -f "$journal"
+  step "Reconciled journal: current=$cur_new previous=$prev_new."
+}
+
 ensure_manager_and_shim() {
   mkdir -p "$root/manager" "$root/shim"
-  if [ "$self_path" != "$root/manager/lumi-install.sh" ]; then
-    cp "$self_path" "$root/manager/lumi-install.sh"
+
+  manager_source=""
+  if [ -n "${LUMI_DEV_MANAGER_SELF:-}" ]; then
+    manager_source="$LUMI_DEV_MANAGER_SELF"
+    [ -r "$manager_source" ] || die "LUMI_DEV_MANAGER_SELF is not a readable file: $manager_source"
+    sh -n "$manager_source" || die "LUMI_DEV_MANAGER_SELF fails the shell syntax check."
+    warn "Developer mode: installing manager copy from $manager_source instead of the verified release asset."
+  elif [ -f "$tmp_dir/lumi-install.sh" ]; then
+    manager_source="$tmp_dir/lumi-install.sh"
+  elif [ -f "$root/manager/lumi-install.sh" ] && sh -n "$root/manager/lumi-install.sh" 2>/dev/null; then
+    manager_source="$root/manager/lumi-install.sh"
+  else
+    die "No verified manager source available (release asset missing or manager copy invalid); reinstall required."
+  fi
+
+  if [ "$manager_source" != "$root/manager/lumi-install.sh" ]; then
+    cp "$manager_source" "$root/manager/lumi-install.sh"
   fi
   chmod 0755 "$root/manager/lumi-install.sh"
+
+  mkdir -p "$install_dir"
+  ensure_owned_symlink "$launcher" "$root/manager/lumi-install.sh"
   ensure_owned_symlink "$root/shim/lumi-codex" "../manager/lumi-install.sh"
   ensure_owned_symlink "$root/shim/codex" "../current/bin/codex"
+}
+
+install_dir_on_path() {
+  old_ifs="$IFS"
+  IFS=:
+  for dir in $PATH; do
+    if [ -n "$dir" ] && [ "$dir" = "$install_dir" ]; then
+      IFS="$old_ifs"
+      return 0
+    fi
+  done
+  IFS="$old_ifs"
+  return 1
 }
 
 cmd_install() {
@@ -897,14 +1258,21 @@ cmd_install() {
         target="aarch64-unknown-linux-musl"
         ;;
       *)
-        die "Unsupported architecture: $arch. Linux x86_64 is the canary target; pass --target to select another known target."
+        die "Unsupported architecture: $arch. Linux x86_64 is the canary target; use --target or LUMI_TARGET to select another known target."
         ;;
     esac
   fi
+  validate_target
+
+  resolve_root
+  resolve_install_dir
+  validate_root_for_mutation
+  validate_install_dir_for_mutation
 
   mkdir -p "$root"
   acquire_install_lock
   cleanup_stale_artifacts
+  reconcile_journal
 
   resolve_release
 
@@ -912,12 +1280,13 @@ cmd_install() {
   step "Target: $target"
 
   release_dir="$version-$target"
+  safe_rel_name "$release_dir" || die "Refusing to install release with unsafe name: $release_dir"
 
   if release_is_proven "$release_dir"; then
-    step "Release $release_dir is already installed and complete; reusing it."
+    step "Release $release_dir is already installed, complete, and digest-verified; reusing it."
   else
     if [ -e "$releases_dir/$release_dir" ] || [ -L "$releases_dir/$release_dir" ]; then
-      warn "Existing release $release_dir is incomplete or unproven; reinstalling."
+      warn "Existing release $release_dir is incomplete, unproven, or tampered; reinstalling."
       rm -rf "$releases_dir/$release_dir"
     fi
     download_and_stage "$release_dir"
@@ -926,46 +1295,58 @@ cmd_install() {
   release_dir_is_complete "$releases_dir/$release_dir" "$version" "$target" ||
     die "Installed release $release_dir failed final validation."
 
-  old_current=""
-  if [ -L "$root/current" ]; then
-    old_current="$(readlink "$root/current" 2>/dev/null || true)"
-    case "$old_current" in
-      releases/*) ;;
-      *) old_current="" ;;
-    esac
+  old_current="$(current_symlink_rel)"
+  old_previous="$(previous_symlink_rel)"
+  case "$old_current" in
+    -) old_current="" ;;
+  esac
+
+  new_previous="$old_previous"
+  if [ -n "$old_current" ] && [ "$old_current" != "$release_dir" ]; then
+    new_previous="$old_current"
   fi
 
-  switch_link current "releases/$release_dir"
-  if [ -n "$old_current" ] && [ "$old_current" != "releases/$release_dir" ]; then
-    switch_link previous "$old_current"
-  elif [ -z "$old_current" ]; then
-    rm -f "$root/previous"
+  if [ "$old_current" != "$release_dir" ]; then
+    cur_old="$old_current"
+    [ -n "$cur_old" ] || cur_old="-"
+    write_journal install "$cur_old" "$release_dir" "$old_previous" "$new_previous"
+    switch_link current "releases/$release_dir"
+    if [ -n "${LUMI_TEST_SLOW_AFTER_SWITCH:-}" ]; then
+      sleep "$LUMI_TEST_SLOW_AFTER_SWITCH"
+    fi
+    if [ "$new_previous" != "$old_previous" ]; then
+      switch_link previous "releases/$new_previous"
+    fi
   fi
 
   ensure_manager_and_shim
 
-  prev_target="$(readlink "$root/previous" 2>/dev/null || true)"
-  case "$prev_target" in
-    releases/*) prev_target="$(basename "$prev_target")" ;;
-    *) prev_target="-" ;;
-  esac
-
   activated="no"
   profile="-"
-  if [ "$no_activate" != 1 ]; then
+  if [ "$activate_install" = 1 ]; then
     profile="$(pick_profile)"
+    validate_abs_path "$profile" "LUMI_PROFILE"
     path_line="export PATH=\"$root/shim:\$PATH\""
     profile_activate
     activated="yes"
   fi
-  write_current_receipt "$release_dir" "$prev_target" "$activated" "$profile"
+  write_current_receipt "$release_dir" "$new_previous" "$activated" "$profile"
+  rm -f "$root/tmp/pending.journal"
 
-  if [ "$activated" = "yes" ]; then
-    step "Lumi Codex CLI $version installed and activated (PATH configured in $profile)."
-    step "Run: lumi-codex   (new terminals pick it up automatically)"
+  step "Lumi Codex CLI $version installed (root: $root)."
+  step "Launcher: $launcher"
+  if install_dir_on_path; then
+    step "Run: lumi-codex   (execs the installed CLI; new terminals pick it up automatically)"
   else
-    step "Lumi Codex CLI $version installed (not activated)."
-    step "Run: $root/shim/lumi-codex manage activate"
+    warn "$install_dir is not on PATH."
+    warn "Add $install_dir to PATH, or run the launcher directly: $launcher manage install|doctor|list|rollback|activate|deactivate|uninstall"
+    warn "Run the installed CLI with: $launcher <args>"
+  fi
+  if [ "$activated" = "yes" ]; then
+    step "Activated: $root/shim added to PATH in $profile (codex now resolves to the managed CLI)."
+  else
+    step "Not activated: codex still resolves to the official install (side-by-side)."
+    step "Run: lumi-codex manage activate   to shadow codex with the managed CLI"
   fi
 }
 
@@ -1015,10 +1396,28 @@ cmd_doctor() {
     /*) report "root is absolute" 0 ;;
     *) report "root is not absolute" 1 ;;
   esac
+  if [ -L "$root" ]; then
+    report "root is a symlink" 1
+  else
+    report "root is not a symlink" 0
+  fi
   if [ "$(basename "$root")" = "lumi-codex" ]; then
     report "root basename is lumi-codex" 0
   else
     report "root basename is not lumi-codex" 1
+  fi
+
+  # Reconcile a valid pending journal deterministically; a tampered journal
+  # fails closed (reported below and no mutation is attempted).
+  if [ -f "$root/tmp/pending.journal" ]; then
+    if validate_journal "$root/tmp/pending.journal"; then
+      acquire_install_lock
+      reconcile_journal
+      release_install_lock
+      step "doctor reconciled a valid pending journal."
+    else
+      report "pending journal is invalid or tampered" 1
+    fi
   fi
 
   receipt="$root/receipts/current.receipt"
@@ -1032,12 +1431,30 @@ cmd_doctor() {
 
   cur="$(receipt_key "$receipt" current)"
   prev="$(receipt_key "$receipt" previous)"
+  release_dir="$(receipt_key "$receipt" release_dir)"
   version="$(receipt_key "$receipt" version)"
   target="$(receipt_key "$receipt" target)"
   bin_sha256="$(receipt_key "$receipt" bin_sha256)"
-  release_dir="$(receipt_key "$receipt" release_dir)"
   activated="$(receipt_key "$receipt" activated)"
   profile="$(receipt_key "$receipt" profile)"
+  launcher="$(receipt_key "$receipt" launcher)"
+  install_dir="$(receipt_key "$receipt" install_dir)"
+
+  cur_prev_safe=1
+  safe_rel_name "$cur" || cur_prev_safe=0
+  if [ "$prev" != "-" ]; then
+    safe_rel_name "$prev" || cur_prev_safe=0
+  fi
+  if [ "$cur_prev_safe" = 1 ]; then
+    report "receipt current/previous names are safe" 0
+  else
+    report "receipt current/previous names are unsafe" 1
+  fi
+  if safe_rel_name "$release_dir"; then
+    report "receipt release_dir name is safe" 0
+  else
+    report "receipt release_dir name is unsafe" 1
+  fi
 
   if [ "$release_dir" = "$cur" ]; then
     report "receipt release_dir matches current" 0
@@ -1046,20 +1463,21 @@ cmd_doctor() {
   fi
 
   actual_current="$(readlink "$root/current" 2>/dev/null || true)"
-  if [ "$actual_current" = "releases/$cur" ]; then
+  if safe_rel_name "$cur" && [ "$actual_current" = "releases/$cur" ]; then
     report "current symlink points to releases/$cur" 0
   else
     report "current symlink drift (got: $actual_current)" 1
   fi
 
-  if release_dir_is_complete "$root/releases/$cur" "$version" "$target"; then
+  if safe_rel_name "$cur" && release_dir_is_complete "$root/releases/$cur" "$version" "$target"; then
     report "current release directory is complete" 0
   else
     report "current release directory is incomplete or missing" 1
   fi
 
   cur_rpath="$root/receipts/$cur.receipt"
-  if validate_receipt "$cur_rpath" "$RELEASE_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" &&
+  if safe_rel_name "$cur" &&
+    validate_receipt "$cur_rpath" "$RELEASE_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" &&
     [ "$(receipt_key "$cur_rpath" version)" = "$version" ] &&
     [ "$(receipt_key "$cur_rpath" target)" = "$target" ]; then
     report "current release receipt matches" 0
@@ -1087,7 +1505,7 @@ cmd_doctor() {
     else
       report "no previous release (receipt consistent)" 0
     fi
-  else
+  elif safe_rel_name "$prev"; then
     prev_rpath="$root/receipts/$prev.receipt"
     prev_version="$(receipt_key "$prev_rpath" version)"
     prev_target="$(receipt_key "$prev_rpath" target)"
@@ -1099,12 +1517,34 @@ cmd_doctor() {
     else
       report "previous release ($prev) is missing, drifted, or incomplete" 1
     fi
+  else
+    report "previous release name from receipt is unsafe" 1
   fi
 
-  if [ -f "$root/manager/lumi-install.sh" ] && [ -x "$root/manager/lumi-install.sh" ]; then
-    report "manager copy exists and is executable" 0
+  if [ -f "$root/manager/lumi-install.sh" ] && [ -x "$root/manager/lumi-install.sh" ] &&
+    sh -n "$root/manager/lumi-install.sh" 2>/dev/null; then
+    report "manager copy exists, is executable, and passes sh -n" 0
   else
-    report "manager copy is missing or not executable" 1
+    report "manager copy is missing, not executable, or fails sh -n" 1
+  fi
+
+  launcher_safe=1
+  case "$launcher" in
+    /*) ;;
+    *) launcher_safe=0 ;;
+  esac
+  if has_control_chars "$launcher"; then
+    launcher_safe=0
+  fi
+  if [ "$launcher_safe" = 1 ]; then
+    report "visible launcher path is absolute and safe" 0
+  else
+    report "visible launcher path is not absolute or contains control characters" 1
+  fi
+  if [ -L "$launcher" ] && [ "$(readlink "$launcher" 2>/dev/null || true)" = "$root/manager/lumi-install.sh" ]; then
+    report "visible launcher $launcher is the owned symlink" 0
+  else
+    report "visible launcher $launcher is missing or not the owned symlink" 1
   fi
 
   if [ -L "$root/shim/lumi-codex" ] && [ "$(readlink "$root/shim/lumi-codex" 2>/dev/null || true)" = "../manager/lumi-install.sh" ]; then
@@ -1121,7 +1561,7 @@ cmd_doctor() {
 
   path_line="export PATH=\"$root/shim:\$PATH\""
   if [ "$activated" = "yes" ]; then
-    if [ -n "$profile" ] && [ "$profile" != "-" ] && [ -f "$profile" ] &&
+    if [ -n "$profile" ] && [ "$profile" != "-" ] && [ ! -L "$profile" ] && [ -f "$profile" ] &&
       [ "$(profile_block_state)" = "exact" ]; then
       report "activation block in $profile is the exact owned block" 0
     else
@@ -1135,6 +1575,12 @@ cmd_doctor() {
     fi
   else
     report "invalid activated field in receipt ($activated)" 1
+  fi
+
+  if install_dir_on_path; then
+    step "launcher directory $install_dir is on PATH"
+  else
+    step "launcher directory $install_dir is NOT on PATH; run: $launcher manage ..."
   fi
 
   official="$(find_official_codex || true)"
@@ -1166,6 +1612,7 @@ cmd_list() {
     prev="$(receipt_key "$receipt" previous)"
     activated="$(receipt_key "$receipt" activated)"
     profile="$(receipt_key "$receipt" profile)"
+    launcher="$(receipt_key "$receipt" launcher)"
     step "current: $cur"
     if [ "$prev" != "-" ] && [ -n "$prev" ]; then
       step "previous: $prev"
@@ -1175,6 +1622,7 @@ cmd_list() {
     else
       step "activation: disabled"
     fi
+    step "launcher: $launcher"
   fi
 
   if [ -d "$root/releases" ]; then
@@ -1188,7 +1636,9 @@ cmd_list() {
 
 cmd_rollback() {
   [ -e "$root/current" ] || die "Lumi Codex is not installed."
+  validate_root_for_mutation
   acquire_install_lock
+  reconcile_journal
 
   receipt="$root/receipts/current.receipt"
   validate_receipt "$receipt" "$CURRENT_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" ||
@@ -1196,10 +1646,13 @@ cmd_rollback() {
 
   cur="$(receipt_key "$receipt" current)"
   prev="$(receipt_key "$receipt" previous)"
+  safe_rel_name "$cur" || die "Refusing rollback: current release name from receipt is unsafe."
   [ -n "$cur" ] || die "Refusing rollback: current release missing from receipt."
   if [ -z "$prev" ] || [ "$prev" = "-" ]; then
     die "Nothing to roll back to (no previous release recorded)."
   fi
+  safe_rel_name "$prev" || die "Refusing rollback: previous release name from receipt is unsafe."
+  [ "$cur" != "$prev" ] || die "Refusing rollback: current and previous are the same release."
 
   [ "$(readlink "$root/current" 2>/dev/null || true)" = "releases/$cur" ] ||
     die "Refusing rollback: current symlink drifted from the receipt."
@@ -1220,17 +1673,18 @@ cmd_rollback() {
   activated="$(receipt_key "$receipt" activated)"
   profile="$(receipt_key "$receipt" profile)"
 
+  write_journal rollback "$cur" "$prev" "$prev" "$cur"
   switch_link current "releases/$prev"
-  if [ "$cur" != "$prev" ]; then
-    switch_link previous "releases/$cur"
-  fi
+  switch_link previous "releases/$cur"
   write_current_receipt "$prev" "$cur" "$activated" "$profile"
+  rm -f "$root/tmp/pending.journal"
 
   step "Rolled back: current=$prev previous=$cur"
 }
 
 cmd_activate() {
   [ -L "$root/current" ] || die "Lumi Codex is not installed; run: lumi-codex manage install"
+  validate_root_for_mutation
   validate_receipt "$root/receipts/current.receipt" "$CURRENT_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" ||
     die "current.receipt is missing or invalid; run: lumi-codex manage doctor"
   [ "$(readlink "$root/shim/lumi-codex" 2>/dev/null || true)" = "../manager/lumi-install.sh" ] ||
@@ -1240,14 +1694,16 @@ cmd_activate() {
 
   acquire_install_lock
   profile="$(pick_profile)"
+  validate_abs_path "$profile" "LUMI_PROFILE"
   path_line="export PATH=\"$root/shim:\$PATH\""
   profile_activate
   update_activation yes "$profile"
-  step "Lumi Codex activated: $root/shim added to PATH in $profile"
+  step "Lumi Codex activated: $root/shim added to PATH in $profile (codex is now shadowed)."
 }
 
 cmd_deactivate() {
   [ -e "$root/current" ] || die "Lumi Codex is not installed."
+  validate_root_for_mutation
   validate_receipt "$root/receipts/current.receipt" "$CURRENT_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" ||
     die "current.receipt is missing or invalid; run: lumi-codex manage doctor"
 
@@ -1256,10 +1712,11 @@ cmd_deactivate() {
   case "$profile" in
     "" | -) profile="$(pick_profile)" ;;
   esac
+  validate_abs_path "$profile" "profile path from receipt"
   path_line="export PATH=\"$root/shim:\$PATH\""
   profile_deactivate
   update_activation no "-"
-  step "Lumi Codex deactivated: PATH block removed from $profile"
+  step "Lumi Codex deactivated: PATH block removed from $profile (official codex resolution restored)."
 }
 
 cmd_uninstall() {
@@ -1280,8 +1737,13 @@ cmd_uninstall() {
   [ "$root" != "$HOME" ] || die "Refusing to uninstall HOME as the Lumi Codex root."
   [ "$root" != "${XDG_DATA_HOME:-$HOME/.local/share}" ] ||
     die "Refusing to uninstall the XDG data root itself."
+  validate_root_for_mutation
 
   acquire_install_lock
+
+  if [ -f "$root/tmp/pending.journal" ]; then
+    die "Refusing uninstall: a pending operation journal exists; run: lumi-codex manage doctor (reconciles valid journals) and retry."
+  fi
 
   receipt="$root/receipts/current.receipt"
   validate_receipt "$receipt" "$CURRENT_RECEIPT_KEYS" "$CURRENT_RECEIPT_KEYS" ||
@@ -1292,8 +1754,15 @@ cmd_uninstall() {
 
   cur="$(receipt_key "$receipt" current)"
   prev="$(receipt_key "$receipt" previous)"
+  activated="$(receipt_key "$receipt" activated)"
   profile="$(receipt_key "$receipt" profile)"
+  launcher="$(receipt_key "$receipt" launcher)"
+  install_dir="$(receipt_key "$receipt" install_dir)"
   [ -n "$cur" ] || die "Refusing uninstall: current release missing from receipt."
+  safe_rel_name "$cur" || die "Refusing uninstall: current release name from receipt is unsafe."
+  if [ "$prev" != "-" ]; then
+    safe_rel_name "$prev" || die "Refusing uninstall: previous release name from receipt is unsafe."
+  fi
 
   [ "$(readlink "$root/current" 2>/dev/null || true)" = "releases/$cur" ] ||
     die "Refusing uninstall: current symlink does not match the receipt."
@@ -1304,6 +1773,16 @@ cmd_uninstall() {
     die "Refusing uninstall: shim/lumi-codex is not the owned symlink (unknown symlink)."
   [ -f "$root/manager/lumi-install.sh" ] || die "Refusing uninstall: manager copy is missing."
 
+  case "$launcher" in
+    /*) ;;
+    *) die "Refusing uninstall: visible launcher path from receipt is not absolute." ;;
+  esac
+  if has_control_chars "$launcher"; then
+    die "Refusing uninstall: visible launcher path from receipt contains control characters."
+  fi
+  [ "$(readlink "$launcher" 2>/dev/null || true)" = "$root/manager/lumi-install.sh" ] ||
+    die "Refusing uninstall: visible launcher is not the owned symlink (unknown target)."
+
   if [ "$prev" != "-" ] && [ -n "$prev" ]; then
     [ "$(readlink "$root/previous" 2>/dev/null || true)" = "releases/$prev" ] ||
       die "Refusing uninstall: previous symlink does not match the receipt."
@@ -1311,24 +1790,39 @@ cmd_uninstall() {
     die "Refusing uninstall: previous symlink exists but the receipt records no previous release."
   fi
 
+  # Activation state must match the profile exactly before any mutation.
   path_line="export PATH=\"$root/shim:\$PATH\""
-  if [ -n "$profile" ] && [ "$profile" != "-" ]; then
-    case "$(profile_block_state)" in
-      exact)
-        profile_deactivate
-        ;;
-      drift)
-        warn "Leaving drifted PATH block in $profile; it is not the exactly owned block."
-        ;;
-      none)
-        ;;
-    esac
-  fi
+  case "$activated" in
+    yes)
+      case "$profile" in
+        "" | -) die "Refusing uninstall: receipt says activated but records no profile." ;;
+      esac
+      validate_abs_path "$profile" "profile path from receipt"
+      [ -L "$profile" ] && die "Refusing uninstall: activation profile $profile is a symlink."
+      [ "$(profile_block_state)" = "exact" ] ||
+        die "Refusing uninstall: activation profile block is missing or drifted."
+      profile_deactivate
+      ;;
+    no)
+      if [ -n "$profile" ] && [ "$profile" != "-" ]; then
+        validate_abs_path "$profile" "profile path from receipt"
+        [ -L "$profile" ] && die "Refusing uninstall: activation profile $profile is a symlink."
+        [ "$(profile_block_state)" = "none" ] ||
+          die "Refusing uninstall: profile block state does not match the deactivated receipt."
+      fi
+      ;;
+    *)
+      die "Refusing uninstall: invalid activated field in receipt."
+      ;;
+  esac
 
+  rm -f "$launcher"
   rm -rf "$root/tmp" "$root/receipts" "$root/releases" "$root/manager" "$root/shim" \
-    "$root/current" "$root/previous" "$root/install.lock" "$root/install.lock.d"
+    "$root/current" "$root/previous"
+  release_install_lock
+  rm -f "$root/install.lock"
   if rmdir "$root" 2>/dev/null; then
-    step "Lumi Codex uninstalled (removed $root)."
+    step "Lumi Codex uninstalled (removed $root and launcher $launcher)."
   else
     step "Lumi Codex uninstalled; left non-empty root at $root."
   fi
@@ -1364,8 +1858,8 @@ parse_args() {
             shift
             target="$1"
             ;;
-          --no-activate)
-            no_activate=1
+          --activate)
+            activate_install=1
             ;;
           --help | -h)
             usage
@@ -1399,12 +1893,11 @@ if [ "$mode" = "launcher" ]; then
 fi
 
 resolve_root
-resolve_self
+resolve_install_dir
 require_command mktemp
 require_command tar
 
-tmp_dir="$(mktemp -d 2>/dev/null || printf '%s\n' "${TMPDIR:-/tmp}/lumi-codex.$$")"
-mkdir -p "$tmp_dir"
+tmp_dir="$(mktemp -d)" || die "mktemp -d failed; cannot create a temporary directory."
 
 cleanup() {
   release_install_lock
