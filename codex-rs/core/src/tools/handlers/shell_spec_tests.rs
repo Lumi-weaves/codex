@@ -20,7 +20,7 @@ fn exec_command_tool_matches_expected_spec() {
         exec_permission_approvals_enabled: false,
     });
 
-    let description = if cfg!(windows) {
+    let mut description = if cfg!(windows) {
         format!(
             "Runs a command in a PTY, returning output or a session ID for ongoing interaction.{}",
             windows_shell_guidance_description()
@@ -29,6 +29,9 @@ fn exec_command_tool_matches_expected_spec() {
         "Runs a command in a PTY, returning output or a session ID for ongoing interaction."
             .to_string()
     };
+    description.push_str(
+        " A returned session ID means the process is still running and remains owned by the task. When you need its result now, call write_stdin with a realistic bounded wait; otherwise completion can wake a continuation. Use tty:true only for commands that may require interaction, and note that new unread TTY output may request attention.",
+    );
     let yield_time_ms_description = if cfg!(windows) {
         "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
     } else {
@@ -107,6 +110,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
         },
         /*include_environment_id*/ false,
         /*include_shell_parameter*/ false,
+        /*include_lifecycle_guidance*/ false,
     );
 
     assert!(!has_parameter(&tool, "shell"));
@@ -115,7 +119,7 @@ fn exec_command_tool_can_hide_shell_parameter() {
 
 #[test]
 fn write_stdin_tool_matches_expected_spec() {
-    let tool = create_write_stdin_tool();
+    let tool = create_write_stdin_tool(/*include_lifecycle_guidance*/ true);
 
     let properties = BTreeMap::from([
         (
@@ -148,9 +152,8 @@ fn write_stdin_tool_matches_expected_spec() {
         tool,
         ToolSpec::Function(ResponsesApiTool {
             name: "write_stdin".to_string(),
-            description:
-                "Writes characters to an existing unified exec session and returns recent output."
-                    .to_string(),
+            description: "Writes characters to an existing unified exec session and returns recent output. To wait for completion, send empty chars with a generous yield_time_ms; do not repeatedly short-poll."
+                .to_string(),
             strict: false,
             defer_loading: None,
             parameters: JsonSchema::object(
@@ -159,6 +162,41 @@ fn write_stdin_tool_matches_expected_spec() {
                 Some(false.into())
             ),
             output_schema: Some(unified_exec_output_schema()),
+        })
+    );
+}
+
+#[test]
+fn write_stdin_tool_omits_lifecycle_guidance_when_not_requested() {
+    let tool = create_write_stdin_tool(/*include_lifecycle_guidance*/ false);
+
+    let ToolSpec::Function(tool) = tool else {
+        panic!("expected function tool spec");
+    };
+    assert_eq!(
+        tool.description,
+        "Writes characters to an existing unified exec session and returns recent output."
+    );
+}
+
+#[test]
+fn list_background_terminals_tool_matches_expected_spec() {
+    let tool = create_list_background_terminals_tool();
+
+    assert_eq!(
+        tool,
+        ToolSpec::Function(ResponsesApiTool {
+            name: "list_background_terminals".to_string(),
+            description: "Audits the currently live background terminal sessions started by exec_command: use it to rediscover session ids, item ids, commands, and working directories. It is not for polling; wait for completion with write_stdin. Output is limited to live sessions and contains no command output."
+                .to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::new(),
+                Some(vec![]),
+                Some(false.into()),
+            ),
+            output_schema: Some(list_background_terminals_output_schema()),
         })
     );
 }

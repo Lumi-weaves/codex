@@ -17,6 +17,7 @@ use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetContextRemainingHandler;
 use crate::tools::handlers::ListAvailablePluginsToInstallHandler;
+use crate::tools::handlers::ListBackgroundTerminalsHandler;
 use crate::tools::handlers::ListMcpResourceTemplatesHandler;
 use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::NewContextWindowHandler;
@@ -832,8 +833,11 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                     turn_context,
                     context.environments,
                 ),
+                include_lifecycle_guidance: false,
             }));
-            registry.add(WriteStdinHandler);
+            registry.add(WriteStdinHandler::new(
+                /*include_lifecycle_guidance*/ false,
+            ));
             if turn_context.config.features.enabled(Feature::ViewImage) {
                 registry.add(ViewImageHandler::new(ViewImageToolOptions {
                     can_request_original_image_detail: can_request_original_image_detail(
@@ -902,8 +906,12 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                     turn_context,
                     context.environments,
                 ),
+                include_lifecycle_guidance: true,
             }));
-            registry.add(WriteStdinHandler);
+            registry.add(WriteStdinHandler::new(
+                /*include_lifecycle_guidance*/ true,
+            ));
+            registry.add(ListBackgroundTerminalsHandler);
 
             if supports_shell_command {
                 // Keep the legacy shell tool registered while unified exec is
