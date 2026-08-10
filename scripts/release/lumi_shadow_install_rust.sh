@@ -13,6 +13,14 @@
 # Env overrides (used by the mock test): RUST_VERSION, RUST_DIST_BASE.
 set -euo pipefail
 
+# The guest proxy intermittently returns 502/TLS resets; downloads use
+# bounded retries with finite connect/max time and are always checksum-
+# verified before extraction (no behavior change for the mock file:// test).
+lumi_shadow_curl() {
+  curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors \
+    --connect-timeout 20 --max-time 300 "$@"
+}
+
 lumi_shadow_install_rust() {
   local work="${1:?work dir required}"
   local prefix="${2:?rust prefix required}"
@@ -28,8 +36,8 @@ lumi_shadow_install_rust() {
 
   fetch_verify_extract() {
     local tarball="${1:?tarball required}"
-    curl -fsSL "${base}/${tarball}" -o "${work}/${tarball}"
-    curl -fsSL "${base}/${tarball}.sha256" -o "${work}/${tarball}.sha256"
+    lumi_shadow_curl "${base}/${tarball}" -o "${work}/${tarball}"
+    lumi_shadow_curl "${base}/${tarball}.sha256" -o "${work}/${tarball}.sha256"
     (cd "${work}" && sha256sum -c "${tarball}.sha256")
     tar -xJf "${work}/${tarball}" -C "${work}"
   }
