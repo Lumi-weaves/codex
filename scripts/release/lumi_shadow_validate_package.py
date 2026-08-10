@@ -4,24 +4,28 @@
 Owned exclusively by .github/workflows/lumi-release-shadow-worker.yml. The
 canonical lumi-release workflow validates its release assets with an inline
 Python validator that this workflow must not modify; this helper mirrors the
-same canonical checks for the two ARM targets of the shadow workflow:
+same canonical checks for the shadow workflow targets:
 
   * safe tar members: no absolute paths, no `..` components, no duplicate
     names, regular files and directories only;
   * canonical eight-field codex-package.json metadata;
   * required regular executables (including the bwrap resource for Linux);
-  * correct binary architecture (arm64 Mach-O / aarch64 ELF) for the
-    entrypoint, code-mode host, and (Linux) bwrap;
+  * correct binary architecture (arm64 Mach-O / aarch64 or x86_64 ELF) for
+    the entrypoint, code-mode host, and (Linux) bwrap;
   * Linux binaries are fully static: no PT_INTERP (dynamic interpreter);
+  * the packaged bwrap SHA-256 (64-byte lowercase ASCII hex) is embedded in
+    bin/codex for Linux targets;
   * the expected version embedded in the entrypoint;
   * optionally, native execution of `bin/codex --version`.
 
-Supported targets: aarch64-apple-darwin and aarch64-unknown-linux-musl.
+Supported targets: aarch64-apple-darwin, aarch64-unknown-linux-musl, and
+x86_64-unknown-linux-musl.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import pathlib
 import stat
@@ -36,9 +40,14 @@ MACH_O_MAGIC_64 = b"\xcf\xfa\xed\xfe"
 ELF_MAGIC = b"\x7fELF"
 CPU_TYPE_ARM64 = 0x0100000C
 EM_AARCH64 = 183
+EM_X86_64 = 62
 PT_INTERP = 3
 
-SUPPORTED_TARGETS = ("aarch64-apple-darwin", "aarch64-unknown-linux-musl")
+SUPPORTED_TARGETS = (
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+)
 
 
 def check_archive_members(archive: pathlib.Path) -> None:
@@ -79,8 +88,12 @@ def check_arch(path: pathlib.Path, target: str) -> None:
         if data[:4] != ELF_MAGIC or data[4] != 2:
             raise SystemExit(f"{path} is not a 64-bit ELF binary")
         machine = struct.unpack("<H", data[18:20])[0]
-        if machine != EM_AARCH64:
-            raise SystemExit(f"{path} has wrong ELF machine {machine}")
+        expected_machine = EM_AARCH64 if target.startswith("aarch64") else EM_X86_64
+        if machine != expected_machine:
+            raise SystemExit(
+                f"{path} has wrong ELF machine {machine} "
+                f"(expected {expected_machine} for {target})"
+            )
 
 
 def check_no_pt_interp(path: pathlib.Path) -> None:
@@ -162,6 +175,16 @@ def validate_archive(
             check_no_pt_interp(entrypoint)
             check_no_pt_interp(code_mode_host)
             check_no_pt_interp(bwrap)
+            # Codex embeds the digest of the exact packaged bwrap bytes at
+            # build time and verifies the bundled resource against it; the
+            # real accepted x86 artifact contains the 64-byte lowercase
+            # hex digest exactly once.
+            bwrap_digest = hashlib.sha256(bwrap.read_bytes()).hexdigest()
+            if bwrap_digest.encode("ascii") not in entrypoint.read_bytes():
+                raise SystemExit(
+                    f"bin/codex in {target} does not embed the packaged "
+                    f"bwrap sha256 {bwrap_digest}"
+                )
 
         if expected_version.encode("utf-8") not in entrypoint.read_bytes():
             raise SystemExit(
