@@ -1,10 +1,17 @@
 # Lumi Codex release shadow worker (manual-only, non-publishing).
 #
-# Builds two ARM targets from an exact gated commit:
+# Builds three targets from an exact gated commit:
 #   aarch64-apple-darwin        natively on a dedicated Apple Silicon Mac mini
 #   aarch64-unknown-linux-musl  inside the persistent Lima VM
 #                               lumi-codex-arm-builder (VZ/aarch64/6 CPU/8GiB/
 #                               96GiB/plain/no mounts)
+#   x86_64-unknown-linux-musl   directly in the future Omen one-shot JIT
+#                               container (fresh isolated container: Linux
+#                               x86_64, Rust 1.95.0 + musl target std
+#                               preinstalled, Zig 0.14.0 preinstalled,
+#                               ordinary Docker bridge egress, no proxy env,
+#                               no sudo privilege, no Docker socket/host
+#                               state)
 # The VM is shared infrastructure: this workflow validates its exact semantics
 # from `limactl list --format json`, uses a per-run guest work path, and never
 # creates, deletes, or modifies the VM.
@@ -32,6 +39,30 @@
 # routing is not authorization. Protection comes from the hosted main-only
 # gate, exact-commit checkout, contents:read token, and the isolated VM
 # contract.
+#
+# The x86 job uses the sibling deterministic label
+#   lumi-shadow-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+# provisioned by the same external trusted controller as a fresh Omen
+# container per run. Its preflight enforces the inverse of the ARM host
+# contract: proxy variables must be ABSENT, there must be no Docker socket
+# or host state, pinned tool versions must match the image, and direct
+# bounded HTTPS probes must reach every endpoint the build uses. The build
+# helper runs the gated canonical musl/Zig steps with a trusted no-op sudo
+# shim (the image already contains everything install-musl-build-tools.sh
+# would install) and no runtime apt.
+#
+# Real x86_64 smoke evidence (documented here only; never a mutable artifact
+# dependency): exact source 35f9bb0540b9f7819a2ec6f88df516773973099d
+# produced a 119,303,356-byte codex-package-x86_64-unknown-linux-musl.tar.gz
+# with SHA256 63c8477512eedd1fa625d8545139435d9773c2fae8f897123dcb643aa4dd7a76;
+# the exact eight-field manifest, x86_64 static-pie/no PT_INTERP, native
+# version/feature/code-mode-host runs, and the exported bwrap digest all
+# passed validation. Total wall time was ~101m, dominated by first-run
+# provisioning and network; the Cargo product build was ~11m at
+# CARGO_BUILD_JOBS=24 on 48 GiB. The international bridge was slow and
+# TLS-flaky: every network curl is finite-bounded with retries and any
+# failure fails the run (isolation is never weakened); Cargo/git direct
+# bridge reliability remains a real end-to-end risk.
 #
 # Nothing is published or signed; uploads are distinctly named lumi-shadow-*
 # artifacts that no canonical release job consumes.
@@ -445,3 +476,74 @@ jobs:
             https_proxy=http://192.168.5.2:7890 \
             limactl shell --preserve-env lumi-codex-arm-builder sh -c \
               "rm -rf '${guest_base}'" || true
+
+  # x86_64 Linux: the future Omen one-shot JIT runner executes this job in a
+  # fresh isolated container (Linux x86_64, Rust 1.95.0 + x86_64 musl target
+  # std preinstalled, Zig 0.14.0 preinstalled, ordinary Docker bridge egress,
+  # no proxy env, no sudo privilege, no Docker socket/host state). The
+  # deterministic per-run label is provisioned by the same external trusted
+  # controller as the ARM label; every run is a fresh, non-reusable
+  # container. The workflow-owned helper (from the workflow commit) preflights
+  # the container contract, runs the gated canonical musl/Zig steps with a
+  # trusted no-op sudo shim and bounded curl wrapper, and builds/validates the
+  # package with no runtime apt. Nothing is published or signed; the single
+  # upload is the distinctly named lumi-shadow-* artifact.
+  build-shadow-x86:
+    name: Build and validate shadow package (x86_64)
+    needs: gate
+    runs-on: lumi-shadow-x86_64-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - name: Checkout exact gated commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Checkout shadow worker helpers (workflow commit)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The gated commit may predate this workflow, so its tree lacks the
+          # shadow helpers; take them from the commit the workflow ran from.
+          ref: ${{ github.sha }}
+          path: shadow-tools
+          persist-credentials: false
+
+      - name: Install bounded curl wrapper first in PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Canonical steps (preflight probes, setup-rusty-v8 mirror, the
+          # package builder paths) call bare `curl`; prepend the
+          # workflow-owned bounded wrapper so they inherit finite
+          # retry/connect/max behavior without modifying those files. The
+          # wrapper logs nothing (no URLs/proxies).
+          bin_dir="${RUNNER_TEMP}/lumi-shadow-bin"
+          mkdir -p "${bin_dir}"
+          install -m 0755 \
+            "${GITHUB_WORKSPACE}/shadow-tools/scripts/release/lumi_shadow_curl.sh" \
+            "${bin_dir}/curl"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          # Fail fast if the wrapper cannot resolve a real curl.
+          "${bin_dir}/curl" --version >/dev/null
+
+      - name: Preflight, build, and validate x86_64 musl shadow package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/shadow-tools/scripts/release/lumi_shadow_build_linux_x86.sh" \
+            "${GITHUB_WORKSPACE}" \
+            "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh"
+
+      - name: Upload shadow artifact (x86_64-unknown-linux-musl)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          # Distinctly named shadow artifact; canonical release jobs only
+          # download codex-package-*.
+          name: lumi-shadow-codex-package-x86_64-unknown-linux-musl
+          path: ${{ runner.temp }}/lumi-shadow-x86/out/codex-package-x86_64-unknown-linux-musl.tar.gz
+          if-no-files-found: error

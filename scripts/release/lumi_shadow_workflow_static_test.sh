@@ -18,13 +18,14 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 workflow="${here}/../../.github/workflows/lumi-release-shadow-worker.yml"
 build_script="${here}/lumi_shadow_build_linux.sh"
+x86_build_script="${here}/lumi_shadow_build_linux_x86.sh"
 swap_script="${here}/lumi_shadow_swap.sh"
 fetch_helper="${here}/lumi_shadow_fetch_dotslash.py"
 install_rust="${here}/lumi_shadow_install_rust.sh"
 curl_wrapper="${here}/lumi_shadow_curl.sh"
 config="${here}/lumi_shadow_actionlint.yaml"
 
-for file in "${workflow}" "${build_script}" "${swap_script}" \
+for file in "${workflow}" "${build_script}" "${x86_build_script}" "${swap_script}" \
   "${fetch_helper}" "${install_rust}" "${curl_wrapper}" "${config}"; do
   [[ -f "${file}" ]] || { echo "FAIL: missing file: ${file}" >&2; exit 1; }
 done
@@ -176,5 +177,140 @@ installer_line="$(grep -n 'bash "${repo_root}/.github/scripts/install-musl-build
 #     probe resolves through the wrapper instead.
 grep -q -- '--retry 5 --retry-delay 2 --retry-all-errors' "${workflow}" \
   || { echo "FAIL: guest health probe lacks explicit bounded retries" >&2; exit 1; }
+
+# 12. The hosted gate stays the single authorization/source gate: exactly
+#     one hosted job, main-only, and it must not depend on anything.
+[[ "$(grep -c 'runs-on: ubuntu-24.04' "${workflow}")" -eq 1 ]] \
+  || { echo "FAIL: expected exactly one hosted (ubuntu-24.04) job" >&2; exit 1; }
+grep -q 'Require dispatch from current main' "${workflow}" \
+  || { echo "FAIL: main-only dispatch check missing" >&2; exit 1; }
+grep -q 'Resolve source to exact commit SHA' "${workflow}" \
+  || { echo "FAIL: source gate step missing" >&2; exit 1; }
+
+# 13. x86 sibling job block: needs the gate, dynamic per-run label, finite
+#     timeout, contents:read, exact gated checkout and workflow-commit
+#     helper checkout, bounded curl wrapper first, and one shadow-only
+#     artifact upload.
+x86_block="$(sed -n '/^  build-shadow-x86:/,/^  [a-z]/p' "${workflow}")"
+[[ -n "${x86_block}" ]] || { echo "FAIL: build-shadow-x86 job missing" >&2; exit 1; }
+grep -q 'needs: gate' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job does not need the gate" >&2; exit 1; }
+grep -q 'runs-on: lumi-shadow-x86_64-\${{ github.run_id }}-\${{ github.run_attempt }}' <<<"${x86_block}" \
+  || { echo "FAIL: x86 per-run label missing" >&2; exit 1; }
+grep -q 'timeout-minutes:' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job has no finite timeout" >&2; exit 1; }
+grep -q 'contents: read' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job lacks contents: read" >&2; exit 1; }
+grep -q 'ref: \${{ needs.gate.outputs.sha }}' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job lacks the exact gated checkout" >&2; exit 1; }
+grep -q 'persist-credentials: false' <<<"${x86_block}" \
+  || { echo "FAIL: x86 checkout does not disable credential persistence" >&2; exit 1; }
+grep -q 'ref: \${{ github.sha }}' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job lacks the workflow-commit helper checkout" >&2; exit 1; }
+grep -q 'shadow-tools' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job does not stage shadow-tools" >&2; exit 1; }
+grep -q 'lumi_shadow_curl.sh' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job does not install the bounded curl wrapper" >&2; exit 1; }
+grep -q 'lumi_shadow_build_linux_x86.sh' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job does not run the x86 build helper" >&2; exit 1; }
+grep -q 'name: lumi-shadow-codex-package-x86_64-unknown-linux-musl' <<<"${x86_block}" \
+  || { echo "FAIL: x86 shadow artifact name missing" >&2; exit 1; }
+grep -q 'actions/upload-artifact' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job has no upload step" >&2; exit 1; }
+[[ "$(grep -c 'name: lumi-shadow-codex-package-' <<<"${x86_block}")" -eq 1 ]] \
+  || { echo "FAIL: x86 job must upload exactly one shadow artifact" >&2; exit 1; }
+
+# 14. No fixed reusable x86 label: any lumi-shadow-x86_64 runs-on value
+#     must contain a ${{ expression }} (no static label remains).
+if grep -E 'runs-on: lumi-shadow-x86_64-[^$]+$' "${workflow}"; then
+  echo "FAIL: fixed reusable x86 self-hosted label found" >&2
+  exit 1
+fi
+
+# 15. The x86 job must not carry the ARM guest proxy, VM, swap, or rust
+#     installer contracts, and the ARM job's proxy-present preflight must
+#     remain intact (the inverse no-proxy boundary lives in the x86 helper).
+if grep -q '192.168.5.2' <<<"${x86_block}"; then
+  echo "FAIL: x86 job references the ARM guest proxy" >&2
+  exit 1
+fi
+grep -q 'runner proxy env is unset' "${workflow}" \
+  || { echo "FAIL: ARM proxy-present preflight changed" >&2; exit 1; }
+
+# 16. No canonical artifact names, caches, signing, publication, or
+#     elevated tokens anywhere in the shadow workflow.
+if grep -q 'name: codex-package-' "${workflow}"; then
+  echo "FAIL: canonical artifact name used by shadow workflow" >&2
+  exit 1
+fi
+if grep -q 'actions/cache' "${workflow}"; then
+  echo "FAIL: shadow workflow uses actions/cache" >&2
+  exit 1
+fi
+if grep -q 'id-token' "${workflow}"; then
+  echo "FAIL: shadow workflow requests id-token" >&2
+  exit 1
+fi
+if grep -q 'contents: write' "${workflow}"; then
+  echo "FAIL: shadow workflow requests contents: write" >&2
+  exit 1
+fi
+if grep -Eq 'gh release|softprops|cosign|sigstore' "${workflow}"; then
+  echo "FAIL: shadow workflow contains a publication/signing step" >&2
+  exit 1
+fi
+
+# 17. x86 helper contract: no-proxy preflight boundary, no runtime apt with
+#     a trusted no-op sudo shim, per-run cargo state, canonical reuse, and
+#     bounded + checksum-verified network downloads.
+for token in \
+  'lumi_shadow_x86_preflight' \
+  'proxy variable' \
+  'Omen requires no proxy env' \
+  'DOCKER_HOST' \
+  'docker.sock' \
+  'target-libdir' \
+  'cmake' \
+  'ninja-build' \
+  'lumi_shadow_x86_write_sudo_shim' \
+  'install-musl-build-tools.sh' \
+  'lumi_shadow_curl.sh' \
+  'lumi_shadow_fetch_dotslash.py' \
+  'lumi_shadow_validate_package.py' \
+  'build-codex-package-archive.sh' \
+  'rusty_v8_bazel.py' \
+  'CODEX_BWRAP_SHA256' \
+  'CARGO_BUILD_JOBS=24' \
+  'CARGO_HOME' \
+  'CARGO_TARGET_DIR' \
+  'sha256sum -c' \
+  '--retry 5' \
+  '--connect-timeout 20' \
+  '--max-time 300' \
+  'https://github.com' \
+  'https://index.crates.io' \
+  'https://static.crates.io'; do
+  grep -Fq -- "${token}" "${x86_build_script}" \
+    || { echo "FAIL: x86 helper missing ${token}" >&2; exit 1; }
+done
+for token in '192.168.5.2' 'limactl' 'lumi_shadow_ensure_swap' \
+  'lumi_shadow_install_rust'; do
+  grep -Fq -- "${token}" "${x86_build_script}" \
+    && { echo "FAIL: x86 helper must not reference ${token}" >&2; exit 1; }
+done
+# The trusted no-op sudo shim fails closed on the exact canonical apt argv:
+# the exact ordered package list must be encoded in the shim (the mock test
+# proves acceptance of exactly that argv and rejection of subsets,
+# duplicates, reordering, proxy -o pairs, and extras).
+grep -Fq 'expected_packages=(ca-certificates curl musl-tools pkg-config libcap-dev g++ clang libc++-dev libc++abi-dev lld xz-utils)' \
+  "${x86_build_script}" \
+  || { echo "FAIL: x86 shim lacks the exact canonical package list" >&2; exit 1; }
+
+# 18. Real x86 smoke evidence is encoded in comments/tests only (never a
+#     mutable artifact dependency).
+grep -q '63c8477512eedd1fa625d8545139435d9773c2fae8f897123dcb643aa4dd7a76' "${workflow}" \
+  || { echo "FAIL: x86 smoke digest missing from workflow docs" >&2; exit 1; }
+grep -q '35f9bb0540b9f7819a2ec6f88df516773973099d' "${x86_build_script}" \
+  || { echo "FAIL: x86 smoke source missing from helper docs" >&2; exit 1; }
 
 echo "workflow static contract test OK"

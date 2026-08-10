@@ -188,6 +188,7 @@ class FetchDotslashTest(unittest.TestCase):
         *extra: str,
         fail_first: int = 0,
         extra_env: dict[str, str] | None = None,
+        target: str = TARGET,
     ) -> subprocess.CompletedProcess[str]:
         env = dict(os.environ)
         env.update(
@@ -206,7 +207,7 @@ class FetchDotslashTest(unittest.TestCase):
                 sys.executable,
                 str(HELPER),
                 "--target",
-                TARGET,
+                target,
                 "--tools-root",
                 str(TOOLS_ROOT),
                 "--output-dir",
@@ -382,6 +383,67 @@ class FetchDotslashTest(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("out of bounded range", result.stderr)
+
+    def test_x86_64_unknown_linux_musl_target_fetches(self) -> None:
+        """DotSlash resolution for the x86 shadow target (linux-x86_64)."""
+        platform = "linux-x86_64"
+        member = "ripgrep-15.2.0-x86_64-unknown-linux-gnu/rg"
+        rg_url = "https://artifact.invalid/ripgrep-15.2.0-linux-x86_64.tar.gz"
+        zsh_url = "https://artifact.invalid/codex-zsh-linux-x86_64.tar.gz"
+        rg_archive = self.root / "rg-x86.tar.gz"
+        rg_bytes = b"#!/bin/sh\necho fixture-rg-x86\n"
+        make_tar_gz(rg_archive, {member: rg_bytes})
+        zsh_archive = self.root / "zsh-x86.tar.gz"
+        zsh_bytes = b"#!/bin/sh\necho fixture-zsh-x86\n"
+        make_tar_gz(zsh_archive, {"codex-zsh/bin/zsh": zsh_bytes})
+        rg_manifest = self.root / "rg-x86-manifest"
+        rg_manifest.write_text(
+            json.dumps(
+                manifest_for(
+                    archive=rg_archive,
+                    url=rg_url,
+                    member=member,
+                    platform=platform,
+                )
+            ),
+            encoding="utf-8",
+        )
+        zsh_manifest = self.root / "zsh-x86-manifest"
+        zsh_manifest.write_text(
+            json.dumps(
+                manifest_for(
+                    archive=zsh_archive,
+                    url=zsh_url,
+                    member="codex-zsh/bin/zsh",
+                    platform=platform,
+                )
+            ),
+            encoding="utf-8",
+        )
+
+        extra_map = {
+            rg_url: str(rg_archive),
+            zsh_url: str(zsh_archive),
+        }
+        mapping = json.loads(self.curl_map.read_text())
+        mapping.update(extra_map)
+        self.curl_map.write_text(json.dumps(mapping), encoding="utf-8")
+
+        result = self._run(
+            "--target",
+            "x86_64-unknown-linux-musl",
+            "--rg-manifest",
+            str(rg_manifest),
+            "--zsh-manifest-path",
+            str(zsh_manifest),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self._assert_env_lines(result)
+        rg_path = Path(result.stdout.splitlines()[0].split("=", 1)[1])
+        zsh_path = Path(result.stdout.splitlines()[1].split("=", 1)[1])
+        self.assertEqual(rg_path.read_bytes(), rg_bytes)
+        self.assertEqual(zsh_path.read_bytes(), zsh_bytes)
+        self.assertIn("--retry 5", self.curl_log.read_text())
 
 
 if __name__ == "__main__":
