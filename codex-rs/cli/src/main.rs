@@ -857,6 +857,14 @@ fn run_update_command() -> anyhow::Result<()> {
 
     #[cfg(not(debug_assertions))]
     {
+        if codex_install_context::DISTRIBUTION.is_lumi() {
+            println!(
+                "`codex update` is managed by Lumi: this build is distributed and updated \
+                 outside OpenAI's official channels, which are intentionally disabled for \
+                 Lumi builds. Update Codex through Lumi's distribution channel."
+            );
+            return Ok(());
+        }
         let Some(action) = codex_tui::get_update_action() else {
             anyhow::bail!(
                 "Could not detect the Codex installation method. Please update manually: https://developers.openai.com/codex/cli/"

@@ -5,6 +5,11 @@ use std::sync::OnceLock;
 
 use codex_utils_absolute_path::AbsolutePathBuf;
 
+mod distribution;
+pub use distribution::DISTRIBUTION;
+pub use distribution::Distribution;
+pub use distribution::upstream_compatible_version;
+
 const BIN_DIRNAME: &str = "bin";
 const CODE_MODE_HOST_EXECUTABLE_NAME: &str = if cfg!(windows) {
     "codex-code-mode-host.exe"

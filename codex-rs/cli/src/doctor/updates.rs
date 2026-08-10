@@ -9,8 +9,11 @@
 use std::path::Path;
 
 use codex_core::config::Config;
+use codex_install_context::DISTRIBUTION;
+use codex_install_context::Distribution;
 use codex_install_context::InstallContext;
 use codex_install_context::InstallMethod;
+use codex_install_context::upstream_compatible_version;
 use serde::Deserialize;
 
 use super::CheckStatus;
@@ -34,6 +37,7 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
     let current_exe = std::env::current_exe().ok();
     let install_context = doctor_install_context(current_exe.as_deref());
     let mut details = vec![
+        format!("distribution: {}", distribution_label()),
         format!(
             "check for update on startup: {}",
             config.check_for_update_on_startup
@@ -47,56 +51,67 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
     let mut summary = "update configuration is locally consistent".to_string();
     let mut remediation = None;
 
-    if doctor_managed_by_npm(current_exe.as_deref()) {
-        match npm_global_root_check() {
-            NpmRootCheck::Match { package_root } => {
-                details.push(format!("npm update target: {}", package_root.display()));
-            }
-            NpmRootCheck::Mismatch {
-                running_package_root,
-                npm_package_root,
-            } => {
-                status = CheckStatus::Fail;
-                summary = "update would target a different npm install".to_string();
-                details.push(format!(
-                    "running package root: {}",
-                    running_package_root.display()
-                ));
-                details.push(format!("npm package root: {}", npm_package_root.display()));
-                remediation = Some(format!(
-                    "Fix PATH or npm prefix so the running package root ({}) matches the npm global package root ({}).",
-                    running_package_root.display(),
-                    npm_package_root.display()
-                ));
-            }
-            NpmRootCheck::MissingPackageRoot => {
-                status = status.max(CheckStatus::Warning);
-                summary = "npm update target could not be proven".to_string();
-                remediation = Some(
-                    "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
-                        .to_string(),
-                );
-            }
-            NpmRootCheck::NpmUnavailable(error) => {
-                status = status.max(CheckStatus::Warning);
-                summary = "npm update target could not be inspected".to_string();
-                details.push(format!("npm root -g failed: {error}"));
+    if DISTRIBUTION.is_lumi() {
+        // Lumi builds are updated outside OpenAI's channels, so npm update
+        // path checks and official latest-version probes do not apply.
+        summary = "updates are managed by Lumi; official update channels are disabled".to_string();
+        details.push("latest version probe: disabled for Lumi-managed builds".to_string());
+    } else {
+        if doctor_managed_by_npm(current_exe.as_deref()) {
+            match npm_global_root_check() {
+                NpmRootCheck::Match { package_root } => {
+                    details.push(format!("npm update target: {}", package_root.display()));
+                }
+                NpmRootCheck::Mismatch {
+                    running_package_root,
+                    npm_package_root,
+                } => {
+                    status = CheckStatus::Fail;
+                    summary = "update would target a different npm install".to_string();
+                    details.push(format!(
+                        "running package root: {}",
+                        running_package_root.display()
+                    ));
+                    details.push(format!("npm package root: {}", npm_package_root.display()));
+                    remediation = Some(format!(
+                        "Fix PATH or npm prefix so the running package root ({}) matches the npm global package root ({}).",
+                        running_package_root.display(),
+                        npm_package_root.display()
+                    ));
+                }
+                NpmRootCheck::MissingPackageRoot => {
+                    status = status.max(CheckStatus::Warning);
+                    summary = "npm update target could not be proven".to_string();
+                    remediation = Some(
+                        "Reinstall or update Codex so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                            .to_string(),
+                    );
+                }
+                NpmRootCheck::NpmUnavailable(error) => {
+                    status = status.max(CheckStatus::Warning);
+                    summary = "npm update target could not be inspected".to_string();
+                    details.push(format!("npm root -g failed: {error}"));
+                }
             }
         }
-    }
 
-    match fetch_latest_version(&install_context) {
-        Ok(latest_version) => {
-            details.push(format!("latest version: {latest_version}"));
-            if is_newer(&latest_version, env!("CARGO_PKG_VERSION")) == Some(true) {
-                details.push("latest version status: newer version is available".to_string());
-            } else {
-                details.push("latest version status: current version is not older".to_string());
+        match fetch_latest_version(&install_context) {
+            Ok(latest_version) => {
+                details.push(format!("latest version: {latest_version}"));
+                if is_newer(
+                    &latest_version,
+                    upstream_compatible_version(env!("CARGO_PKG_VERSION")),
+                ) == Some(true)
+                {
+                    details.push("latest version status: newer version is available".to_string());
+                } else {
+                    details.push("latest version status: current version is not older".to_string());
+                }
             }
-        }
-        Err(err) => {
-            status = status.max(CheckStatus::Warning);
-            details.push(format!("latest version probe: {err}"));
+            Err(err) => {
+                status = status.max(CheckStatus::Warning);
+                details.push(format!("latest version probe: {err}"));
+            }
         }
     }
 
@@ -105,6 +120,14 @@ pub(super) fn updates_check(config: &Config) -> DoctorCheck {
         check = check.remediation(remediation);
     }
     check
+}
+
+fn distribution_label() -> &'static str {
+    if DISTRIBUTION.is_lumi() {
+        "lumi"
+    } else {
+        "official"
+    }
 }
 
 fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
@@ -130,6 +153,16 @@ fn push_cached_version_details(details: &mut Vec<String>, version_file: &Path) {
 }
 
 fn update_action_label(context: &InstallContext) -> &'static str {
+    update_action_label_for_distribution(DISTRIBUTION, context)
+}
+
+fn update_action_label_for_distribution(
+    distribution: Distribution,
+    context: &InstallContext,
+) -> &'static str {
+    if distribution.is_lumi() {
+        return "none (Lumi-managed; official channels disabled)";
+    }
     match &context.method {
         InstallMethod::Npm => "npm install -g @openai/codex",
         InstallMethod::Bun => "bun install -g @openai/codex",
@@ -208,6 +241,32 @@ struct VersionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_core::config::ConfigBuilder;
+
+    #[tokio::test]
+    async fn updates_check_reports_lumi_managed_build_without_official_probes() {
+        let codex_home = tempfile::tempdir().expect("temp codex home");
+        let config = ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+            .await
+            .expect("load config");
+
+        let check = updates_check(&config);
+
+        assert_eq!(check.id, "updates.status");
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert!(check.summary.contains("Lumi"));
+        assert!(
+            check
+                .details
+                .iter()
+                .any(|detail| detail == "distribution: lumi")
+        );
+        assert!(check.details.iter().any(|detail| {
+            detail.contains("latest version probe: disabled for Lumi-managed builds")
+        }));
+    }
 
     #[test]
     fn is_newer_compares_plain_semver() {
@@ -219,25 +278,58 @@ mod tests {
     #[test]
     fn update_action_labels_install_contexts() {
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Npm,
-                package_layout: None,
-            }),
+            update_action_label_for_distribution(
+                Distribution::Official,
+                &InstallContext {
+                    method: InstallMethod::Npm,
+                    package_layout: None,
+                },
+            ),
             "npm install -g @openai/codex"
         );
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Pnpm,
-                package_layout: None,
-            }),
+            update_action_label_for_distribution(
+                Distribution::Official,
+                &InstallContext {
+                    method: InstallMethod::Pnpm,
+                    package_layout: None,
+                },
+            ),
             "pnpm add -g @openai/codex"
         );
         assert_eq!(
-            update_action_label(&InstallContext {
-                method: InstallMethod::Other,
-                package_layout: None,
-            }),
+            update_action_label_for_distribution(
+                Distribution::Official,
+                &InstallContext {
+                    method: InstallMethod::Other,
+                    package_layout: None,
+                },
+            ),
             "manual or unknown"
+        );
+    }
+
+    #[test]
+    fn lumi_update_action_label_disables_official_channels() {
+        assert_eq!(
+            update_action_label_for_distribution(
+                Distribution::Lumi,
+                &InstallContext {
+                    method: InstallMethod::Npm,
+                    package_layout: None,
+                },
+            ),
+            "none (Lumi-managed; official channels disabled)"
+        );
+        assert_eq!(
+            update_action_label_for_distribution(
+                Distribution::Lumi,
+                &InstallContext {
+                    method: InstallMethod::Other,
+                    package_layout: None,
+                },
+            ),
+            "none (Lumi-managed; official channels disabled)"
         );
     }
 }
