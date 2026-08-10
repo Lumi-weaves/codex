@@ -815,6 +815,11 @@ impl Session {
         };
         if cleared_active_turn {
             self.emit_thread_idle_lifecycle_if_idle().await;
+            // A resolution that landed while this turn was still finalizing
+            // (active turn not yet cleared) must still restore the held-back
+            // final status instead of leaving the session permanently
+            // non-final.
+            self.maybe_restore_awaited_finality().await;
         }
         // Regular items were flushed before this terminal event was appended; buffering
         // thread writers may not flush it without another explicit barrier.
