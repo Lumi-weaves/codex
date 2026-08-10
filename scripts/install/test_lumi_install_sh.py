@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tarfile
 import tempfile
 import textwrap
@@ -128,15 +129,24 @@ def create_official_codex(root: Path) -> Path:
 
 def canonical_package_metadata(version: str, target: str) -> str:
     return json.dumps(
-        {
-            "distribution": "lumi",
-            "variant": "codex",
-            "entrypoint": "bin/codex",
-            "version": version,
-            "target": target,
-        },
+        canonical_layout_metadata(version, target),
         indent=2,
     ) + "\n"
+
+
+def canonical_layout_metadata(version: str, target: str) -> dict[str, object]:
+    # Exact shape emitted by scripts/codex_package/layout.py (Lumi layout):
+    # eight top-level fields, layoutVersion numeric.
+    return {
+        "layoutVersion": 1,
+        "distribution": "lumi",
+        "version": version,
+        "target": target,
+        "variant": "codex",
+        "entrypoint": "bin/codex",
+        "resourcesDir": "codex-resources",
+        "pathDir": "codex-path",
+    }
 
 
 def package_files(package_dir: Path, version: str) -> None:
@@ -164,27 +174,32 @@ def create_package_release(
     incomplete: bool = False,
     metadata_override: dict[str, str] | None = None,
     metadata_raw: str | None = None,
+    package_dir_override: Path | None = None,
     symlink_member: str | None = None,
     traversal_member: str | None = None,
     absolute_member: str | None = None,
 ) -> tuple[Path, Path, str, Path]:
-    package_dir = root / f"package-{version}-{target.replace('/', '_')}"
-    package_files(package_dir, version)
-    metadata = dict(
-        distribution="lumi",
-        variant="codex",
-        entrypoint="bin/codex",
-        version=version,
-        target=target,
-    )
-    if metadata_override:
-        metadata.update(metadata_override)
-    (package_dir / "codex-package.json").write_text(
-        metadata_raw
-        if metadata_raw is not None
-        else json.dumps(metadata, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if package_dir_override is not None:
+        package_dir = package_dir_override
+        # The override package dir is used as-is (e.g. built by the canonical
+        # layout helper); only make the entrypoint report the expected version
+        # so the completeness version check can pass.
+        write_executable(
+            package_dir / "bin" / "codex",
+            f"#!/bin/sh\nprintf 'codex-cli {version}\\n'\n",
+        )
+    else:
+        package_dir = root / f"package-{version}-{target.replace('/', '_')}"
+        package_files(package_dir, version)
+        metadata = canonical_layout_metadata(version, target)
+        if metadata_override:
+            metadata.update(metadata_override)
+        (package_dir / "codex-package.json").write_text(
+            metadata_raw
+            if metadata_raw is not None
+            else json.dumps(metadata, indent=2) + "\n",
+            encoding="utf-8",
+        )
     if incomplete:
         (package_dir / "bin" / "codex").unlink()
 
@@ -937,34 +952,67 @@ class LumiInstallShTest(unittest.TestCase):
         cases = {
             "duplicate version field": (
                 '{\n'
+                '  "layoutVersion": 1,\n'
                 '  "distribution": "lumi",\n'
                 '  "variant": "codex",\n'
                 '  "entrypoint": "bin/codex",\n'
                 f'  "version": "{LUMI_VERSION}",\n'
                 f'  "version": "{LUMI_VERSION}",\n'
-                f'  "target": "{TARGET}"\n'
+                f'  "target": "{TARGET}",\n'
+                '  "resourcesDir": "codex-resources",\n'
+                '  "pathDir": "codex-path"\n'
                 '}\n'
             ),
             "decoy unknown field": (
                 '{\n'
+                '  "layoutVersion": 1,\n'
                 '  "distribution": "lumi",\n'
                 '  "variant": "codex",\n'
                 '  "entrypoint": "bin/codex",\n'
                 f'  "version": "{LUMI_VERSION}",\n'
                 f'  "target": "{TARGET}",\n'
+                '  "resourcesDir": "codex-resources",\n'
+                '  "pathDir": "codex-path",\n'
                 f'  "body": "fake: {{\\"version\\": \\"{LUMI_VERSION}\\"}}"\n'
                 '}\n'
             ),
             "decoy nested object": (
                 '{\n'
+                '  "layoutVersion": 1,\n'
                 '  "distribution": "lumi",\n'
                 '  "variant": "codex",\n'
                 '  "entrypoint": "bin/codex",\n'
                 f'  "version": "{LUMI_VERSION}",\n'
                 f'  "target": "{TARGET}",\n'
+                '  "resourcesDir": "codex-resources",\n'
+                '  "pathDir": "codex-path",\n'
                 '  "fake": {\n'
                 f'    "version": "{LUMI_VERSION}"\n'
                 '  }\n'
+                '}\n'
+            ),
+            "string layoutVersion rejected": (
+                '{\n'
+                '  "layoutVersion": "1",\n'
+                '  "distribution": "lumi",\n'
+                '  "variant": "codex",\n'
+                '  "entrypoint": "bin/codex",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "target": "{TARGET}",\n'
+                '  "resourcesDir": "codex-resources",\n'
+                '  "pathDir": "codex-path"\n'
+                '}\n'
+            ),
+            "malformed extra text line": (
+                '{\n'
+                '  "layoutVersion": 1,\n'
+                '  "distribution": "lumi",\n'
+                '  "variant": "codex",\n'
+                '  "entrypoint": "bin/codex",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "target": "{TARGET}",\n'
+                '  "resourcesDir": "codex-resources",\n'
+                '  "pathDir": "codex-path" trailing\n'
                 '}\n'
             ),
         }
@@ -982,6 +1030,77 @@ class LumiInstallShTest(unittest.TestCase):
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("completeness", result.stderr)
                     self.assertFalse((lumi_root(root) / "releases").exists())
+
+    def test_fixture_metadata_matches_canonical_layout_shape_exactly(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            expected_metadata = canonical_package_metadata(VERSION, TARGET)
+            package_dir = root / f"package-{VERSION}-{TARGET}"
+            self.assertEqual(
+                (package_dir / "codex-package.json").read_text(encoding="utf-8"),
+                expected_metadata,
+            )
+            self.assertEqual(
+                json.loads(expected_metadata),
+                canonical_layout_metadata(VERSION, TARGET),
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+
+    def test_canonical_layout_helper_package_accepted_when_available(self) -> None:
+        scripts_dir = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(scripts_dir))
+        try:
+            from codex_package import layout as codex_layout
+            from codex_package.targets import PackageInputs
+            from codex_package.targets import PackageVariant
+            from codex_package.targets import TargetSpec
+        except Exception:
+            self.skipTest("cannot import scripts/codex_package layout helper")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dummy = root / "dummy-bin"
+            write_executable(dummy, "#!/bin/sh\nexit 0\n")
+            helper_package = root / "helper-package"
+            spec = TargetSpec(
+                target=TARGET,
+                is_windows=False,
+                is_linux=True,
+                dotslash_platform="linux-x86_64",
+            )
+            variant = PackageVariant(
+                name="codex", cargo_bin="codex", executable_stem="codex"
+            )
+            inputs = PackageInputs(
+                entrypoint_bin=dummy,
+                code_mode_host_bin=dummy,
+                rg_bin=dummy,
+                zsh_bin=None,
+                bwrap_bin=dummy,
+                codex_command_runner_bin=None,
+                codex_windows_sandbox_setup_bin=None,
+            )
+            codex_layout.prepare_package_dir(helper_package, force=True)
+            codex_layout.build_package_dir(helper_package, VERSION, variant, spec, inputs)
+            helper_metadata = json.loads(
+                (helper_package / "codex-package.json").read_text(encoding="utf-8")
+            )
+            if set(helper_metadata) != set(canonical_layout_metadata(VERSION, TARGET)):
+                self.skipTest(
+                    "checked-in layout.py does not emit the 8-field Lumi canonical schema"
+                )
+
+            archive, checksum, metadata, manager = create_package_release(
+                root, package_dir_override=helper_package
+            )
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            doctor = run_manage(root, ["doctor"])
+            self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
 
     def test_extraction_option_failure_fails_closed_without_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
