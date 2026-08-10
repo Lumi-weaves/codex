@@ -189,8 +189,14 @@ pub(crate) async fn apply_bespoke_event_handling(
             outgoing.abort_pending_server_requests().await;
             respond_to_pending_interrupts(&thread_state, &outgoing).await;
             let turn_failed = thread_state.lock().await.turn_summary.last_error.is_some();
+            let live_background_terminal_count =
+                conversation.list_background_terminals().await.len();
             thread_watch_manager
-                .note_turn_completed(&conversation_id.to_string(), turn_failed)
+                .note_turn_completed(
+                    &conversation_id.to_string(),
+                    turn_failed,
+                    live_background_terminal_count,
+                )
                 .await;
             handle_turn_complete(
                 conversation_id,
