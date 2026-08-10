@@ -11,7 +11,11 @@ use tokio::time::Sleep;
 use super::UnifiedExecContext;
 use super::process::OutputHandles;
 use super::process::UnifiedExecProcess;
+use crate::context::UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES;
+use crate::context::UnifiedExecCompletionEvent;
+use crate::context::decode_lossy_one_for_one;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
+use crate::session::SessionIngress;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::events::ToolEmitter;
@@ -20,6 +24,7 @@ use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_features::Feature;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::protocol::EventMsg;
@@ -182,42 +187,127 @@ pub(crate) fn spawn_exit_watcher(
         if let Some(network_denial_monitor) = network_denial_monitor {
             let _ = network_denial_monitor.await;
         }
+        // The initial exec_command holds the interaction lock through its
+        // synchronous observation, so by the time we acquire the lock either
+        // the exit was already observed synchronously (completion marked) or
+        // the initial call returned Alive and this exit is genuinely
+        // background work.
         let _interaction_guard = interaction_lock.lock_owned().await;
 
         let duration = Instant::now().saturating_duration_since(started_at);
+        let claimed_completion = process.mark_completion_observed();
         if let Some(message) = process.failure_message() {
             emit_failed_exec_end_for_unified_exec(
-                session_ref,
+                Arc::clone(&session_ref),
                 turn_ref,
                 call_id,
-                command,
+                command.clone(),
                 cwd,
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                Arc::clone(&transcript),
                 String::new(),
-                message,
+                message.clone(),
                 duration,
             )
             .await;
+            if claimed_completion && session_ref.enabled(Feature::UnifiedExecCompletionWake) {
+                enqueue_background_completion(
+                    &session_ref,
+                    &transcript,
+                    &command,
+                    process_id,
+                    /*exit_code*/ None,
+                    Some(message),
+                    duration,
+                )
+                .await;
+            }
         } else {
             let exit_code = process.exit_code().unwrap_or(-1);
             emit_exec_end_for_unified_exec(
-                session_ref,
+                Arc::clone(&session_ref),
                 turn_ref,
                 call_id,
-                command,
+                command.clone(),
                 cwd,
                 Some(process_id.to_string()),
                 plugin_attribution,
-                transcript,
+                Arc::clone(&transcript),
                 String::new(),
                 exit_code,
                 duration,
             )
             .await;
+            if claimed_completion && session_ref.enabled(Feature::UnifiedExecCompletionWake) {
+                enqueue_background_completion(
+                    &session_ref,
+                    &transcript,
+                    &command,
+                    process_id,
+                    Some(exit_code),
+                    /*failure_message*/ None,
+                    duration,
+                )
+                .await;
+            }
         }
     });
+}
+
+/// Build and send the Core-private internal completion event for a background
+/// process exit that was not observed synchronously.
+///
+/// The event carries a bounded head/tail excerpt plus total/omitted size
+/// metadata; the retained terminal remains pollable by `process_id`. The
+/// session submission loop admits it queue-first, serialized with external
+/// submissions. This is the single construction point for completion events
+/// (see the SEAM NOTE on `UnifiedExecCompletionEvent` about swapping in the
+/// bounded result pool).
+async fn enqueue_background_completion(
+    session_ref: &Arc<Session>,
+    transcript: &Arc<Mutex<HeadTailBuffer>>,
+    command: &[String],
+    process_id: i32,
+    exit_code: Option<i32>,
+    failure_message: Option<String>,
+    duration: Duration,
+) {
+    let (total_output_bytes, excerpt, total_omitted_bytes) = {
+        let transcript = transcript.lock().await;
+        let total_output_bytes = transcript.total_bytes();
+        let (excerpt_bytes, total_omitted_bytes) =
+            transcript.bounded_excerpt(UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES);
+        (
+            total_output_bytes,
+            // One-for-one malformed-byte replacement keeps the excerpt byte
+            // length (and therefore the omission accounting) exact.
+            decode_lossy_one_for_one(&excerpt_bytes),
+            total_omitted_bytes,
+        )
+    };
+    let completion = UnifiedExecCompletionEvent::new(
+        process_id,
+        command.join(" "),
+        exit_code,
+        failure_message,
+        duration,
+        total_output_bytes,
+        total_omitted_bytes,
+        excerpt,
+    );
+    // The session holds only a weak sender, so an upgrade failure means the
+    // submission channel is gone (session torn down): the watcher must never
+    // break process/event cleanup because a wake could not be admitted.
+    if let Some(ingress_tx) = session_ref.internal_session_event_tx.upgrade() {
+        let _ = ingress_tx
+            .send(SessionIngress::Internal(
+                crate::session::internal_event::InternalSessionEvent::UnifiedExecCompletion(
+                    completion,
+                ),
+            ))
+            .await;
+    }
 }
 
 async fn process_chunk(

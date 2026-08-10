@@ -1,5 +1,6 @@
 use super::*;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+use crate::context::ContextualUserFragment;
 use crate::context::UserInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
@@ -2465,4 +2466,30 @@ fn text_only_items_unchanged() {
     let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
 
     assert_eq!(estimated, raw_len);
+}
+
+#[test]
+fn unified_exec_completion_is_not_a_user_turn_boundary() {
+    // Completion context is classified as a contextual user fragment, so it
+    // must never count as a real user turn boundary in history accounting.
+    let completion = crate::context::UnifiedExecCompletionEvent::new(
+        4242,
+        "sleep 10",
+        Some(0),
+        None,
+        std::time::Duration::from_secs(2),
+        1234,
+        0,
+        "done",
+    );
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: completion.render(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(!is_user_turn_boundary(&item));
 }

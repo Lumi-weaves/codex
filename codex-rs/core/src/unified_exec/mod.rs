@@ -139,7 +139,15 @@ pub(crate) struct ProcessStore {
 impl ProcessStore {
     fn remove(&mut self, process_id: i32) -> Option<ProcessEntry> {
         self.reserved_process_ids.remove(&process_id);
-        self.processes.remove(&process_id)
+        let entry = self.processes.remove(&process_id);
+        if let Some(entry) = &entry {
+            // Any removal means the exit was either returned to the model
+            // synchronously (initial exec_command / write_stdin poll) or the
+            // process was explicitly disposed of by the manager. In both cases
+            // the background watcher must not enqueue an automatic completion.
+            entry.process.record_completion_observed();
+        }
+        entry
     }
 }
 

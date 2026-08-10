@@ -19,6 +19,7 @@ use codex_exec_server::ReadResponse;
 use codex_exec_server::StartedExecProcess;
 use codex_exec_server::WriteResponse;
 use codex_exec_server::WriteStatus;
+use codex_features::Feature;
 use codex_sandboxing::SandboxType;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -35,6 +36,7 @@ use tokio::sync::Notify;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio::time::timeout;
 
 async fn test_session_and_turn() -> (Arc<Session>, Arc<TurnContext>) {
     let (session, turn) = make_session_and_context().await;
@@ -394,6 +396,49 @@ async fn unified_exec_persists_across_requests() -> anyhow::Result<()> {
     assert!(!session.terminate_background_terminal(process_id).await);
     assert!(session.list_background_terminals().await.is_empty());
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fast_exit_initial_exec_returns_exit_without_automatic_completion() -> anyhow::Result<()> {
+    skip_if_sandbox!(Ok(()));
+
+    // Completion wake enabled and a live ingress channel: if the exit watcher
+    // could beat the initial synchronous observation (the interaction lock is
+    // now acquired before the watcher is spawned), an automatic completion
+    // would be admitted here.
+    let (mut session, turn) = test_session_and_turn().await;
+    let (ingress_tx, ingress_rx) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .enable_feature_for_tests(Feature::UnifiedExecCompletionWake);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = ingress_tx.downgrade();
+
+    // The process is alive when stored (the watcher is spawned) but exits
+    // inside the initial yield window: exec_command must return the exit
+    // synchronously and the watcher must not admit a completion.
+    let out = exec_command(
+        &session,
+        &turn,
+        "sleep 0.4",
+        /*yield_time_ms*/ 1000,
+        None,
+    )
+    .await?;
+    assert_eq!(out.exit_code, Some(0), "synchronous exit must be returned");
+    assert!(out.process_id.is_none());
+
+    // Give a hypothetical racing watcher time to act, then assert nothing was
+    // admitted on the session ingress.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        timeout(Duration::from_millis(100), ingress_rx.recv())
+            .await
+            .is_err(),
+        "no automatic completion for a synchronously observed exit"
+    );
     Ok(())
 }
 

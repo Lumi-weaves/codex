@@ -131,6 +131,73 @@ impl HeadTailBuffer {
         out
     }
 
+    /// Return a bounded head/tail excerpt of the retained output.
+    ///
+    /// The excerpt keeps a true prefix and a true most-recent suffix of the
+    /// logical retained bytes, at most `max_bytes` total. Whenever either the
+    /// transcript already omitted bytes or this excerpt trims content, one
+    /// bounded omission marker is inserted between the head and tail. The
+    /// returned omitted count is `total_bytes - retained_output_content_bytes`
+    /// (saturating): everything observed minus the content bytes the excerpt
+    /// retains. This keeps model-visible completion fragments small while
+    /// preserving the most recent output. Returns
+    /// `(excerpt_bytes, omitted_output_bytes)`.
+    pub(crate) fn bounded_excerpt(&self, max_bytes: usize) -> (Vec<u8>, usize) {
+        if max_bytes == 0 {
+            return (Vec::new(), self.total_bytes());
+        }
+        if self.omitted_bytes == 0 && self.retained_bytes() <= max_bytes {
+            return (self.to_bytes(), 0);
+        }
+
+        // One bounded omission marker covers any omission (prior transcript
+        // drops plus excerpt trimming). Size it pessimistically against the
+        // worst possible omitted count so the excerpt can never exceed the
+        // cap even when trimming changes the count.
+        let marker_max_len =
+            format!("\n{}\n", format_output_omission_marker(self.total_bytes())).len();
+        let content_budget = max_bytes.saturating_sub(marker_max_len);
+        let head_budget = content_budget / 2;
+        let tail_budget = content_budget.saturating_sub(head_budget);
+
+        // Select a non-overlapping prefix and suffix from the LOGICAL retained
+        // byte sequence (head followed by tail), independent of how those
+        // bytes happen to be distributed across the internal halves. This
+        // keeps the true most-recent suffix even when the whole transcript
+        // lives in the head half (e.g. a 4 KiB transcript in the 1 MiB store).
+        let retained = self.to_bytes();
+        let prefix_len = head_budget.min(retained.len());
+        // Reserve the suffix so the prefix and suffix never overlap.
+        let suffix_len = tail_budget.min(retained.len().saturating_sub(prefix_len));
+        let suffix_start = retained.len().saturating_sub(suffix_len);
+        let content_kept = prefix_len.saturating_add(suffix_len);
+
+        // Omitted output is everything observed minus the content bytes the
+        // excerpt actually retains (saturating; includes prior transcript
+        // omissions and any excerpt trimming).
+        let omitted = self.total_bytes().saturating_sub(content_kept);
+        let marker = if omitted > 0 {
+            format!("\n{}\n", format_output_omission_marker(omitted))
+        } else {
+            String::new()
+        };
+        let mut out = Vec::with_capacity(content_kept.saturating_add(marker.len()));
+        out.extend_from_slice(&retained[..prefix_len]);
+        out.extend_from_slice(marker.as_bytes());
+        out.extend_from_slice(&retained[suffix_start..]);
+        if out.len() > max_bytes {
+            // Marker-only edge case (cap smaller than the marker itself).
+            out.truncate(max_bytes);
+        }
+        debug_assert!(
+            out.len() <= max_bytes,
+            "bounded excerpt exceeded its cap: {} > {}",
+            out.len(),
+            max_bytes
+        );
+        (out, omitted)
+    }
+
     /// Drain the retained output and omission metadata, resetting this buffer's
     /// contents while preserving its configured capacity.
     pub(crate) fn drain(&mut self) -> Self {

@@ -228,7 +228,11 @@ async fn is_unloadable(thread: &CodexThread) -> bool {
         thread.agent_status().await,
         AgentStatus::Completed(_) | AgentStatus::Errored(_) | AgentStatus::Interrupted
     ) && thread.session.active_turn.lock().await.is_none()
-        && !thread.session.input_queue.has_pending_mailbox_items().await
+        && !thread
+            .session
+            .input_queue
+            .has_pending_session_inputs()
+            .await
 }
 
 #[cfg(test)]
