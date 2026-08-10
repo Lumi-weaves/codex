@@ -206,6 +206,7 @@ impl RemoteAppServerClient {
             &mut stream,
             &endpoint,
             initialize_params,
+            env!("CARGO_PKG_VERSION"),
             INITIALIZE_TIMEOUT,
         )
         .await?;
@@ -799,6 +800,7 @@ async fn initialize_remote_connection<S>(
     stream: &mut WebSocketStream<S>,
     endpoint: &str,
     params: InitializeParams,
+    local_version: &str,
     initialize_timeout: Duration,
 ) -> IoResult<(Vec<AppServerEvent>, Option<String>, Option<String>)>
 where
@@ -831,14 +833,21 @@ where
                     })?;
                     match message {
                         JSONRPCMessage::Response(response) if response.id == initialize_request_id => {
-                            server_version = response
+                            let user_agent = response
                                 .result
                                 .get("userAgent")
-                                .and_then(serde_json::Value::as_str)
+                                .and_then(serde_json::Value::as_str);
+                            server_version = user_agent
                                 .and_then(|user_agent| {
                                     let (_, rest) = user_agent.split_once('/')?;
                                     rest.split_whitespace().next().map(str::to_string)
                                 });
+                            enforce_remote_app_server_version_gate(
+                                endpoint,
+                                user_agent,
+                                server_version.as_deref(),
+                                local_version,
+                            )?;
                             codex_home = response
                                 .result
                                 .get("codexHome")
@@ -940,6 +949,83 @@ where
     Ok((pending_events, server_version, codex_home))
 }
 
+/// Parses the numeric `MAJOR.MINOR.PATCH` base of a version string, ignoring
+/// any semver prerelease (`-lumi.1`) or build (`+build.5`) suffix.
+fn parse_upstream_base_release(version: &str) -> Option<(u64, u64, u64)> {
+    let base = version.split(['-', '+']).next()?;
+    let mut components = base.split('.');
+    let major = components.next()?.parse::<u64>().ok()?;
+    let minor = components.next()?.parse::<u64>().ok()?;
+    let patch = components.next()?.parse::<u64>().ok()?;
+    if components.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Fail closed unless the remote app-server reports the same upstream base
+/// release (`MAJOR.MINOR.PATCH`) as this local build.
+///
+/// Lumi builds carry a `-lumi.N` prerelease (for example `0.147.0-lumi.1`)
+/// and cooperate only with a native app-server whose base release matches
+/// (for example an official `0.147.0`). A missing or unparseable version, or
+/// any major/minor/patch difference, is refused before the `initialized`
+/// notification is sent, so no thread/session traffic can follow.
+fn enforce_remote_app_server_version_gate(
+    endpoint: &str,
+    user_agent: Option<&str>,
+    server_version: Option<&str>,
+    local_version: &str,
+) -> IoResult<()> {
+    let user_agent = user_agent.ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "remote app server at `{endpoint}` did not report a userAgent in its initialize response; refusing to connect to an app server with an unknown version"
+            ),
+        )
+    })?;
+    let server_version = server_version.ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "remote app server at `{endpoint}` reported userAgent `{user_agent}` without a `name/version` pair; refusing to connect to an app server with an unparseable version"
+            ),
+        )
+    })?;
+    let remote_base = parse_upstream_base_release(server_version).ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "remote app server at `{endpoint}` reported unparseable version `{server_version}` in userAgent `{user_agent}`; expected a `MAJOR.MINOR.PATCH` version"
+            ),
+        )
+    })?;
+    let local_base = parse_upstream_base_release(local_version).ok_or_else(|| {
+        IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "this build reports unparseable version `{local_version}`; refusing to connect to a remote app server"
+            ),
+        )
+    })?;
+    if remote_base != local_base {
+        return Err(IoError::new(
+            ErrorKind::InvalidData,
+            format!(
+                "remote app server at `{endpoint}` is version `{server_version}` (base {}.{}.{}), but this build ({local_version}) only cooperates with the same upstream base release {}.{}.{}; refusing to connect",
+                remote_base.0,
+                remote_base.1,
+                remote_base.2,
+                local_base.0,
+                local_base.1,
+                local_base.2,
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn app_server_event_from_notification(notification: JSONRPCNotification) -> Option<AppServerEvent> {
     match ServerNotification::try_from(notification) {
         Ok(notification) => Some(AppServerEvent::ServerNotification(Box::new(notification))),
@@ -1015,6 +1101,144 @@ fn websocket_close_error_is_already_closed(err: &TungsteniteError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_endpoint() -> &'static str {
+        "ws://127.0.0.1:1/"
+    }
+
+    #[test]
+    fn parse_upstream_base_release_accepts_plain_prerelease_and_build_versions() {
+        assert_eq!(parse_upstream_base_release("0.147.0"), Some((0, 147, 0)));
+        assert_eq!(
+            parse_upstream_base_release("0.147.0-lumi.1"),
+            Some((0, 147, 0))
+        );
+        assert_eq!(
+            parse_upstream_base_release("0.147.0-alpha.1.2"),
+            Some((0, 147, 0))
+        );
+        assert_eq!(
+            parse_upstream_base_release("0.147.0+build.5"),
+            Some((0, 147, 0))
+        );
+    }
+
+    #[test]
+    fn parse_upstream_base_release_rejects_missing_or_malformed_versions() {
+        assert_eq!(parse_upstream_base_release(""), None);
+        assert_eq!(parse_upstream_base_release("0.147"), None);
+        assert_eq!(parse_upstream_base_release("0.147.0.1"), None);
+        assert_eq!(parse_upstream_base_release("not-a-version"), None);
+        assert_eq!(parse_upstream_base_release("v0.147.0"), None);
+        assert_eq!(parse_upstream_base_release("0.x.0"), None);
+    }
+
+    #[test]
+    fn version_gate_accepts_same_base_release_across_local_prerelease() {
+        enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            Some("codex_app_server/0.147.0 (Test OS; x86_64) rust"),
+            Some("0.147.0"),
+            "0.147.0-lumi.1",
+        )
+        .expect("local Lumi prerelease should cooperate with the official base release");
+        enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            Some("codex_app_server/0.147.0-lumi.1 (Test OS; x86_64) rust"),
+            Some("0.147.0-lumi.1"),
+            "0.147.0",
+        )
+        .expect("official build should cooperate with a same-base Lumi app server");
+    }
+
+    #[test]
+    fn version_gate_refuses_mismatched_major_minor_or_patch() {
+        for (server_version, user_agent) in [
+            ("1.0.0", "codex_app_server/1.0.0 (Test OS; x86_64) rust"),
+            ("0.148.0", "codex_app_server/0.148.0 (Test OS; x86_64) rust"),
+            ("0.147.1", "codex_app_server/0.147.1 (Test OS; x86_64) rust"),
+        ] {
+            let err = enforce_remote_app_server_version_gate(
+                test_endpoint(),
+                Some(user_agent),
+                Some(server_version),
+                "0.147.0",
+            )
+            .expect_err("mismatched base release should be refused");
+            let message = err.to_string();
+            assert!(
+                message.contains(test_endpoint()),
+                "error should name the endpoint: {message}"
+            );
+            assert!(
+                message.contains(server_version),
+                "error should name the remote version: {message}"
+            );
+            assert!(
+                message.contains("0.147.0"),
+                "error should name the local compatible base release: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_gate_refuses_missing_or_unparseable_versions() {
+        let missing_user_agent = enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            /*user_agent*/ None,
+            /*server_version*/ None,
+            "0.147.0",
+        )
+        .expect_err("missing userAgent should fail closed");
+        assert!(
+            missing_user_agent
+                .to_string()
+                .contains("did not report a userAgent"),
+            "missing userAgent error should be precise: {missing_user_agent}"
+        );
+
+        let missing_version_pair = enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            Some("codex_app_server (Test OS; x86_64) rust"),
+            /*server_version*/ None,
+            "0.147.0",
+        )
+        .expect_err("userAgent without a name/version pair should fail closed");
+        assert!(
+            missing_version_pair
+                .to_string()
+                .contains("without a `name/version` pair"),
+            "missing version pair error should be precise: {missing_version_pair}"
+        );
+
+        let unparseable_version = enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            Some("codex_app_server/not-a-version (Test OS; x86_64) rust"),
+            Some("not-a-version"),
+            "0.147.0",
+        )
+        .expect_err("unparseable version should fail closed");
+        assert!(
+            unparseable_version
+                .to_string()
+                .contains("unparseable version `not-a-version`"),
+            "unparseable version error should be precise: {unparseable_version}"
+        );
+
+        let short_version = enforce_remote_app_server_version_gate(
+            test_endpoint(),
+            Some("codex_app_server/0.147 (Test OS; x86_64) rust"),
+            Some("0.147"),
+            "0.147.0",
+        )
+        .expect_err("short version should fail closed");
+        assert!(
+            short_version
+                .to_string()
+                .contains("unparseable version `0.147`"),
+            "short version error should be precise: {short_version}"
+        );
+    }
 
     #[tokio::test]
     async fn shutdown_tolerates_worker_exit_after_command_is_queued() {
