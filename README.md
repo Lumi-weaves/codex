@@ -122,6 +122,30 @@ in this repository (`scripts/install/install.sh`, published as `install.sh`) dow
 and never uses the OpenAI mirror. See
 [Installing & building](./docs/install.md) to build the fork.
 
+### Async terminal completion wake
+
+Commit [`2b752e4`](https://github.com/Lumi-weaves/codex/commit/2b752e4a6db7861b76d55ad1d3f44b6e44b3d8d4)
+adds an opt-in wake for background unified-exec terminal work. When a
+terminal process finishes without a synchronous observation of its exit, the
+session enqueues a bounded, model-visible completion fragment (process
+identity, exit/failure status, duration, output-size metadata, and a small
+head/tail excerpt of the transcript) and wakes a model turn to consume it.
+`unified_exec_completion_wake` is a session-scoped rollout flag that is
+**disabled by default** (`default_enabled: false`), and unified exec behavior
+is unchanged unless it is enabled:
+
+```toml
+[features]
+unified_exec_completion_wake = true
+```
+
+The wake policy is wake-if-idle / queue-if-busy: an idle session is woken
+immediately (including in Plan mode, like trigger-turn mailbox work), a busy
+regular turn admits the completion at its next safe inference boundary, and a
+turn already past its visible-answer boundary leaves the item queued to wake a
+fresh turn after the old turn clears. Interrupts never lose queued completions
+because abort cleanup only clears turn-local pending input.
+
 ---
 
 ## Quickstart
