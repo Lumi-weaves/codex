@@ -9,6 +9,7 @@
 - [Core Primitives](#core-primitives)
 - [Lifecycle Overview](#lifecycle-overview)
 - [Initialization](#initialization)
+- [Remote client compatibility](#remote-client-compatibility)
 - [API Overview](#api-overview)
 - [Events](#events)
 - [Approvals](#approvals)
@@ -157,6 +158,27 @@ Example with notification opt-out:
   }
 }
 ```
+
+## Remote client compatibility
+
+The `codex` TUI can drive a user-started native app-server over an explicit
+remote endpoint (`codex --remote ws://HOST:PORT` or `codex --remote unix://PATH`).
+Only user-started, schema-matched endpoints are supported:
+
+- The remote endpoint must be supplied explicitly by the user. The TUI never
+  discovers, starts, stops, restarts, or takes lifecycle ownership of an
+  app-server, and it makes no claim of compatibility with generic Desktop
+  app-server processes.
+- Immediately after the `initialize` handshake, the remote client extracts the
+  server version from the `userAgent` field of the `initialize` response and
+  requires the same upstream base release (`MAJOR.MINOR.PATCH`) as the local
+  build. Lumi builds carry a `-lumi.N` prerelease (for example
+  `0.147.0-lumi.1`) and cooperate with an official app-server reporting
+  `0.147.0`. A missing or unparseable version, or any major/minor/patch
+  difference, is refused before the `initialized` notification is sent, so no
+  thread/session traffic can follow.
+- New or separate threads are the safest way to use a shared server. Driving
+  the same thread concurrently from multiple clients is unsupported.
 
 ## API Overview
 

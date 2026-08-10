@@ -1085,6 +1085,37 @@ mod tests {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
+        expect_remote_initialize_with_user_agent(
+            websocket,
+            &format!(
+                "codex_cli_rs/{} (Test OS; x86_64) rust",
+                env!("CARGO_PKG_VERSION")
+            ),
+        )
+        .await;
+    }
+
+    async fn expect_remote_initialize_with_user_agent<S>(
+        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+        user_agent: &str,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        expect_remote_initialize_request_and_response(websocket, user_agent).await;
+
+        let JSONRPCMessage::Notification(notification) = read_websocket_message(websocket).await
+        else {
+            panic!("expected initialized notification");
+        };
+        assert_eq!(notification.method, "initialized");
+    }
+
+    async fn expect_remote_initialize_request_and_response<S>(
+        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+        user_agent: &str,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
         let JSONRPCMessage::Request(request) = read_websocket_message(websocket).await else {
             panic!("expected initialize request");
         };
@@ -1094,18 +1125,31 @@ mod tests {
             JSONRPCMessage::Response(JSONRPCResponse {
                 id: request.id,
                 result: serde_json::json!({
-                    "userAgent": "codex_cli_rs/9.8.7-test (Test OS; x86_64) rust",
+                    "userAgent": user_agent,
                     "codexHome": "/server/.codex",
                 }),
             }),
         )
         .await;
+    }
 
-        let JSONRPCMessage::Notification(notification) = read_websocket_message(websocket).await
-        else {
-            panic!("expected initialized notification");
-        };
-        assert_eq!(notification.method, "initialized");
+    /// Asserts that the client sends nothing after the initialize response,
+    /// proving a refused connection never reaches the `initialized` phase or
+    /// any thread/session traffic.
+    async fn expect_no_message_after_version_rejection<S>(
+        websocket: &mut tokio_tungstenite::WebSocketStream<S>,
+    ) where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        match timeout(Duration::from_secs(5), websocket.next()).await {
+            Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(Message::Close(_)))) => {}
+            Ok(Some(Ok(message))) => {
+                panic!(
+                    "client should not send further messages after version rejection, got {message:?}"
+                )
+            }
+            Err(_) => panic!("client should drop the connection after version rejection"),
+        }
     }
 
     async fn read_websocket_message<S>(
@@ -1459,7 +1503,11 @@ mod tests {
             .await
             .expect("remote client should connect");
 
-        assert_eq!(client.server_version(), Some("9.8.7-test"));
+        assert_eq!(
+            client.server_version(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "client should expose the server version extracted from userAgent"
+        );
         assert_eq!(client.codex_home(), Some("/server/.codex"));
         let response: GetAccountResponse = client
             .request_typed(ClientRequest::GetAccount {
@@ -1649,6 +1697,187 @@ mod tests {
         assert!(!crate::remote::websocket_url_supports_auth_token(
             &url::Url::parse("ws://example.com:4500").expect("non-loopback ws URL should parse")
         ));
+    }
+
+    #[tokio::test]
+    async fn remote_connect_accepts_same_base_official_app_server_version() {
+        let websocket_url = start_test_remote_server(|mut websocket| async move {
+            expect_remote_initialize(&mut websocket).await;
+            while websocket.next().await.is_some() {}
+        })
+        .await;
+        let client = RemoteAppServerClient::connect(test_remote_connect_args(websocket_url))
+            .await
+            .expect("same-base official app-server should be accepted");
+        assert_eq!(
+            client.server_version(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "client should expose the server version extracted from userAgent"
+        );
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_connect_refuses_mismatched_base_release_before_initialized() {
+        let mismatched_version = "0.148.0";
+        let websocket_url = start_test_remote_server(move |mut websocket| async move {
+            expect_remote_initialize_request_and_response(
+                &mut websocket,
+                &format!("codex_app_server/{mismatched_version} (Test OS; x86_64) rust"),
+            )
+            .await;
+            expect_no_message_after_version_rejection(&mut websocket).await;
+        })
+        .await;
+        let err =
+            match RemoteAppServerClient::connect(test_remote_connect_args(websocket_url)).await {
+                Ok(_) => panic!("mismatched base release should be refused"),
+                Err(err) => err,
+            };
+        let message = err.to_string();
+        assert!(
+            message.contains(mismatched_version),
+            "error should name the remote version: {message}"
+        );
+        assert!(
+            message.contains(env!("CARGO_PKG_VERSION")),
+            "error should name the local version: {message}"
+        );
+        assert!(
+            message.contains("refusing to connect"),
+            "error should state the refusal: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_connect_refuses_missing_user_agent_before_initialized() {
+        let websocket_url = start_test_remote_server(|mut websocket| async move {
+            let JSONRPCMessage::Request(request) = read_websocket_message(&mut websocket).await
+            else {
+                panic!("expected initialize request");
+            };
+            assert_eq!(request.method, "initialize");
+            write_websocket_message(
+                &mut websocket,
+                JSONRPCMessage::Response(JSONRPCResponse {
+                    id: request.id,
+                    result: serde_json::json!({
+                        "codexHome": "/server/.codex",
+                    }),
+                }),
+            )
+            .await;
+            expect_no_message_after_version_rejection(&mut websocket).await;
+        })
+        .await;
+        let err =
+            match RemoteAppServerClient::connect(test_remote_connect_args(websocket_url)).await {
+                Ok(_) => panic!("missing userAgent should fail closed"),
+                Err(err) => err,
+            };
+        assert!(
+            err.to_string().contains("did not report a userAgent"),
+            "missing userAgent error should be precise: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_connect_refuses_unparseable_version_before_initialized() {
+        let websocket_url = start_test_remote_server(|mut websocket| async move {
+            expect_remote_initialize_request_and_response(
+                &mut websocket,
+                "codex_app_server/not-a-version (Test OS; x86_64) rust",
+            )
+            .await;
+            expect_no_message_after_version_rejection(&mut websocket).await;
+        })
+        .await;
+        let err =
+            match RemoteAppServerClient::connect(test_remote_connect_args(websocket_url)).await {
+                Ok(_) => panic!("unparseable version should fail closed"),
+                Err(err) => err,
+            };
+        assert!(
+            err.to_string()
+                .contains("unparseable version `not-a-version`"),
+            "unparseable version error should be precise: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_connect_accepts_same_base_official_app_server_over_unix_socket() {
+        let socket_dir = TempDir::new().expect("socket dir");
+        let socket_path = AbsolutePathBuf::from_absolute_path(socket_dir.path().join("codex.sock"))
+            .expect("socket path should resolve");
+        let mut listener = UnixListener::bind(socket_path.as_path())
+            .await
+            .expect("listener should bind");
+        tokio::spawn(async move {
+            let stream = listener.accept().await.expect("accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("websocket upgrade should succeed");
+            expect_remote_initialize(&mut websocket).await;
+            while websocket.next().await.is_some() {}
+        });
+        let client = RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+            client_name: "codex-app-server-client-test".to_string(),
+            client_version: "0.0.0-test".to_string(),
+            experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        .expect("same-base official app-server over unix socket should be accepted");
+        assert_eq!(
+            client.server_version(),
+            Some(env!("CARGO_PKG_VERSION")),
+            "client should expose the server version extracted from userAgent"
+        );
+        client.shutdown().await.expect("shutdown should complete");
+    }
+
+    #[tokio::test]
+    async fn remote_connect_refuses_mismatched_base_release_over_unix_socket_before_initialized() {
+        let mismatched_version = "0.147.1";
+        let socket_dir = TempDir::new().expect("socket dir");
+        let socket_path = AbsolutePathBuf::from_absolute_path(socket_dir.path().join("codex.sock"))
+            .expect("socket path should resolve");
+        let mut listener = UnixListener::bind(socket_path.as_path())
+            .await
+            .expect("listener should bind");
+        tokio::spawn(async move {
+            let stream = listener.accept().await.expect("accept should succeed");
+            let mut websocket = accept_async(stream)
+                .await
+                .expect("websocket upgrade should succeed");
+            expect_remote_initialize_request_and_response(
+                &mut websocket,
+                &format!("codex_app_server/{mismatched_version} (Test OS; x86_64) rust"),
+            )
+            .await;
+            expect_no_message_after_version_rejection(&mut websocket).await;
+        });
+        let err = match RemoteAppServerClient::connect(RemoteAppServerConnectArgs {
+            endpoint: RemoteAppServerEndpoint::UnixSocket { socket_path },
+            client_name: "codex-app-server-client-test".to_string(),
+            client_version: "0.0.0-test".to_string(),
+            experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: 8,
+        })
+        .await
+        {
+            Ok(_) => panic!("mismatched base release over unix socket should be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains(mismatched_version),
+            "error should name the remote version: {err}"
+        );
     }
 
     #[tokio::test]
@@ -1973,7 +2202,12 @@ mod tests {
                 &mut websocket,
                 JSONRPCMessage::Response(JSONRPCResponse {
                     id: request.id,
-                    result: serde_json::json!({}),
+                    result: serde_json::json!({
+                        "userAgent": format!(
+                            "codex_cli_rs/{} (Test OS; x86_64) rust",
+                            env!("CARGO_PKG_VERSION")
+                        ),
+                    }),
                 }),
             )
             .await;
