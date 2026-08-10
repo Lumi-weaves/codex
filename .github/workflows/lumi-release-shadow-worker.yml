@@ -134,6 +134,23 @@ jobs:
           path: shadow-tools
           persist-credentials: false
 
+      - name: Install bounded curl wrapper first in PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Canonical steps (preflight probes, setup-rusty-v8) call bare
+          # `curl`; prepend the workflow-owned bounded wrapper so they
+          # inherit finite retry/connect/max behavior without modifying
+          # those files. The wrapper logs nothing (no URLs/proxies).
+          bin_dir="${RUNNER_TEMP}/lumi-shadow-bin"
+          mkdir -p "${bin_dir}"
+          install -m 0755 \
+            "${GITHUB_WORKSPACE}/shadow-tools/scripts/release/lumi_shadow_curl.sh" \
+            "${bin_dir}/curl"
+          echo "${bin_dir}" >> "${GITHUB_PATH}"
+          # Fail fast if the wrapper cannot resolve a real curl.
+          "${bin_dir}/curl" --version >/dev/null
+
       - name: Preflight runner, proxy, and persistent Lima VM
         shell: bash
         run: |
@@ -222,7 +239,7 @@ jobs:
             http_proxy=http://192.168.5.2:7890 \
             https_proxy=http://192.168.5.2:7890 \
             limactl shell --preserve-env lumi-codex-arm-builder sh -c \
-              'curl -fsS -o /dev/null --max-time 20 https://github.com' \
+              'curl -fsS --retry 5 --retry-delay 2 --retry-all-errors -o /dev/null --max-time 20 https://github.com' \
             || { echo "guest proxy http://192.168.5.2:7890 is not reachable; start myproxy/mihomo (no silent direct)"; exit 1; }
           echo "::endgroup::"
 
@@ -236,13 +253,20 @@ jobs:
         with:
           target: aarch64-apple-darwin
 
-      - name: Download packaged zsh manifest
+      - name: Fetch rg and zsh through DotSlash manifests (bounded curl)
         shell: bash
         run: |
           set -euo pipefail
-          curl -fsSL \
-            "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
-            -o "${RUNNER_TEMP}/codex-zsh"
+          # Canonical DotSlash modules/manifests come from the workflow
+          # commit (shadow-tools); urllib is replaced by bounded curl (the
+          # smoke run showed urllib was unreliable and proxy-ignoring here).
+          python3 "${GITHUB_WORKSPACE}/shadow-tools/scripts/release/lumi_shadow_fetch_dotslash.py" \
+            --target aarch64-apple-darwin \
+            --tools-root "${GITHUB_WORKSPACE}/shadow-tools" \
+            --zsh-manifest-url \
+              "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            --output-dir "${RUNNER_TEMP}/lumi-shadow-dotslash" \
+            >> "${GITHUB_ENV}"
 
       - name: Build aarch64-apple-darwin canary binaries
         shell: bash
@@ -258,12 +282,17 @@ jobs:
           BUNDLE: primary
         run: |
           set -euo pipefail
+          zsh_args=()
+          if [[ -n "${LUMI_SHADOW_ZSH_BIN:-}" ]]; then
+            zsh_args+=(--zsh-bin "${LUMI_SHADOW_ZSH_BIN}")
+          fi
           bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
             --target "$TARGET" \
             --bundle "$BUNDLE" \
             --entrypoint-dir "target/${TARGET}/release" \
             --archive-dir "dist/${TARGET}" \
-            --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
+            --rg-bin "${LUMI_SHADOW_RG_BIN}" \
+            "${zsh_args[@]}"
 
       - name: Validate canonical package (aarch64-apple-darwin)
         shell: bash
@@ -299,7 +328,14 @@ jobs:
           tar -C "${GITHUB_WORKSPACE}/shadow-tools/scripts/release" \
             -cf "${stage}/lumi-shadow-tools.tar" \
             lumi_shadow_build_linux.sh lumi_shadow_env.sh \
-            lumi_shadow_install_rust.sh lumi_shadow_validate_package.py
+            lumi_shadow_install_rust.sh lumi_shadow_validate_package.py \
+            lumi_shadow_swap.sh lumi_shadow_fetch_dotslash.py \
+            lumi_shadow_curl.sh
+          # The fetch helper imports the canonical DotSlash modules and reads
+          # the canonical manifests from the workflow commit, so it works
+          # even when the gated SHA predates scripts/codex_package.
+          tar -C "${GITHUB_WORKSPACE}/shadow-tools" \
+            -rf "${stage}/lumi-shadow-tools.tar" scripts/codex_package
           sha256sum "${stage}/lumi-shadow-source.tar" "${stage}/lumi-shadow-tools.tar"
 
       - name: Prepare per-run guest work path
@@ -344,7 +380,11 @@ jobs:
               "tar -xf '${GUEST_BASE}/source.tar' -C '${GUEST_BASE}/src' && \
                tar -xf '${GUEST_BASE}/tools.tar' -C '${GUEST_BASE}/tools' && \
                test -f '${GUEST_BASE}/src/.github/scripts/install-musl-build-tools.sh' && \
-               test -f '${GUEST_BASE}/tools/lumi_shadow_build_linux.sh'"
+               test -f '${GUEST_BASE}/tools/lumi_shadow_build_linux.sh' && \
+               test -f '${GUEST_BASE}/tools/lumi_shadow_swap.sh' && \
+               test -f '${GUEST_BASE}/tools/lumi_shadow_fetch_dotslash.py' && \
+               test -f '${GUEST_BASE}/tools/lumi_shadow_curl.sh' && \
+               test -f '${GUEST_BASE}/tools/scripts/codex_package/dotslash.py'"
 
       - name: Build and validate aarch64-unknown-linux-musl in the VM
         shell: bash
