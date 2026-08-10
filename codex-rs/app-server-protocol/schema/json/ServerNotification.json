@@ -3903,11 +3903,22 @@
       "type": "object"
     },
     "ThreadActiveFlag": {
-      "enum": [
-        "waitingOnApproval",
-        "waitingOnUserInput"
-      ],
-      "type": "string"
+      "oneOf": [
+        {
+          "enum": [
+            "waitingOnApproval",
+            "waitingOnUserInput"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The most recent turn completed but at least one live background terminal remains; the thread stays active and is waiting for those terminals to exit.",
+          "enum": [
+            "waitingOnBackgroundTerminal"
+          ],
+          "type": "string"
+        }
+      ]
     },
     "ThreadArchivedNotification": {
       "properties": {
