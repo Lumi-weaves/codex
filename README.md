@@ -107,7 +107,9 @@ canary; an incomplete release fails closed. The earlier Lumi
 canary manager actions (doctor, activate, rollback, uninstall) were removed
 with the manager; see the
 [installer documentation](./scripts/install/LUMI_INSTALL.md) for the full
-flow, layout, and safety model.
+flow, layout, and safety model, and
+[distribution design](./docs/lumi-distribution.md) for the adopted upstream
+contract, fork boundary, release graph, and first-tag acceptance gate.
 The TUI can also cooperate with an explicitly user-started official app-server
 from the same upstream `MAJOR.MINOR.PATCH` release; version mismatch or missing
 identity fails before thread/session traffic. This is not Desktop discovery,

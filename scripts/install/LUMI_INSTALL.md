@@ -1,5 +1,8 @@
 # Lumi Codex canonical installer (fork)
 
+For the publication graph, upstream adoption boundary, and first-tag gate, see
+[the Lumi distribution design](../../docs/lumi-distribution.md).
+
 `scripts/install/install.sh` (published as `install.sh`) and
 `scripts/install/install.ps1` install Lumi Codex package releases from the
 **Lumi-weaves/codex** GitHub Releases. They are the OpenAI canonical
