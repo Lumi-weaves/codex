@@ -1,0 +1,9 @@
+# actionlint configuration for the Lumi release shadow worker. Owned
+# exclusively by .github/workflows/lumi-release-shadow-worker.yml.
+#
+# The self-hosted job label is dynamic per run
+# (lumi-shadow-arm64-${{ github.run_id }}-${{ github.run_attempt }}) and is
+# provisioned by an external trusted controller as JIT runner config after the
+# hosted gate authorizes the run. There is deliberately no fixed reusable
+# label, so no static label list is declared here; actionlint accepts the
+# expression in runs-on without a label list.

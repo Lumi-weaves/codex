@@ -1,0 +1,407 @@
+# Lumi Codex release shadow worker (manual-only, non-publishing).
+#
+# Builds two ARM targets from an exact gated commit:
+#   aarch64-apple-darwin        natively on a dedicated Apple Silicon Mac mini
+#   aarch64-unknown-linux-musl  inside the persistent Lima VM
+#                               lumi-codex-arm-builder (VZ/aarch64/6 CPU/8GiB/
+#                               96GiB/plain/no mounts)
+# The VM is shared infrastructure: this workflow validates its exact semantics
+# from `limactl list --format json`, uses a per-run guest work path, and never
+# creates, deletes, or modifies the VM.
+#
+# workflow_dispatch is allowed only from main: the gate rejects any other ref
+# and requires the workflow commit to equal current origin/main. The source
+# input must be an exact Lumi canary tag (rust-vX.Y.Z-lumi.N) or 40-hex SHA
+# that is an ancestor of origin/main; tag versions must equal the workspace
+# version in codex-rs/Cargo.toml at the resolved commit.
+#
+# The JIT runner is launched under ~/.local/bin/myproxy env. Host steps use
+# that proxy (verified active by preflight; values never printed). The guest
+# receives only the fixed proxy variables
+# HTTP_PROXY/HTTPS_PROXY/http_proxy/https_proxy=http://192.168.5.2:7890 via
+# `limactl shell --preserve-env` with LIMA_SHELLENV_BLOCK="*" and
+# LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy; ambient
+# GitHub/runner env never crosses into the VM. `limactl copy` moves only the
+# exact gated git archive in and the package archive + SHA256SUMS out.
+#
+# The self-hosted label is derived deterministically per run:
+#   lumi-shadow-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+# An external trusted controller inspects the authorized run (after the hosted
+# gate) and generates JIT runner config with exactly that label, so each run
+# uses a fresh, non-reusable label. This narrows the public-repo race window;
+# routing is not authorization. Protection comes from the hosted main-only
+# gate, exact-commit checkout, contents:read token, and the isolated VM
+# contract.
+#
+# Nothing is published or signed; uploads are distinctly named lumi-shadow-*
+# artifacts that no canonical release job consumes.
+
+name: lumi-release-shadow-worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: >-
+          Lumi canary tag (rust-vX.Y.Z-lumi.N) or exact 40-hex commit SHA
+          that is an ancestor of origin/main.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One repository-scoped shadow runner exists; serialize manual runs.
+  group: ${{ github.workflow }}-shadow-worker
+  cancel-in-progress: false
+
+env:
+  # Immutable public upstream input, same as the canonical lumi-release flow.
+  CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
+
+jobs:
+  gate:
+    name: Resolve source to exact commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Checkout repository history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full commit graph without blobs: tag/SHA resolution, ancestry, and
+          # Cargo.toml reads at any commit work without downloading contents.
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Require dispatch from current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == "branch" && "${GITHUB_REF_NAME}" == "main" ]] \
+            || { echo "workflow_dispatch is only allowed from main"; exit 1; }
+          main_sha="$(git rev-parse --verify --quiet origin/main)"
+          [[ -n "${main_sha}" && "$(git rev-parse HEAD)" == "${main_sha}" ]] \
+            || { echo "workflow commit is not current origin/main"; exit 1; }
+          echo "Workflow definition is current origin/main (${main_sha})"
+
+      - name: Resolve source to exact commit SHA
+        id: resolve
+        shell: bash
+        env:
+          SOURCE: ${{ github.event.inputs.source }}
+        run: |
+          set -euo pipefail
+          echo "::group::Source gate"
+          sha="$(python3 scripts/release/lumi_shadow_gate.py \
+            --repo "${GITHUB_WORKSPACE}" \
+            --source "${SOURCE}" \
+            --main-head "$(git rev-parse HEAD)")"
+          echo "Resolved ${SOURCE} -> ${sha}"
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "::endgroup::"
+
+  build-shadow:
+    name: Build and validate shadow packages (aarch64)
+    needs: gate
+    runs-on: lumi-shadow-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - name: Checkout exact gated commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+
+      - name: Checkout shadow worker helpers (workflow commit)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # The gated commit may predate this workflow, so its tree lacks the
+          # shadow helpers; take them from the commit the workflow ran from.
+          ref: ${{ github.sha }}
+          path: shadow-tools
+          persist-credentials: false
+
+      - name: Preflight runner, proxy, and persistent Lima VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Preflight"
+          [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]] \
+            || { echo "shadow runner must be Apple Silicon macOS"; exit 1; }
+          for tool in git python3 xcode-select limactl; do
+            command -v "${tool}" >/dev/null 2>&1 || { echo "missing tool: ${tool}"; exit 1; }
+          done
+          limactl copy --help >/dev/null 2>&1 \
+            || { echo "limactl too old: 'limactl copy' is required (brew upgrade lima)"; exit 1; }
+
+          # Runner proxy (myproxy env): must be present and reachable; values
+          # are never printed. Normalize all proxy vars so host curl/cargo use
+          # the runner proxy for every scheme instead of silently going direct.
+          proxy_value="${http_proxy:-${HTTP_PROXY:-${https_proxy:-${HTTPS_PROXY:-}}}}"
+          [[ -n "${proxy_value}" ]] \
+            || { echo "runner proxy env is unset; launch the JIT runner under ~/.local/bin/myproxy env"; exit 1; }
+          curl -fsS -o /dev/null --max-time 20 --proxy "${proxy_value}" https://github.com \
+            || { echo "runner proxy is set but not reachable; refusing to run direct"; exit 1; }
+          printf 'HTTP_PROXY=%s\nHTTPS_PROXY=%s\nhttp_proxy=%s\nhttps_proxy=%s\n' \
+            "${proxy_value}" "${proxy_value}" "${proxy_value}" "${proxy_value}" \
+            >> "${GITHUB_ENV}"
+
+          # Persistent VM: require the exact controller semantics; never
+          # create, delete, or modify it. Lima 2.2.0 emits a JSON dict.
+          limactl list --format json > "${RUNNER_TEMP}/lima-instances.json"
+          python3 - "${RUNNER_TEMP}/lima-instances.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          instances = data if isinstance(data, list) else [data]
+          vm = next(
+              (i for i in instances if i.get("name") == "lumi-codex-arm-builder"),
+              None,
+          )
+          if vm is None:
+              raise SystemExit("lumi-codex-arm-builder is not in `limactl list`")
+          # Lima 2.2.0 keeps mounts/security semantics under config; top-level
+          # "mounts" is absent even when safe, so only config is authoritative.
+          cfg = vm.get("config")
+          if not isinstance(cfg, dict):
+              raise SystemExit(
+                  "lumi-codex-arm-builder config is missing or unparseable"
+              )
+          mounts = cfg.get("mounts") in (None, [])
+          containerd = cfg.get("containerd") or {}
+          rosetta = (cfg.get("vmOpts") or {}).get("vz", {}).get("rosetta") or {}
+          ssh_cfg = cfg.get("ssh") or {}
+          checks = {
+              "status Running": vm.get("status") == "Running",
+              "arch aarch64": vm.get("arch") == "aarch64",
+              "vmType vz": vm.get("vmType") == "vz",
+              "cpus >= 6": (vm.get("cpus") or 0) >= 6,
+              "memory >= 8GiB": (vm.get("memory") or 0) >= 8 * 1024**3,
+              "disk >= 96GiB": (vm.get("disk") or 0) >= 96 * 1024**3,
+              "config mounts none": mounts,
+              "plain": cfg.get("plain") is True,
+              "containerd system off": containerd.get("system") is not True,
+              "containerd user off": containerd.get("user") is not True,
+              "rosetta off": rosetta.get("enabled") is not True,
+              "ssh agent not forwarded": ssh_cfg.get("forwardAgent") is not True,
+              "lima 2.2.x": str(vm.get("limaVersion", "")).startswith("2.2"),
+          }
+          failed = [name for name, ok in checks.items() if not ok]
+          if failed:
+              raise SystemExit(
+                  "lumi-codex-arm-builder failed: " + ", ".join(failed)
+              )
+          print(
+              f"VM ok: {vm['name']} {vm['status']} {vm['arch']} "
+              f"{vm['vmType']} cpus={vm['cpus']}"
+          )
+          PY
+
+          # Read-only guest probes through the fixed proxy contract.
+          [[ "$(limactl shell lumi-codex-arm-builder sh -c 'uname -m')" == "aarch64" ]] \
+            || { echo "guest is not aarch64"; exit 1; }
+          env \
+            LIMA_SHELLENV_BLOCK='*' \
+            LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy \
+            HTTP_PROXY=http://192.168.5.2:7890 \
+            HTTPS_PROXY=http://192.168.5.2:7890 \
+            http_proxy=http://192.168.5.2:7890 \
+            https_proxy=http://192.168.5.2:7890 \
+            limactl shell --preserve-env lumi-codex-arm-builder sh -c \
+              'curl -fsS -o /dev/null --max-time 20 https://github.com' \
+            || { echo "guest proxy http://192.168.5.2:7890 is not reachable; start myproxy/mihomo (no silent direct)"; exit 1; }
+          echo "::endgroup::"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: aarch64-apple-darwin
+
+      - name: Download packaged zsh manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            -o "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Build aarch64-apple-darwin canary binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target aarch64-apple-darwin --release --timings \
+            --bin codex --bin codex-code-mode-host
+
+      - name: Build Codex package archive (aarch64-apple-darwin)
+        shell: bash
+        env:
+          TARGET: aarch64-apple-darwin
+          BUNDLE: primary
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "$TARGET" \
+            --bundle "$BUNDLE" \
+            --entrypoint-dir "target/${TARGET}/release" \
+            --archive-dir "dist/${TARGET}" \
+            --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Validate canonical package (aarch64-apple-darwin)
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml \
+            | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          python3 "${GITHUB_WORKSPACE}/shadow-tools/scripts/release/lumi_shadow_validate_package.py" \
+            --archive "dist/aarch64-apple-darwin/codex-package-aarch64-apple-darwin.tar.gz" \
+            --target aarch64-apple-darwin \
+            --expected-version "${version}" \
+            --run
+
+      - name: Upload shadow artifact (aarch64-apple-darwin)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          # Distinctly named shadow artifact; canonical release jobs only
+          # download codex-package-*.
+          name: lumi-shadow-codex-package-aarch64-apple-darwin
+          path: codex-rs/dist/aarch64-apple-darwin/codex-package-aarch64-apple-darwin.tar.gz
+          if-no-files-found: error
+
+      - name: Stage exact gated source and shadow tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${RUNNER_TEMP}/lumi-shadow-linux"
+          mkdir -p "${stage}"
+          git -C "${GITHUB_WORKSPACE}" archive --format=tar \
+            -o "${stage}/lumi-shadow-source.tar" "${{ needs.gate.outputs.sha }}"
+          # The gated tree may lack scripts/release (older commits); ship the
+          # shadow helpers from the workflow commit.
+          tar -C "${GITHUB_WORKSPACE}/shadow-tools/scripts/release" \
+            -cf "${stage}/lumi-shadow-tools.tar" \
+            lumi_shadow_build_linux.sh lumi_shadow_env.sh \
+            lumi_shadow_install_rust.sh lumi_shadow_validate_package.py
+          sha256sum "${stage}/lumi-shadow-source.tar" "${stage}/lumi-shadow-tools.tar"
+
+      - name: Prepare per-run guest work path
+        shell: bash
+        run: |
+          set -euo pipefail
+          guest_base="/tmp/lumi-shadow/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "GUEST_BASE=${guest_base}" >> "${GITHUB_ENV}"
+          env \
+            LIMA_SHELLENV_BLOCK='*' \
+            LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy \
+            HTTP_PROXY=http://192.168.5.2:7890 \
+            HTTPS_PROXY=http://192.168.5.2:7890 \
+            http_proxy=http://192.168.5.2:7890 \
+            https_proxy=http://192.168.5.2:7890 \
+            limactl shell --preserve-env lumi-codex-arm-builder sh -c \
+              "rm -rf '${guest_base}' && mkdir -p '${guest_base}/src' '${guest_base}/tools' '${guest_base}/work' '${guest_base}/out'"
+
+      - name: Copy gated source and shadow tools into the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          limactl copy \
+            "${RUNNER_TEMP}/lumi-shadow-linux/lumi-shadow-source.tar" \
+            "lumi-codex-arm-builder:${GUEST_BASE}/source.tar"
+          limactl copy \
+            "${RUNNER_TEMP}/lumi-shadow-linux/lumi-shadow-tools.tar" \
+            "lumi-codex-arm-builder:${GUEST_BASE}/tools.tar"
+
+      - name: Extract source and tools in the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            LIMA_SHELLENV_BLOCK='*' \
+            LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy \
+            HTTP_PROXY=http://192.168.5.2:7890 \
+            HTTPS_PROXY=http://192.168.5.2:7890 \
+            http_proxy=http://192.168.5.2:7890 \
+            https_proxy=http://192.168.5.2:7890 \
+            limactl shell --preserve-env lumi-codex-arm-builder sh -c \
+              "tar -xf '${GUEST_BASE}/source.tar' -C '${GUEST_BASE}/src' && \
+               tar -xf '${GUEST_BASE}/tools.tar' -C '${GUEST_BASE}/tools' && \
+               test -f '${GUEST_BASE}/src/.github/scripts/install-musl-build-tools.sh' && \
+               test -f '${GUEST_BASE}/tools/lumi_shadow_build_linux.sh'"
+
+      - name: Build and validate aarch64-unknown-linux-musl in the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            LIMA_SHELLENV_BLOCK='*' \
+            LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy \
+            HTTP_PROXY=http://192.168.5.2:7890 \
+            HTTPS_PROXY=http://192.168.5.2:7890 \
+            http_proxy=http://192.168.5.2:7890 \
+            https_proxy=http://192.168.5.2:7890 \
+            limactl shell --preserve-env lumi-codex-arm-builder \
+              bash "${GUEST_BASE}/tools/lumi_shadow_build_linux.sh" "${GUEST_BASE}"
+
+      - name: Copy package archive out of the VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          out_dir="${RUNNER_TEMP}/lumi-shadow-linux/out"
+          mkdir -p "${out_dir}"
+          limactl copy \
+            "lumi-codex-arm-builder:${GUEST_BASE}/out/codex-package-aarch64-unknown-linux-musl.tar.gz" \
+            "${out_dir}/codex-package-aarch64-unknown-linux-musl.tar.gz"
+          limactl copy \
+            "lumi-codex-arm-builder:${GUEST_BASE}/out/SHA256SUMS" \
+            "${out_dir}/SHA256SUMS"
+
+      - name: Verify transferred archive checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd "${RUNNER_TEMP}/lumi-shadow-linux/out" && sha256sum -c SHA256SUMS)
+
+      - name: Upload shadow artifact (aarch64-unknown-linux-musl)
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          # Distinctly named shadow artifact; canonical release jobs only
+          # download codex-package-*.
+          name: lumi-shadow-codex-package-aarch64-unknown-linux-musl
+          path: ${{ runner.temp }}/lumi-shadow-linux/out/codex-package-aarch64-unknown-linux-musl.tar.gz
+          if-no-files-found: error
+
+      - name: Clean up per-run guest work path
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the per-run guest work path is touched; the persistent VM is
+          # never deleted or modified.
+          guest_base="/tmp/lumi-shadow/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          env \
+            LIMA_SHELLENV_BLOCK='*' \
+            LIMA_SHELLENV_ALLOW=HTTP_PROXY,HTTPS_PROXY,http_proxy,https_proxy \
+            HTTP_PROXY=http://192.168.5.2:7890 \
+            HTTPS_PROXY=http://192.168.5.2:7890 \
+            http_proxy=http://192.168.5.2:7890 \
+            https_proxy=http://192.168.5.2:7890 \
+            limactl shell --preserve-env lumi-codex-arm-builder sh -c \
+              "rm -rf '${guest_base}'" || true
