@@ -5914,6 +5914,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
+        awaited_terminals: super::awaited_terminals::AwaitedTerminals::new(),
         internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -6060,6 +6061,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     initial_history: InitialHistory,
     session_source: SessionSource,
     agent_control: AgentControl,
+    multi_agent_version: Option<MultiAgentVersion>,
 ) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let mut config = build_test_config(codex_home.path()).await;
@@ -6169,7 +6171,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         codex_rollout_trace::ThreadTraceContext::disabled(),
         /*attestation_provider*/ None,
         /*external_time_provider*/ None,
-        Some(config.multi_agent_version_from_features()),
+        multi_agent_version.or(Some(config.multi_agent_version_from_features())),
         GitEnrichmentPolicy::Fresh,
         codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
     )
@@ -6189,6 +6191,7 @@ async fn resumed_root_session_uses_thread_id_as_session_id() {
         }),
         SessionSource::Exec,
         AgentControl::default(),
+        None,
     )
     .await
     .expect("resume should succeed");
@@ -6232,6 +6235,7 @@ async fn resumed_subagent_session_restores_persisted_session_id() {
         }),
         session_source,
         AgentControl::default(),
+        None,
     )
     .await
     .expect("resume should succeed");
@@ -7975,6 +7979,537 @@ async fn submission_loop_admits_internal_event_on_the_shared_fifo() {
     .expect("the completion must be consumed by the wake's safe boundary");
 }
 
+/// A `TurnComplete` stays a real turn terminal event with final text, but
+/// while awaited terminals remain the session status stays non-final
+/// (`Running`); resolving the last terminal with no continuation restores the
+/// held-back `Completed` with the retained final message.
+#[tokio::test]
+async fn turn_complete_with_awaited_terminals_stays_running_then_cleanup_restores_completed() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+
+    session.register_awaited_terminal(4242).await;
+    assert!(session.has_awaited_terminals().await);
+    assert_eq!(session.awaited_terminal_count().await, 1);
+    assert_eq!(session.awaited_terminal_ids().await, vec![4242]);
+
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("final words".to_string()),
+        )
+        .await;
+
+    let complete =
+        wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    // The TurnComplete is still emitted with its final text visible.
+    let EventMsg::TurnComplete(complete) = complete else {
+        unreachable!();
+    };
+    assert_eq!(complete.last_agent_message.as_deref(), Some("final words"));
+    // ... but the session status stays non-final while the terminal is
+    // awaited.
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+    assert!(session.has_awaited_terminals().await);
+
+    // Synchronous observation/disposal with no continuation restores the
+    // held-back final status instead of leaving the session permanently
+    // non-final.
+    session.resolve_awaited_terminal(4242).await;
+    assert!(!session.has_awaited_terminals().await);
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("final words".to_string()))
+    );
+}
+
+/// With no awaited terminals a `TurnComplete` is a normal final completion
+/// (feature-disabled behavior is identical: the registry is empty).
+#[tokio::test]
+async fn turn_complete_without_awaited_terminals_is_normal_completed() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("done".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("done".to_string()))
+    );
+    assert!(!session.has_awaited_terminals().await);
+}
+
+/// Multiple awaited terminals: resolving one does not finalize the session;
+/// only the last resolution (with no continuation) restores the held-back
+/// final status.
+#[tokio::test]
+async fn multiple_awaited_terminals_require_all_resolutions() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+    session.register_awaited_terminal(41).await;
+    session.register_awaited_terminal(42).await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("still waiting".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+
+    session.resolve_awaited_terminal(41).await;
+    assert_eq!(session.awaited_terminal_count().await, 1);
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+
+    session.resolve_awaited_terminal(42).await;
+    assert!(!session.has_awaited_terminals().await);
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("still waiting".to_string()))
+    );
+}
+
+/// Batch cleanup (`clear`) with no continuation restores the held-back final
+/// status instead of leaving the session permanently non-final.
+#[tokio::test]
+async fn clear_awaited_terminals_without_continuation_restores_completed() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+    session.register_awaited_terminal(41).await;
+    session.register_awaited_terminal(42).await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("cleaned up".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+
+    session.clear_awaited_terminals().await;
+    assert!(!session.has_awaited_terminals().await);
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("cleaned up".to_string()))
+    );
+}
+
+/// Completion ingress order (queue-before-clear): the model-visible fragment
+/// is queued into the shared FIFO before the awaited token is resolved, and a
+/// fresh continuation turn is scheduled rather than restoring a final status.
+/// A busy turn keeps the queued state stable and observable; aborting it then
+/// wakes the continuation that consumes the fragment.
+#[tokio::test]
+async fn completion_ingress_queues_fragment_before_resolving_token() {
+    let (mut session, _turn_context, mut rx_event) = make_session_and_context_with_rx().await;
+    let (tx_ingress, rx_ingress) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = tx_ingress.downgrade();
+    let loop_session = Arc::clone(&session);
+    let loop_config = session.get_config().await;
+    let loop_handle = tokio::spawn(async move {
+        submission_loop(loop_session, loop_config, rx_ingress).await;
+    });
+    let _loop_guard = LoopAbortOnDrop(loop_handle);
+
+    // A busy turn owns the awaited terminal.
+    session.register_awaited_terminal(4247).await;
+    let tc = session.new_default_turn().await;
+    let abort_cleanup_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    session
+        .start_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            BlockingTestTask {
+                abort_cleanup_done: Arc::clone(&abort_cleanup_done),
+            },
+            crate::tasks::MailboxParentProvenance::Ignore,
+        )
+        .await;
+    wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    assert!(session.has_awaited_terminals().await);
+
+    // The completion is admitted queue-first, then the token is resolved.
+    tx_ingress
+        .send(super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::UnifiedExecCompletion(
+                crate::context::UnifiedExecCompletionEvent::new(
+                    4247,
+                    "sleep 10",
+                    Some(0),
+                    None,
+                    std::time::Duration::from_secs(2),
+                    1234,
+                    0,
+                    "done",
+                ),
+            ),
+        ))
+        .await
+        .expect("internal completion");
+
+    // Queue-before-clear: the fragment is pending in the shared FIFO while
+    // the awaited token is resolved. The busy turn cannot drain the fragment,
+    // so this state is stable and observable.
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            if session.input_queue.has_pending_session_inputs().await
+                && !session.has_awaited_terminals().await
+            {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the completion must be queued and the awaited token resolved");
+    assert!(!session.has_awaited_terminals().await);
+    assert_eq!(session.awaited_terminal_count().await, 0);
+    // The held-back final status is not restored while the fragment is
+    // pending: the session stays non-final and waits for the continuation.
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+
+    // The busy turn is interrupted; the queued completion wakes a fresh
+    // continuation turn that consumes the fragment at its safe boundary.
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    let started = wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    let EventMsg::TurnStarted(started) = started else {
+        unreachable!();
+    };
+    assert_ne!(
+        started.turn_id, tc.sub_id,
+        "the completion must wake a fresh continuation turn"
+    );
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            if !session.input_queue.has_pending_session_inputs().await {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fresh continuation turn must consume the queued completion");
+}
+
+/// A later `TurnComplete` with zero awaited terminals becomes a normal
+/// `Completed` and supersedes the retained waiting message: queue-before-clear
+/// means the resolve step never restores the old final status when a
+/// continuation is pending.
+#[tokio::test]
+async fn later_turn_complete_with_zero_awaited_terminals_becomes_completed() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+    session.register_awaited_terminal(4249).await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("held back".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+    assert!(session.has_awaited_terminals().await);
+
+    // Mirror the ingress order: queue the model-visible fragment first, then
+    // resolve the token. The pending fragment is the continuation, so the
+    // restore path must not fire.
+    session
+        .input_queue
+        .enqueue_pending_session_input(
+            TurnInput::ResponseItem(ContextualUserFragment::into(
+                crate::context::UnifiedExecCompletionEvent::new(
+                    4249,
+                    "sleep 10",
+                    Some(0),
+                    None,
+                    std::time::Duration::from_secs(2),
+                    1234,
+                    0,
+                    "done",
+                ),
+            )),
+            /*trigger_turn*/ true,
+            /*parent_turn_id*/ None,
+        )
+        .await;
+    session.resolve_awaited_terminal(4249).await;
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+    assert!(!session.has_awaited_terminals().await);
+    assert!(session.input_queue.has_pending_session_inputs().await);
+
+    // The continuation turn finalizes with zero awaited terminals: normal
+    // Completed with the new message, superseding the held-back one.
+    let continuation = session.new_default_turn().await;
+    session
+        .spawn_task(
+            Arc::clone(&continuation),
+            Vec::new(),
+            CompletingTaskWithMessage("final answer".to_string()),
+        )
+        .await;
+    // The continuation turn consumes the queued fragment at its safe sampling
+    // boundary; drain it here so the turn's finalization sees no pending work
+    // and cannot wake yet another turn.
+    let (items, _parent_turn_id) = session.input_queue.drain_pending_session_inputs().await;
+    assert_eq!(items.len(), 1);
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("final answer".to_string()))
+    );
+}
+
+/// Interrupting a turn with awaited terminals keeps the session-owned
+/// registry intact (abort cleanup only clears turn-local input) and must not
+/// clobber the real `Interrupted` status with a synthetic `Completed` when
+/// the terminal is later resolved without a continuation.
+#[tokio::test]
+async fn interrupt_keeps_awaited_registry_and_preserves_interrupted_status() {
+    let (session, tc, mut rx) = make_session_and_context_with_rx().await;
+    session.register_awaited_terminal(4248).await;
+
+    let abort_cleanup_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    session
+        .start_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            BlockingTestTask {
+                abort_cleanup_done: Arc::clone(&abort_cleanup_done),
+            },
+            crate::tasks::MailboxParentProvenance::Ignore,
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnStarted(_))).await;
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnAborted(_))).await;
+
+    // The awaited registry is session-owned and survives abort cleanup.
+    assert!(session.has_awaited_terminals().await);
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Interrupted
+    ));
+
+    // Resolving the terminal without a continuation must not turn a real
+    // Interrupted status into a synthetic Completed.
+    session.resolve_awaited_terminal(4248).await;
+    assert!(!session.has_awaited_terminals().await);
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Interrupted
+    ));
+}
+
+/// The thread-idle lifecycle must not fire while awaited terminals remain,
+/// and fires once the last terminal is resolved with no continuation.
+#[tokio::test]
+async fn thread_idle_lifecycle_waits_for_awaited_terminals() {
+    struct ThreadIdleRecorder(async_channel::Sender<()>);
+
+    impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config> for ThreadIdleRecorder {
+        fn on_thread_idle<'a>(
+            &'a self,
+            _input: codex_extension_api::ThreadIdleInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.0.send(()).await.expect("idle receiver open");
+            })
+        }
+    }
+
+    let (mut session, tc, mut rx) = make_session_and_context_with_rx().await;
+    let (idle_tx, idle_rx) = async_channel::bounded(1);
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    builder.thread_lifecycle_contributor(Arc::new(ThreadIdleRecorder(idle_tx)));
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .services
+        .extensions = Arc::new(builder.build());
+
+    session.register_awaited_terminal(4250).await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("held back".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(
+        idle_rx.try_recv().is_err(),
+        "the thread must not be reported idle while awaited terminals remain"
+    );
+
+    session.resolve_awaited_terminal(4250).await;
+    tokio::time::timeout(StdDuration::from_secs(5), idle_rx.recv())
+        .await
+        .expect("cleanup with no continuation must emit the thread-idle lifecycle")
+        .expect("idle receiver open");
+}
+
+/// Builds a ThreadManager with a registered parent thread plus a V2 child
+/// session whose `AgentControl` routes parent notifications through the
+/// manager (so submitted ops are captured). Returns the manager, parent
+/// thread id, child session, and child event receiver.
+async fn make_v2_subagent_session_with_manager() -> (
+    tempfile::TempDir,
+    crate::ThreadManager,
+    ThreadId,
+    Arc<Session>,
+    async_channel::Receiver<Event>,
+) {
+    let home = tempfile::tempdir().expect("create temp dir");
+    let config = build_test_config(home.path()).await;
+    let state_db = crate::init_state_db(&config).await;
+    let manager = crate::ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("Test API Key"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(EnvironmentManager::default_for_tests()),
+        state_db,
+    );
+    let new_thread = manager
+        .start_thread(crate::StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start parent thread");
+    let parent_thread_id = new_thread.thread_id;
+    let agent_path = AgentPath::try_from("/root/worker").expect("valid agent path");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(agent_path),
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let (session, rx) = make_session_with_history_source_and_agent_control_and_rx(
+        InitialHistory::New,
+        session_source,
+        manager.agent_control(),
+        Some(MultiAgentVersion::V2),
+    )
+    .await
+    .expect("create child session");
+    (home, manager, parent_thread_id, session, rx)
+}
+
+/// A V2 subagent must not notify its parent as completed while awaited
+/// terminals remain; the later final `TurnComplete` would carry the real
+/// completion. Cleanup resolution with no continuation also stays silent for
+/// the parent (documented limitation: no synthetic completion envelope is
+/// sent rather than expanding the protocol).
+#[tokio::test]
+async fn v2_subagent_suppresses_parent_notification_while_awaited() {
+    let (_home, manager, parent_thread_id, session, mut rx) =
+        make_v2_subagent_session_with_manager().await;
+
+    session.register_awaited_terminal(5252).await;
+    let tc = session.new_default_turn().await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("waiting for terminal".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert!(matches!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Running
+    ));
+    assert!(
+        manager
+            .captured_ops()
+            .iter()
+            .all(|(thread_id, op)| !(*thread_id == parent_thread_id
+                && matches!(op, Op::InterAgentCommunication { .. }))),
+        "parent must not receive a completion while awaited terminals remain"
+    );
+
+    // Cleanup resolution with no continuation finalizes the child locally but
+    // still does not synthesize a parent completion (documented limitation).
+    session.resolve_awaited_terminal(5252).await;
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("waiting for terminal".to_string()))
+    );
+    assert!(
+        manager
+            .captured_ops()
+            .iter()
+            .all(|(thread_id, op)| !(*thread_id == parent_thread_id
+                && matches!(op, Op::InterAgentCommunication { .. }))),
+        "cleanup must not notify the parent"
+    );
+}
+
+/// Control: with zero awaited terminals a V2 subagent's `TurnComplete` is a
+/// normal final completion and notifies its direct parent.
+#[tokio::test]
+async fn v2_subagent_notifies_parent_on_normal_completion() {
+    let (_home, manager, parent_thread_id, session, mut rx) =
+        make_v2_subagent_session_with_manager().await;
+
+    let tc = session.new_default_turn().await;
+    session
+        .spawn_task(
+            Arc::clone(&tc),
+            Vec::new(),
+            CompletingTaskWithMessage("task done".to_string()),
+        )
+        .await;
+    wait_for_session_event(&mut rx, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_eq!(
+        session.agent_status.borrow().clone(),
+        AgentStatus::Completed(Some("task done".to_string()))
+    );
+    assert!(
+        manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == parent_thread_id
+                && matches!(op, Op::InterAgentCommunication { .. })),
+        "a normal final completion must notify the direct parent"
+    );
+}
+
 /// Inverse race: a completion is admitted and a wake turn starts, but an
 /// interrupt lands before sampling. Abort cleanup must not erase the
 /// completion: it stays in the shared FIFO and restarts exactly once.
@@ -8599,6 +9134,7 @@ where
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
+        awaited_terminals: super::awaited_terminals::AwaitedTerminals::new(),
         internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -10310,6 +10846,31 @@ impl SessionTask for CompletingTask {
         _cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         Ok(None)
+    }
+}
+
+/// A task that completes normally with a fixed final agent message, so tests
+/// can observe `TurnComplete`/`AgentStatus::Completed` payloads.
+#[derive(Clone)]
+struct CompletingTaskWithMessage(String);
+
+impl SessionTask for CompletingTaskWithMessage {
+    fn kind(&self) -> TaskKind {
+        TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "session_task.completing_with_message"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        _session: Arc<Session>,
+        _ctx: Arc<TurnContext>,
+        _input: Vec<TurnInput>,
+        _cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        Ok(Some(self.0.clone()))
     }
 }
 

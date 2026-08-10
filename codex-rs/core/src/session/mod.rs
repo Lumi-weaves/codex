@@ -199,6 +199,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod awaited_terminals;
 mod code_mode_warning;
 mod config_lock;
 pub(crate) mod context_window;
@@ -1911,6 +1912,17 @@ impl Session {
             return;
         }
 
+        // A V2 subagent must not report completion to its parent while
+        // awaited terminals remain: the later `TurnComplete` that finalizes
+        // with zero awaited terminals is the real completion and notifies the
+        // parent then. Known limitation (reported rather than expanding the
+        // protocol): if the last awaited terminal is instead resolved by
+        // synchronous observation/disposal with no continuation, the parent
+        // is never notified by this child.
+        if matches!(msg, EventMsg::TurnComplete(_)) && !self.awaited_terminals.is_empty().await {
+            return;
+        }
+
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
@@ -2014,6 +2026,85 @@ impl Session {
         }
     }
 
+    /// Register a live unified-exec terminal id that was yielded to the
+    /// model. While any awaited terminal remains, a `TurnComplete` keeps the
+    /// session status non-final (`Running`) and a V2 subagent does not notify
+    /// its parent as completed.
+    // Integration API for the unified-exec tool-result path; exercised by
+    // session tests today.
+    #[allow(dead_code)]
+    pub(crate) async fn register_awaited_terminal(&self, process_id: i32) {
+        self.awaited_terminals.register(process_id).await;
+    }
+
+    /// Resolve an awaited terminal id after its completion was admitted or it
+    /// was observed/disposed synchronously. Resolving the last awaited id
+    /// with no continuation pending (no active turn, no queued session input)
+    /// restores the held-back `Completed` status so the session never stays
+    /// permanently non-final.
+    pub(crate) async fn resolve_awaited_terminal(&self, process_id: i32) {
+        self.awaited_terminals.resolve(process_id).await;
+        self.maybe_restore_awaited_finality().await;
+        self.emit_thread_idle_lifecycle_if_idle().await;
+    }
+
+    /// Query the currently awaited terminal ids.
+    // Integration API for the unified-exec tool-result path; exercised by
+    // session tests today.
+    #[allow(dead_code)]
+    pub(crate) async fn awaited_terminal_ids(&self) -> Vec<i32> {
+        self.awaited_terminals.ids().await
+    }
+
+    /// Query the number of currently awaited terminal ids.
+    // Integration API for the unified-exec tool-result path; exercised by
+    // session tests today.
+    #[allow(dead_code)]
+    pub(crate) async fn awaited_terminal_count(&self) -> usize {
+        self.awaited_terminals.count().await
+    }
+
+    /// Whether any terminal id is currently awaited.
+    // Integration API for the unified-exec tool-result path; exercised by
+    // session tests today.
+    #[allow(dead_code)]
+    pub(crate) async fn has_awaited_terminals(&self) -> bool {
+        !self.awaited_terminals.is_empty().await
+    }
+
+    /// Clear every awaited terminal id (cleanup/disposal), then restore the
+    /// held-back final status when no continuation is pending.
+    // Integration API for the unified-exec tool-result path; exercised by
+    // session tests today.
+    #[allow(dead_code)]
+    pub(crate) async fn clear_awaited_terminals(&self) {
+        self.awaited_terminals.clear().await;
+        self.maybe_restore_awaited_finality().await;
+        self.emit_thread_idle_lifecycle_if_idle().await;
+    }
+
+    /// Narrowest safe finality bookkeeping: once the awaited set is empty and
+    /// nothing else can move the session (no active turn, no queued session
+    /// input), restore the `Completed` status that was held back while
+    /// awaiting, but only from the forced `Running` state — a real
+    /// `Interrupted`/`Errored` status must not be clobbered by cleanup. The
+    /// caller decides whether the session is now idle (the turn-finalization
+    /// tail emits the thread-idle lifecycle itself; `resolve`/`clear` emit it
+    /// after this returns).
+    pub(crate) async fn maybe_restore_awaited_finality(&self) {
+        if !self.awaited_terminals.is_empty().await
+            || self.active_turn.lock().await.is_some()
+            || self.input_queue.has_pending_session_inputs().await
+        {
+            return;
+        }
+        let waiting_final_message = self.awaited_terminals.take_waiting_final().await;
+        if matches!(self.agent_status.borrow().clone(), AgentStatus::Running) {
+            self.agent_status
+                .send_replace(AgentStatus::Completed(waiting_final_message));
+        }
+    }
+
     async fn maybe_mirror_event_text_to_realtime(&self, msg: &EventMsg) {
         if self.conversation.running_state().await.is_none() {
             return;
@@ -2101,11 +2192,36 @@ impl Session {
     async fn deliver_event_raw(&self, event: Event) {
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
+            let status = self.awaited_terminal_status(&event.msg, status).await;
             self.agent_status.send_replace(status);
         }
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
         }
+    }
+
+    /// Applies awaited-terminal turn-status semantics to a status derived
+    /// from a delivered event.
+    ///
+    /// A `TurnComplete` remains a real turn terminal event with final text
+    /// visible to clients, but while awaited terminal ids remain the session
+    /// status must stay non-final: reuse the existing `Running` status so the
+    /// protocol surface does not grow. The completion's `last_agent_message`
+    /// is retained so a later cleanup with no continuation can restore a
+    /// truthful `Completed`. A `TurnComplete` with zero awaited terminals is
+    /// a normal final completion and supersedes any retained message.
+    async fn awaited_terminal_status(&self, msg: &EventMsg, status: AgentStatus) -> AgentStatus {
+        let EventMsg::TurnComplete(completion) = msg else {
+            return status;
+        };
+        if self.awaited_terminals.is_empty().await {
+            self.awaited_terminals.clear_waiting_final().await;
+            return status;
+        }
+        self.awaited_terminals
+            .note_waiting_final(completion.last_agent_message.clone())
+            .await;
+        AgentStatus::Running
     }
 
     pub(crate) async fn emit_turn_item_started(&self, turn_context: &TurnContext, item: &TurnItem) {
