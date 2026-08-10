@@ -84,11 +84,16 @@ Run the script directly (`sh lumi-install.sh <action>`) or through the
   (digest-checked and `sh -n` checked before install); `$0` is never copied,
   so `curl ... | sh` works.
 - Archive hardening: absolute/`..` members, symlinks, hardlinks, and special
-  entries are rejected before extraction; extraction does not preserve owner
-  or permissions; `codex-package.json` must declare `distribution=lumi`,
-  `variant=codex`, `entrypoint=bin/codex`, the exact version, and the target;
-  required executables must be regular non-symlink files before the installer
-  creates its own top-level `codex` link.
+  entries are rejected before extraction; extraction requires
+  `tar --no-same-owner --no-same-permissions` and fails closed (no plain-tar
+  fallback) if the hardened options are unsupported or fail; required
+  executables must be regular non-symlink files before the installer creates
+  its own top-level `codex` link.
+- `codex-package.json` must be the canonical pretty-printed top-level JSON
+  containing exactly the five fields `distribution=lumi`, `variant=codex`,
+  `entrypoint=bin/codex`, `version=<exact release version>`, and
+  `target=<exact package target>`; values are compared as exact strings, and
+  duplicate, unknown, decoy, or malformed lines reject the package.
 - Lock + staging + validation + atomic `current` switch; failure aborts
   without switching (no non-atomic fallback).
 - A prepared-operation journal is written before switching `current`, so a

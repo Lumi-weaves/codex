@@ -134,7 +134,8 @@ def canonical_package_metadata(version: str, target: str) -> str:
             "entrypoint": "bin/codex",
             "version": version,
             "target": target,
-        }
+        },
+        indent=2,
     ) + "\n"
 
 
@@ -162,6 +163,7 @@ def create_package_release(
     target: str = TARGET,
     incomplete: bool = False,
     metadata_override: dict[str, str] | None = None,
+    metadata_raw: str | None = None,
     symlink_member: str | None = None,
     traversal_member: str | None = None,
     absolute_member: str | None = None,
@@ -178,7 +180,10 @@ def create_package_release(
     if metadata_override:
         metadata.update(metadata_override)
     (package_dir / "codex-package.json").write_text(
-        json.dumps(metadata) + "\n", encoding="utf-8"
+        metadata_raw
+        if metadata_raw is not None
+        else json.dumps(metadata, indent=2) + "\n",
+        encoding="utf-8",
     )
     if incomplete:
         (package_dir / "bin" / "codex").unlink()
@@ -908,6 +913,111 @@ class LumiInstallShTest(unittest.TestCase):
             result, _ = install_release(root, archive, checksum, metadata, manager)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("completeness", result.stderr)
+
+    def test_metadata_version_decoy_cannot_satisfy_exact_match(self) -> None:
+        # The package binary reports the correct version while the metadata
+        # claims a regex-decoy value: under the old grep interpolation,
+        # "0X147Y0-lumi.1" matched the pattern for "0.147.0-lumi.1".  The
+        # strict parser compares exact strings and must reject it.
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(
+                root,
+                version=LUMI_VERSION,
+                metadata_override={"version": "0X147Y0-lumi.1"},
+            )
+            result, _ = install_release(
+                root, archive, checksum, metadata, manager, release=LUMI_VERSION
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("completeness", result.stderr)
+            self.assertFalse((lumi_root(root) / "releases").exists())
+
+    def test_duplicate_and_decoy_metadata_fields_rejected(self) -> None:
+        cases = {
+            "duplicate version field": (
+                '{\n'
+                '  "distribution": "lumi",\n'
+                '  "variant": "codex",\n'
+                '  "entrypoint": "bin/codex",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "target": "{TARGET}"\n'
+                '}\n'
+            ),
+            "decoy unknown field": (
+                '{\n'
+                '  "distribution": "lumi",\n'
+                '  "variant": "codex",\n'
+                '  "entrypoint": "bin/codex",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "target": "{TARGET}",\n'
+                f'  "body": "fake: {{\\"version\\": \\"{LUMI_VERSION}\\"}}"\n'
+                '}\n'
+            ),
+            "decoy nested object": (
+                '{\n'
+                '  "distribution": "lumi",\n'
+                '  "variant": "codex",\n'
+                '  "entrypoint": "bin/codex",\n'
+                f'  "version": "{LUMI_VERSION}",\n'
+                f'  "target": "{TARGET}",\n'
+                '  "fake": {\n'
+                f'    "version": "{LUMI_VERSION}"\n'
+                '  }\n'
+                '}\n'
+            ),
+        }
+        for name, raw in cases.items():
+            with self.subTest(case=name):
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    archive, checksum, metadata, manager = create_package_release(
+                        root, version=LUMI_VERSION, metadata_raw=raw
+                    )
+                    result, _ = install_release(
+                        root, archive, checksum, metadata, manager,
+                        release=LUMI_VERSION,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("completeness", result.stderr)
+                    self.assertFalse((lumi_root(root) / "releases").exists())
+
+    def test_extraction_option_failure_fails_closed_without_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive, checksum, metadata, manager = create_package_release(root)
+            bin_dir = root / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            fake_tar = bin_dir / "tar"
+            fake_tar.write_text(
+                '#!/bin/sh\n'
+                'case "$*" in\n'
+                '  *--no-same-owner*)\n'
+                "    echo \"tar: unrecognized option '--no-same-owner'\" >&2\n"
+                "    exit 2\n"
+                "    ;;\n"
+                'esac\n'
+                'exec /bin/tar "$@"\n',
+                encoding="utf-8",
+            )
+            fake_tar.chmod(0o755)
+
+            result, _ = install_release(root, archive, checksum, metadata, manager)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("hardened tar options failed", result.stderr)
+            self.assertIn("no fallback", result.stderr)
+
+            lr = lumi_root(root)
+            self.assertFalse((lr / "releases").exists())
+            self.assertFalse((lr / "current").exists())
+            self.assertFalse((lr / "receipts").exists())
+            tmp = lr / "tmp"
+            if tmp.exists():
+                self.assertEqual(
+                    [p for p in tmp.iterdir() if p.name.startswith(".staging.")],
+                    [],
+                )
 
     def test_repeat_install_reuses_digest_verified_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
