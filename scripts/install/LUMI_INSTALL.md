@@ -44,10 +44,11 @@ powershell -ExecutionPolicy ByPass -File scripts\install\install.ps1 -Release 0.
 lumi-codex   # runs the installed Lumi Codex CLI (lumi-codex.cmd)
 ```
 
-Each canary publishes the two canonical Windows packages alongside the four
-Unix packages. The PowerShell installer selects the native x86_64 or arm64
-asset, verifies the same checksum manifest, and fails closed if the release is
-incomplete; it never falls back to a legacy package.
+Each canary publishes the two canonical Windows packages alongside the three
+Unix packages (Apple Silicon and the two Linux architectures). The PowerShell
+installer selects the native x86_64 or arm64 asset, verifies the same checksum
+manifest, and fails closed if the release is incomplete; it never falls back
+to a legacy package.
 
 ## Versions and targets
 
@@ -56,11 +57,15 @@ incomplete; it never falls back to a legacy package.
   GitHub's `latest` endpoint excludes prereleases, so canary installs pin the
   exact `x.y.z-lumi.N` version.
 - `--target` / `LUMI_TARGET` overrides platform detection and must be one of
-  the four Unix targets (`x86_64-unknown-linux-musl`,
-  `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`,
-  `aarch64-apple-darwin`) or one of the two Windows targets
+  the three Unix targets (`x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`, `aarch64-apple-darwin`) or one of the two Windows targets
   (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`). Unknown or unsafe
   targets are rejected before any network request.
+
+Lumi does not publish x86_64 (Intel) macOS prebuilt binaries. On an Intel Mac
+the Unix installer fails early with an unsupported-platform message instead of
+downloading anything; build from source there. Intel Macs never fall back to
+the ARM package or Rosetta.
 
 ## Environment
 

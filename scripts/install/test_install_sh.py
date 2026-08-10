@@ -20,7 +20,6 @@ LUMI_VERSION = "0.147.0-lumi.4"
 TARGETS = (
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
-    "x86_64-apple-darwin",
     "aarch64-apple-darwin",
 )
 
@@ -268,11 +267,10 @@ class InstallShTest(unittest.TestCase):
             self.assertNotIn("/codex-npm-", requests[1] if len(requests) > 1 else "")
             self.assertIn("Could not find Codex package", result.stderr)
 
-    def test_four_unix_targets_are_detected_and_installed(self) -> None:
+    def test_three_unix_targets_are_detected_and_installed(self) -> None:
         platforms = (
             ("Linux", "x86_64", "x86_64-unknown-linux-musl", "Linux (x64)"),
             ("Linux", "aarch64", "aarch64-unknown-linux-musl", "Linux (ARM64)"),
-            ("Darwin", "x86_64", "x86_64-apple-darwin", "macOS (Intel)"),
             ("Darwin", "arm64", "aarch64-apple-darwin", "macOS (Apple Silicon)"),
         )
         for os_name, arch, target, label in platforms:
@@ -312,6 +310,23 @@ class InstallShTest(unittest.TestCase):
                             (release_dir / "codex-resources" / "bwrap").is_file()
                         )
 
+    def test_darwin_x86_64_fails_early_with_unsupported_prebuilt_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            result, requests = run_installer_in(
+                root,
+                VERSION,
+                platform=("Darwin", "x86_64"),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertIn(
+                "Lumi Codex does not publish x86_64 (Intel) macOS binaries",
+                result.stderr,
+            )
+            self.assertIn("build from source instead", result.stderr)
+
     def test_explicit_target_override_is_validated(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -339,6 +354,7 @@ class InstallShTest(unittest.TestCase):
         for target in (
             "../../evil",
             "x86_64-pc-windows-msvc",
+            "x86_64-apple-darwin",
             "codex-package-$(id).tar.gz",
         ):
             with self.subTest(target=target):
@@ -1072,10 +1088,6 @@ def run_installer_in(
         encoding="utf-8",
     )
     fake_uname.chmod(0o755)
-    if os_name == "Darwin" and arch == "x86_64":
-        fake_sysctl = bin_dir / "sysctl"
-        fake_sysctl.write_text("#!/bin/sh\nprintf '0\\n'\n", encoding="utf-8")
-        fake_sysctl.chmod(0o755)
 
     if home is None:
         home = root / "home"

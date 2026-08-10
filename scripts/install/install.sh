@@ -25,7 +25,7 @@ RELEASE="${LUMI_RELEASE:-latest}"
 RELEASES_CONNECT_TIMEOUT=10
 RELEASES_METADATA_TIMEOUT=30
 RELEASES_ASSET_TIMEOUT=300
-TARGET_ALLOWLIST="x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin"
+TARGET_ALLOWLIST="x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin"
 LOCK_STALE_AFTER_SECS=600
 
 BIN_DIR="${LUMI_INSTALL_DIR:-$HOME/.local/bin}"
@@ -873,17 +873,12 @@ if [ -z "$target" ]; then
   esac
 
   if [ "$os" = "darwin" ] && [ "$arch" = "x86_64" ]; then
-    if [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = "1" ]; then
-      arch="aarch64"
-    fi
+    echo "Lumi Codex does not publish x86_64 (Intel) macOS binaries; build from source instead." >&2
+    exit 1
   fi
 
   if [ "$os" = "darwin" ]; then
-    if [ "$arch" = "aarch64" ]; then
-      target="aarch64-apple-darwin"
-    else
-      target="x86_64-apple-darwin"
-    fi
+    target="aarch64-apple-darwin"
   else
     if [ "$arch" = "aarch64" ]; then
       target="aarch64-unknown-linux-musl"
@@ -898,7 +893,6 @@ validate_target
 case "$target" in
   x86_64-unknown-linux-musl) platform_label="Linux (x64)" ;;
   aarch64-unknown-linux-musl) platform_label="Linux (ARM64)" ;;
-  x86_64-apple-darwin) platform_label="macOS (Intel)" ;;
   aarch64-apple-darwin) platform_label="macOS (Apple Silicon)" ;;
 esac
 

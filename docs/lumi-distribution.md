@@ -26,6 +26,11 @@ under the widened watchdog, and its version-pinned install commands are the
 current documented baseline in the README. Later canaries follow the same
 standard-runner route and keep the release mutation point unchanged.
 
+`rust-v0.147.0-lumi.4` was published before Lumi retired the x86_64 (Intel)
+macOS target from the release contract; that historical prerelease may still
+contain the retired `codex-package-x86_64-apple-darwin.tar.gz` asset. It is
+not rewritten or deleted.
+
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Windows Authenticode signing,
 Linux signatures, provenance attestation, or a stable update channel.
@@ -65,10 +70,11 @@ parallel package format:
 - staged immutable release directories, an installation lock, a `current`
   pointer, and exact binary-version verification.
 
-The six release targets match upstream Codex:
+The five Lumi release targets (upstream Codex additionally publishes
+x86_64-apple-darwin; Lumi does not publish Intel macOS prebuilts, so Intel
+Mac users build from source):
 
 - `aarch64-apple-darwin`
-- `x86_64-apple-darwin`
 - `aarch64-unknown-linux-musl`
 - `x86_64-unknown-linux-musl`
 - `aarch64-pc-windows-msvc`
@@ -109,12 +115,12 @@ fork's isolation and inexpensive archive hardening.
 A matching tag push runs `.github/workflows/lumi-release.yml`:
 
 1. validate tag shape and equality with `codex-rs/Cargo.toml`;
-2. build the six-target matrix and create each canonical archive;
+2. build the five-target matrix and create each canonical archive;
 3. fan all builds into one release job;
 4. validate archive member safety, exact package metadata, required resources,
    target architecture, and embedded version;
 5. generate and verify `codex-package_SHA256SUMS`;
-6. stage exactly nine assets: six packages, the checksum manifest,
+6. stage exactly eight assets: five packages, the checksum manifest,
    `install.sh`, and `install.ps1`;
 7. create an immutable GitHub prerelease and refuse to overwrite an existing
    release or its assets.
@@ -128,8 +134,8 @@ installer is not a canary channel.
 Before documenting a Lumi release URL as live or repinning a managed machine,
 the first real tag run must prove:
 
-- all six hosted-runner builds complete;
-- the release contains exactly the intended nine assets;
+- all five hosted-runner builds complete;
+- the release contains exactly the intended eight assets;
 - GitHub API metadata exposes a `sha256:` digest for every asset;
 - a pinned macOS/Linux install and a pinned Windows install complete from the
   published assets;

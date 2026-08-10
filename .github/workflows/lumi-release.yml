@@ -1,5 +1,5 @@
-# Lumi Codex canary release workflow (aarch64/x86_64 Apple Darwin,
-# aarch64/x86_64 Linux musl, and x86_64/aarch64 Windows MSVC), modeled
+# Lumi Codex canary release workflow (aarch64 Apple Darwin,
+# aarch64/x86_64 Linux musl, and aarch64/x86_64 Windows MSVC), modeled
 # directly on the canonical openai/codex rust-release flow: same tag gate,
 # same canonical package builder
 # (.github/scripts/build-codex-package-archive.sh -> scripts/build_codex_package.py),
@@ -110,13 +110,10 @@ jobs:
       matrix:
         include:
           # Apple Darwin: the standard public-repository macos-15 runner is an
-          # arm64 host. aarch64 builds natively; x86_64-apple-darwin is
-          # cross-compiled through the rustup target. Avoid macos-15-xlarge:
-          # larger runners are billable even for public repositories.
+          # arm64 host and aarch64 builds natively. Lumi publishes no x86_64
+          # (Intel) macOS prebuilt. Avoid macos-15-xlarge: larger runners are
+          # billable even for public repositories.
           - target: aarch64-apple-darwin
-            runner: macos-15
-            binaries: "codex codex-code-mode-host"
-          - target: x86_64-apple-darwin
             runner: macos-15
             binaries: "codex codex-code-mode-host"
           # Linux musl: architecture-matched standard hosted runners with the
@@ -284,9 +281,11 @@ jobs:
           # Immutable public upstream input (openai/codex release asset), read
           # only: the fork has no codex-zsh release of its own, and this
           # workflow never publishes to that upstream. The manifest covers the
-          # four Unix canary targets (macos-aarch64, macos-x86_64,
+          # four upstream Unix platforms (macos-aarch64, macos-x86_64,
           # linux-aarch64, linux-x86_64); it has no Windows platforms, so the
-          # canonical builder omits zsh from Windows packages.
+          # canonical builder omits zsh from Windows packages. Lumi consumes
+          # only the macos-aarch64 and two Linux entries: it publishes no
+          # x86_64 (Intel) macOS package.
           curl -fsSL \
             "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
             -o "${RUNNER_TEMP}/codex-zsh"
@@ -316,7 +315,7 @@ jobs:
   release:
     needs: [tag-check, build]
     # Release fan-in: every matrix target must have succeeded. A matrix job
-    # result is only "success" when all six target builds succeeded.
+    # result is only "success" when all five target builds succeeded.
     if: >-
       ${{
         always() &&
@@ -328,7 +327,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       # Only fork-scoped GITHUB_TOKEN write: required to create the release
-      # and upload its nine assets. actions: read is required to download
+      # and upload its eight assets. actions: read is required to download
       # the build artifacts. No secrets, environments, or id-token.
       contents: write
       actions: read
@@ -360,7 +359,6 @@ jobs:
           version="${GITHUB_REF_NAME#rust-v}"
           targets=(
             aarch64-apple-darwin
-            x86_64-apple-darwin
             aarch64-unknown-linux-musl
             x86_64-unknown-linux-musl
             aarch64-pc-windows-msvc
@@ -613,13 +611,12 @@ jobs:
             || { echo "Binary version ${binary_version} ≠ tag version ${version}"; exit 1; }
           echo "✅  Native binary version agrees (${version})"
 
-          # 6. Staging must contain exactly the nine intended release files.
+          # 6. Staging must contain exactly the eight intended release files.
           count="$(find staging -maxdepth 1 -type f | wc -l)"
-          [[ "$count" -eq 9 ]] \
-            || { echo "Expected exactly 9 files in staging, found ${count}"; exit 1; }
+          [[ "$count" -eq 8 ]] \
+            || { echo "Expected exactly 8 files in staging, found ${count}"; exit 1; }
           for name in \
             "codex-package-aarch64-apple-darwin.tar.gz" \
-            "codex-package-x86_64-apple-darwin.tar.gz" \
             "codex-package-aarch64-unknown-linux-musl.tar.gz" \
             "codex-package-x86_64-unknown-linux-musl.tar.gz" \
             "codex-package-aarch64-pc-windows-msvc.tar.gz" \
@@ -632,7 +629,7 @@ jobs:
               || { echo "Missing staged release file: ${name}"; exit 1; }
           done
 
-          echo "✅  Staged exactly nine assets for ${GITHUB_REF_NAME}"
+          echo "✅  Staged exactly eight assets for ${GITHUB_REF_NAME}"
           echo "::endgroup::"
 
       - name: Fail if the release already exists
@@ -657,7 +654,6 @@ jobs:
 
             Assets:
             - `codex-package-aarch64-apple-darwin.tar.gz` — canonical Codex package for aarch64-apple-darwin
-            - `codex-package-x86_64-apple-darwin.tar.gz` — canonical Codex package for x86_64-apple-darwin
             - `codex-package-aarch64-unknown-linux-musl.tar.gz` — canonical Codex package for aarch64-unknown-linux-musl
             - `codex-package-x86_64-unknown-linux-musl.tar.gz` — canonical Codex package for x86_64-unknown-linux-musl
             - `codex-package-aarch64-pc-windows-msvc.tar.gz` — canonical Codex package for aarch64-pc-windows-msvc
@@ -669,7 +665,6 @@ jobs:
             Note: this is a prerelease, so GitHub's `/releases/latest` never resolves to it. All artifacts are unsigned canaries: no macOS code signing/notarization, no Windows Authenticode signing, and no Linux signature claims.
           files: |
             staging/codex-package-aarch64-apple-darwin.tar.gz
-            staging/codex-package-x86_64-apple-darwin.tar.gz
             staging/codex-package-aarch64-unknown-linux-musl.tar.gz
             staging/codex-package-x86_64-unknown-linux-musl.tar.gz
             staging/codex-package-aarch64-pc-windows-msvc.tar.gz

@@ -95,6 +95,10 @@ The commands are intentionally version-pinned because GitHub's `latest`
 endpoint does not select prereleases. Until that tag exists, build from source
 instead; do not treat them as live release URLs.
 
+Lumi publishes no x86_64 (Intel) macOS prebuilt; on an Intel Mac the Unix
+installer fails early with that message, and you should build from source
+instead (the ARM package is never used as a fallback).
+
 ```shell
 lumi-codex
 ```
