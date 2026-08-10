@@ -2347,7 +2347,7 @@ async fn try_run_sampling_request(
                 }
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
-                if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
+                if preempt_for_mailbox_mail && sess.input_queue.has_pending_session_inputs().await {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,

@@ -93,6 +93,11 @@ pub(crate) struct UnifiedExecProcess {
     output: OutputHandles,
     output_drained: Arc<Notify>,
     interaction_lock: Arc<Mutex<()>>,
+    /// Set once the process exit is either observed synchronously (initial
+    /// `exec_command`, a `write_stdin` poll) or explicitly disposed of by the
+    /// manager, or claimed by the background watcher for an automatic
+    /// completion. Guards exactly-once async completion wakeups.
+    completion_observed: AtomicBool,
     state_tx: watch::Sender<ProcessState>,
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
@@ -133,6 +138,7 @@ impl UnifiedExecProcess {
             output,
             output_drained,
             interaction_lock: Arc::new(Mutex::new(())),
+            completion_observed: AtomicBool::new(false),
             state_tx,
             state_rx,
             output_task: None,
@@ -184,6 +190,23 @@ impl UnifiedExecProcess {
 
     pub(super) fn interaction_lock(&self) -> Arc<Mutex<()>> {
         Arc::clone(&self.interaction_lock)
+    }
+
+    /// Claim the async completion for this process.
+    ///
+    /// Returns `true` when this caller is the first to observe the completion
+    /// (so it may enqueue an automatic completion), and `false` when the exit
+    /// was already observed synchronously or claimed by another path. Safe to
+    /// call multiple times; only the first caller wins.
+    pub(super) fn mark_completion_observed(&self) -> bool {
+        !self.completion_observed.swap(true, Ordering::AcqRel)
+    }
+
+    /// Record that this process's exit was observed (or the process was
+    /// explicitly disposed of) outside the background watcher. Subsequent
+    /// `mark_completion_observed` calls return `false`.
+    pub(super) fn record_completion_observed(&self) {
+        self.completion_observed.store(true, Ordering::Release);
     }
 
     pub(super) fn has_exited(&self) -> bool {

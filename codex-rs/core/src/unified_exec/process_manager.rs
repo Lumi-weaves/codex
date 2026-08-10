@@ -57,6 +57,7 @@ use crate::unified_exec::process::OutputHandles;
 use crate::unified_exec::process::SpawnLifecycleHandle;
 use crate::unified_exec::process::UnifiedExecProcess;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_features::Feature;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -467,6 +468,21 @@ impl UnifiedExecProcessManager {
         // Persist live sessions before the initial yield wait so interrupting the
         // turn cannot drop the last Arc and terminate the background process.
         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+        // When completion wake is enabled, hold the process interaction lock
+        // BEFORE the exit watcher is spawned and through the initial
+        // synchronous observation below. The watcher waits on this lock after
+        // process exit, so it can never beat the initial call to the claim:
+        // either the initial call returns the exit to the model (entry
+        // removed, completion marked observed) or it returns Alive (the exit
+        // is genuinely background work). Gated on the feature so disabled
+        // behavior keeps its existing event timing.
+        let _initial_observation_lock = if process_started_alive
+            && context.session.enabled(Feature::UnifiedExecCompletionWake)
+        {
+            Some(process.interaction_lock().lock_owned().await)
+        } else {
+            None
+        };
         let _initial_exec_command_guard = if process_started_alive {
             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
             self.store_process(
@@ -924,7 +940,7 @@ impl UnifiedExecProcessManager {
             call_id: context.call_id.clone(),
             process_id,
             cwd: cwd.clone(),
-            initial_exec_command_active,
+            initial_exec_command_active: Arc::clone(&initial_exec_command_active),
             hook_command,
             tty,
             network_approval,
@@ -1439,6 +1455,10 @@ impl UnifiedExecProcessManager {
         };
 
         for entry in entries {
+            // Mark the completion observed before terminating: session
+            // shutdown and CleanBackgroundTerminals must never emit an
+            // automatic completion for processes they dispose of.
+            entry.process.record_completion_observed();
             unregister_network_approval_for_entry(&entry).await;
             entry.process.terminate();
         }

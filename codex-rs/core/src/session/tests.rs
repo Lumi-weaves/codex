@@ -5583,6 +5583,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
+        dead_internal_tx(),
         InitialHistory::New,
         ForkPersistence::Copied,
         SessionSource::Exec,
@@ -5640,6 +5641,29 @@ pub(crate) async fn build_world_state_from_turn_context(
 }
 
 // todo: use online model info
+/// Test helper: a disconnected ingress weak sender for hand-built sessions.
+fn dead_internal_tx() -> async_channel::WeakSender<super::SessionIngress> {
+    let (tx, rx) = async_channel::bounded(1);
+    drop(rx);
+    tx.downgrade()
+}
+
+async fn wait_for_session_event(
+    rx: &mut async_channel::Receiver<Event>,
+    mut predicate: impl FnMut(&EventMsg) -> bool,
+) -> EventMsg {
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            let event = rx.recv().await.expect("session event stream");
+            if predicate(&event.msg) {
+                return event.msg;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for session event")
+}
+
 pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let (tx_event, _rx_event) = async_channel::unbounded();
     let codex_home = tempfile::tempdir().expect("create temp dir");
@@ -5890,6 +5914,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
+        internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
@@ -5918,7 +5943,7 @@ async fn load_latest_config_for_session(session: &Session) -> Config {
         .expect("load latest config for session")
 }
 
-async fn make_session_with_config_and_rx(
+pub(crate) async fn make_session_with_config_and_rx(
     mutator: impl FnOnce(&mut Config),
 ) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
     let codex_home = tempfile::tempdir().expect("create temp dir");
@@ -6000,6 +6025,7 @@ async fn make_session_with_config_and_rx(
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
+        dead_internal_tx(),
         InitialHistory::New,
         ForkPersistence::Copied,
         SessionSource::Exec,
@@ -6114,6 +6140,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
+        dead_internal_tx(),
         initial_history,
         ForkPersistence::Copied,
         session_source,
@@ -6877,6 +6904,9 @@ async fn submit_with_id_captures_current_span_trace_context() {
     .await;
 
     let submitted = rx_sub.recv().await.expect("submission");
+    let super::SessionIngress::Submission(submitted) = submitted else {
+        panic!("expected an external submission");
+    };
     assert_eq!(submitted.trace, Some(expected_trace));
 }
 
@@ -7616,13 +7646,466 @@ async fn submission_loop_channel_close_aborts_active_turn_before_thread_stop_lif
     );
 }
 
+/// A task that stays active until cancelled, recording when its abort cleanup
+/// ran, so tests can observe abort completion ordering.
+struct BlockingTestTask {
+    abort_cleanup_done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::tasks::SessionTask for BlockingTestTask {
+    fn kind(&self) -> crate::state::TaskKind {
+        crate::state::TaskKind::Regular
+    }
+
+    fn span_name(&self) -> &'static str {
+        "blocking-test-task"
+    }
+
+    async fn run(
+        self: Arc<Self>,
+        sess: Arc<Session>,
+        ctx: Arc<super::turn_context::TurnContext>,
+        _input: Vec<TurnInput>,
+        cancellation_token: tokio_util::sync::CancellationToken,
+    ) -> crate::tasks::SessionTaskResult {
+        // Mirror RegularTask: emit TurnStarted inline so lifecycle ordering is
+        // observable in tests.
+        let event = EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+            turn_id: ctx.sub_id.clone(),
+            trace_id: ctx.trace_id.clone(),
+            started_at: ctx.turn_timing_state.started_at_unix_secs().await,
+            model_context_window: ctx.model_context_window(),
+            collaboration_mode_kind: ctx.mode,
+        });
+        sess.send_event(ctx.as_ref(), event).await;
+        cancellation_token.cancelled().await;
+        Err(codex_protocol::error::CodexErr::TurnAborted)
+    }
+
+    fn abort(
+        &self,
+        _session: Arc<Session>,
+        _ctx: Arc<super::turn_context::TurnContext>,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        self.abort_cleanup_done
+            .store(true, std::sync::atomic::Ordering::Release);
+        async {}
+    }
+}
+
+/// A completion admitted concurrently with an interrupt must not start
+/// inference until abort cleanup completes, and must not be lost.
+#[tokio::test]
+async fn internal_completion_is_serialized_with_interrupt_and_survives_abort() {
+    let (mut session, _turn_context, mut rx_event) = make_session_and_context_with_rx().await;
+    let (tx_ingress, rx_ingress) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = tx_ingress.downgrade();
+    let loop_session = Arc::clone(&session);
+    let loop_config = session.get_config().await;
+    let loop_handle = tokio::spawn(async move {
+        submission_loop(loop_session, loop_config, rx_ingress).await;
+    });
+    let _loop_guard = LoopAbortOnDrop(loop_handle);
+
+    // A busy regular turn that stays active until aborted.
+    let abort_cleanup_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let turn_context = session.new_default_turn().await;
+    session
+        .start_task(
+            turn_context,
+            Vec::new(),
+            BlockingTestTask {
+                abort_cleanup_done: Arc::clone(&abort_cleanup_done),
+            },
+            crate::tasks::MailboxParentProvenance::Ignore,
+        )
+        .await;
+
+    // First turn started.
+    wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+
+    // Interrupt and completion arrive back-to-back; the loop admits them
+    // serially, preferring the external submission.
+    tx_ingress
+        .send(super::SessionIngress::Submission(Submission {
+            id: "interrupt-1".to_string(),
+            op: Op::Interrupt,
+            client_user_message_id: None,
+            parent_turn_id: None,
+            trace: None,
+        }))
+        .await
+        .expect("interrupt submission");
+    tx_ingress
+        .send(super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::UnifiedExecCompletion(
+                crate::context::UnifiedExecCompletionEvent::new(
+                    4242,
+                    "sleep 10",
+                    Some(0),
+                    None,
+                    std::time::Duration::from_secs(2),
+                    1234,
+                    0,
+                    "done",
+                ),
+            ),
+        ))
+        .await
+        .expect("internal completion");
+
+    // Abort cleanup completes before the completion can start any inference:
+    // the wake turn may only start after TurnAborted.
+    let aborted = wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnAborted(_))
+    })
+    .await;
+    assert!(
+        abort_cleanup_done.load(std::sync::atomic::Ordering::Acquire),
+        "abort cleanup must complete before the aborted lifecycle event"
+    );
+    let started = wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    let EventMsg::TurnStarted(started) = started else {
+        unreachable!();
+    };
+    let EventMsg::TurnAborted(aborted) = aborted else {
+        unreachable!();
+    };
+    assert_ne!(
+        Some(started.turn_id.as_str()),
+        aborted.turn_id.as_deref(),
+        "the completion must wake a fresh turn, not reuse the aborted one"
+    );
+
+    // The completion is consumed at the fresh wake's safe sampling boundary
+    // (never lost, never concurrent with the aborted turn), and exactly one
+    // new task is started.
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            let queued = session.input_queue.has_pending_session_inputs().await;
+            let has_task = {
+                let active = session.active_turn.lock().await;
+                active
+                    .as_ref()
+                    .and_then(|active| active.task.as_ref())
+                    .is_some()
+            };
+            if !queued && has_task {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the completion must be consumed by the fresh wake turn");
+}
+
+/// A completion arriving after the visible-answer boundary stays queued and
+/// wakes a fresh turn once the old turn clears (dual-edge late arrival).
+#[tokio::test]
+async fn late_completion_stays_queued_then_wakes_fresh_turn() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let completion = crate::context::UnifiedExecCompletionEvent::new(
+        4243,
+        "sleep 10",
+        Some(0),
+        None,
+        std::time::Duration::from_secs(2),
+        1234,
+        0,
+        "done",
+    );
+    let turn_state = {
+        // Active turn past the visible-answer boundary.
+        let mut active = session.active_turn.lock().await;
+        Arc::clone(
+            &active
+                .get_or_insert_with(crate::state::ActiveTurn::default)
+                .turn_state,
+        )
+    };
+    turn_state
+        .lock()
+        .await
+        .set_mailbox_delivery_phase(crate::state::MailboxDeliveryPhase::NextTurn);
+    session
+        .input_queue
+        .enqueue_pending_session_input(
+            TurnInput::ResponseItem(ContextualUserFragment::into(completion)),
+            /*trigger_turn*/ true,
+            /*parent_turn_id*/ None,
+        )
+        .await;
+    assert!(session.input_queue.has_pending_session_inputs().await);
+
+    // While the old turn is still active (even just reserved), the shared
+    // scheduler must not start a second turn.
+    session.maybe_start_turn_for_pending_work().await;
+    assert!(
+        session.input_queue.has_pending_session_inputs().await,
+        "no wake while a turn is still active"
+    );
+
+    // The old turn clears; the queued completion wakes a fresh regular turn.
+    {
+        let mut active = session.active_turn.lock().await;
+        *active = None;
+    }
+    session.maybe_start_turn_for_pending_work().await;
+    let has_task = {
+        let active = session.active_turn.lock().await;
+        active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .is_some()
+    };
+    assert!(
+        has_task,
+        "queued completion should wake a fresh regular turn after the old turn clears"
+    );
+    // The fresh turn drains the completion at its safe sampling boundary.
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            if !session.input_queue.has_pending_session_inputs().await {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the fresh turn must consume the queued completion");
+}
+
+/// A completion arriving while a busy turn still accepts continuation input is
+/// drained at the next safe inference boundary (dual-edge early arrival).
+#[tokio::test]
+async fn early_completion_drains_at_next_safe_boundary() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let completion = crate::context::UnifiedExecCompletionEvent::new(
+        4244,
+        "sleep 10",
+        Some(0),
+        None,
+        std::time::Duration::from_secs(2),
+        1234,
+        0,
+        "done",
+    );
+    {
+        // Busy regular turn still in the CurrentTurn phase.
+        let mut active = session.active_turn.lock().await;
+        active.get_or_insert_with(crate::state::ActiveTurn::default);
+    }
+    session
+        .input_queue
+        .enqueue_pending_session_input(
+            TurnInput::ResponseItem(ContextualUserFragment::into(completion)),
+            /*trigger_turn*/ true,
+            /*parent_turn_id*/ None,
+        )
+        .await;
+
+    // The safe-boundary poll consumes the queued completion into the turn's
+    // next sampling input.
+    let (items, _parent_turn_id) = session
+        .input_queue
+        .get_pending_input(&session.active_turn)
+        .await;
+    assert_eq!(items.len(), 1);
+    assert!(matches!(items[0], TurnInput::ResponseItem(_)));
+    assert!(!session.input_queue.has_pending_session_inputs().await);
+}
+
+/// Internal events and external submissions travel through one shared FIFO,
+/// so an internal-only event is admitted and wakes an idle session.
+#[tokio::test]
+async fn submission_loop_admits_internal_event_on_the_shared_fifo() {
+    let (mut session, _turn_context, mut rx_event) = make_session_and_context_with_rx().await;
+    let (tx_ingress, rx_ingress) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = tx_ingress.downgrade();
+    let loop_session = Arc::clone(&session);
+    let loop_config = session.get_config().await;
+    let loop_handle = tokio::spawn(async move {
+        submission_loop(loop_session, loop_config, rx_ingress).await;
+    });
+    let _loop_guard = LoopAbortOnDrop(loop_handle);
+
+    // Idle session: a single internal completion on the shared FIFO wakes a
+    // regular turn.
+    tx_ingress
+        .send(super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::UnifiedExecCompletion(
+                crate::context::UnifiedExecCompletionEvent::new(
+                    4245,
+                    "sleep 10",
+                    Some(0),
+                    None,
+                    std::time::Duration::from_secs(2),
+                    1234,
+                    0,
+                    "done",
+                ),
+            ),
+        ))
+        .await
+        .expect("internal completion");
+    wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            if !session.input_queue.has_pending_session_inputs().await {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the completion must be consumed by the wake's safe boundary");
+}
+
+/// Inverse race: a completion is admitted and a wake turn starts, but an
+/// interrupt lands before sampling. Abort cleanup must not erase the
+/// completion: it stays in the shared FIFO and restarts exactly once.
+#[tokio::test]
+async fn completion_survives_interrupt_before_sampling() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let completion = crate::context::UnifiedExecCompletionEvent::new(
+        4246,
+        "sleep 10",
+        Some(0),
+        None,
+        std::time::Duration::from_secs(2),
+        1234,
+        0,
+        "done",
+    );
+    // Completion admitted first; the wake turn starts (start_task must not
+    // move the completion into turn-local pending storage). A blocking task
+    // stands in for the wake so "interrupt before sampling" is deterministic.
+    session
+        .input_queue
+        .enqueue_pending_session_input(
+            TurnInput::ResponseItem(ContextualUserFragment::into(completion)),
+            /*trigger_turn*/ true,
+            /*parent_turn_id*/ None,
+        )
+        .await;
+    let wake_turn = session.new_default_turn().await;
+    session
+        .start_task(
+            wake_turn,
+            Vec::new(),
+            BlockingTestTask {
+                abort_cleanup_done: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            crate::tasks::MailboxParentProvenance::Ignore,
+        )
+        .await;
+    assert!(
+        session.input_queue.has_pending_session_inputs().await,
+        "start_task must leave session-scoped inputs in the shared FIFO until sampling"
+    );
+
+    // Interrupt before sampling: abort cleanup clears only turn-local input
+    // and the abort path restarts pending work. The completion is never
+    // erased: the fresh wake drains it at its safe boundary, leaving the FIFO
+    // empty only while an active task consumes it. (If start_task had moved
+    // the completion into turn-local storage, clear_pending would have erased
+    // it and no task would ever restart.)
+    session.interrupt_task().await;
+    tokio::time::timeout(StdDuration::from_secs(10), async {
+        loop {
+            let queued = session.input_queue.has_pending_session_inputs().await;
+            let has_task = {
+                let active = session.active_turn.lock().await;
+                active
+                    .as_ref()
+                    .and_then(|active| active.task.as_ref())
+                    .is_some()
+            };
+            if !queued && has_task {
+                break;
+            }
+            tokio::time::sleep(StdDuration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the completion must be consumed by the restarted wake, never erased");
+}
+
+/// Terminal completions deliberately use the shared external-event scheduler
+/// (wake-if-idle), which does not apply the extension-only Plan gate.
+#[tokio::test]
+async fn completion_wakes_a_turn_in_plan_mode() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let mut collaboration_mode = session.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.collaboration_mode = collaboration_mode;
+    }
+    let completion = crate::context::UnifiedExecCompletionEvent::new(
+        4247,
+        "sleep 10",
+        Some(0),
+        None,
+        std::time::Duration::from_secs(2),
+        1234,
+        0,
+        "done",
+    );
+    session
+        .input_queue
+        .enqueue_pending_session_input(
+            TurnInput::ResponseItem(ContextualUserFragment::into(completion)),
+            /*trigger_turn*/ true,
+            /*parent_turn_id*/ None,
+        )
+        .await;
+    session.maybe_start_turn_for_pending_work().await;
+    let active = session.active_turn.lock().await;
+    assert!(
+        active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .is_some(),
+        "a terminal completion must wake a turn even in Plan mode"
+    );
+    drop(active);
+}
+
+/// Abort-on-drop guard for spawned session loops in tests.
+struct LoopAbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for LoopAbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 #[tokio::test]
 async fn shutdown_and_wait_allows_multiple_waiters() {
     let (_session, _turn_context) = make_session_and_context().await;
     let (tx_sub, rx_sub) = async_channel::bounded(4);
     let (_tx_event, rx_event) = async_channel::unbounded();
     let session_loop_handle = tokio::spawn(async move {
-        let shutdown: Submission = rx_sub.recv().await.expect("shutdown submission");
+        let super::SessionIngress::Submission(shutdown) =
+            rx_sub.recv().await.expect("shutdown submission")
+        else {
+            panic!("expected an external submission");
+        };
         assert_eq!(shutdown.op, Op::Shutdown);
         tokio::time::sleep(StdDuration::from_millis(50)).await;
     });
@@ -7710,10 +8193,13 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
     let (_child_tx_event, child_rx_event) = async_channel::unbounded();
     let (child_shutdown_tx, child_shutdown_rx) = tokio::sync::oneshot::channel();
     let child_session_loop_handle = tokio::spawn(async move {
-        let shutdown: Submission = child_rx_sub
+        let super::SessionIngress::Submission(shutdown) = child_rx_sub
             .recv()
             .await
-            .expect("child shutdown submission");
+            .expect("child shutdown submission")
+        else {
+            panic!("expected an external submission");
+        };
         assert_eq!(shutdown.op, Op::Shutdown);
         child_shutdown_tx
             .send(())
@@ -7795,10 +8281,13 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
     let (_child_tx_event, child_rx_event) = async_channel::unbounded();
     let (child_shutdown_tx, child_shutdown_rx) = tokio::sync::oneshot::channel();
     let child_session_loop_handle = tokio::spawn(async move {
-        let shutdown: Submission = child_rx_sub
+        let super::SessionIngress::Submission(shutdown) = child_rx_sub
             .recv()
             .await
-            .expect("child shutdown submission");
+            .expect("child shutdown submission")
+        else {
+            panic!("expected an external submission");
+        };
         assert_eq!(shutdown.op, Op::Shutdown);
         child_shutdown_tx
             .send(())
@@ -8110,6 +8599,7 @@ where
         active_turn: Mutex::new(None),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
+        internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
@@ -10608,7 +11098,7 @@ async fn try_start_turn_if_idle_rejects_pending_trigger_turn_without_injecting()
     );
     assert_eq!(vec![item], err.into_input());
     assert!(sess.active_turn.lock().await.is_none());
-    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+    assert!(sess.input_queue.has_trigger_turn_session_inputs().await);
 }
 
 #[tokio::test]
@@ -10917,7 +11407,7 @@ async fn trigger_turn_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
 
     sess.abort_all_tasks(TurnAbortReason::Replaced).await;
 
-    assert!(sess.input_queue.has_trigger_turn_mailbox_items().await);
+    assert!(sess.input_queue.has_trigger_turn_session_inputs().await);
 }
 
 #[tokio::test]

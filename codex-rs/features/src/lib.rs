@@ -116,6 +116,12 @@ pub enum Feature {
     /// on either `unified_exec` or `shell_zsh_fork` because those features have
     /// separate rollout and enterprise controls.
     UnifiedExecZshFork,
+    /// EXPERIMENTAL - wake a model turn when a background unified-exec terminal
+    /// process finishes without a synchronous observation of its exit.
+    ///
+    /// This is a session-scoped rollout flag, not a per-operation wake policy.
+    /// Disabled by default; when disabled, unified exec behavior is unchanged.
+    UnifiedExecCompletionWake,
     /// Removed compatibility flag. Transcript scrollback reflow on terminal resize is always on.
     TerminalResizeReflow,
     /// Add terminal-specific visualization guidance to TUI developer instructions.
@@ -885,6 +891,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::UnifiedExecZshFork,
         key: "unified_exec_zsh_fork",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::UnifiedExecCompletionWake,
+        key: "unified_exec_completion_wake",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },

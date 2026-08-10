@@ -35,11 +35,17 @@ pub(crate) struct TurnInputQueue {
 /// Session-scoped pending input storage and active-turn mailbox delivery coordination.
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
-    mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// Single FIFO of session-scoped pending inputs (mailbox communication and
+    /// model-visible external completions), admitted queue-first and drained
+    /// either by the active turn at a safe inference boundary or by a fresh
+    /// turn woken by the pending-work scheduler. FIFO arrival order is shared
+    /// between mailbox and completion items.
+    pending_session_inputs: Mutex<VecDeque<PendingSessionInput>>,
 }
 
-struct PendingMailboxCommunication {
-    communication: InterAgentCommunication,
+pub(crate) struct PendingSessionInput {
+    pub(crate) input: TurnInput,
+    pub(crate) trigger_turn: bool,
     parent_turn_id: Option<String>,
 }
 
@@ -48,7 +54,7 @@ impl InputQueue {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
         Self {
             activity_tx,
-            mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            pending_session_inputs: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -67,7 +73,7 @@ impl InputQueue {
         };
         let pending_activity = if has_pending_steer {
             Some(InputQueueActivity::Steer)
-        } else if self.has_pending_mailbox_items().await {
+        } else if self.has_pending_session_inputs().await {
             Some(InputQueueActivity::Mailbox)
         } else {
             None
@@ -80,46 +86,94 @@ impl InputQueue {
         communication: InterAgentCommunication,
         parent_turn_id: Option<String>,
     ) {
-        self.mailbox_pending_mails
+        let trigger_turn = communication.trigger_turn;
+        self.enqueue_pending_session_input(
+            TurnInput::InterAgentCommunication(communication),
+            trigger_turn,
+            parent_turn_id,
+        )
+        .await;
+    }
+
+    /// Queue a session-scoped pending input (mailbox communication or a
+    /// model-visible external completion). Completion items are trigger-turn
+    /// work: they wake the pending-work scheduler when the session is idle and
+    /// join the next safe inference boundary when a turn is busy.
+    pub(crate) async fn enqueue_pending_session_input(
+        &self,
+        input: TurnInput,
+        trigger_turn: bool,
+        parent_turn_id: Option<String>,
+    ) {
+        self.pending_session_inputs
             .lock()
             .await
-            .push_back(PendingMailboxCommunication {
-                communication,
+            .push_back(PendingSessionInput {
+                input,
+                trigger_turn,
                 parent_turn_id,
             });
         self.activity_tx.send_replace(InputQueueActivity::Mailbox);
     }
 
-    pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.lock().await.is_empty()
+    pub(crate) async fn has_pending_session_inputs(&self) -> bool {
+        !self.pending_session_inputs.lock().await.is_empty()
     }
 
-    pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
-        self.mailbox_pending_mails
+    pub(crate) async fn has_trigger_turn_session_inputs(&self) -> bool {
+        self.pending_session_inputs
             .lock()
             .await
             .iter()
-            .any(|mail| mail.communication.trigger_turn)
+            .any(|item| item.trigger_turn)
     }
 
-    pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, Option<String>) {
-        let pending_mails = self
-            .mailbox_pending_mails
+    pub(crate) async fn drain_pending_session_inputs(&self) -> (Vec<TurnInput>, Option<String>) {
+        let pending = self
+            .pending_session_inputs
             .lock()
             .await
             .drain(..)
             .collect::<Vec<_>>();
-        let parent_turn_id = pending_mails
+        let parent_turn_id = pending
             .iter()
-            .filter(|mail| mail.communication.trigger_turn)
-            .map(|mail| mail.parent_turn_id.as_deref())
+            // Only trigger-turn inter-agent mail participates in parent
+            // provenance; terminal completions never carry a parent and must
+            // not erase an otherwise unambiguous mailbox parent.
+            .filter(|item| {
+                matches!(
+                    &item.input,
+                    TurnInput::InterAgentCommunication(communication)
+                        if communication.trigger_turn
+                )
+            })
+            .map(|item| item.parent_turn_id.as_deref())
             .reduce(|expected, candidate| expected.filter(|id| candidate == Some(*id)))
             .and_then(|id| id.filter(|id| !id.trim().is_empty()).map(str::to_string));
-        let items = pending_mails
-            .into_iter()
-            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
-            .collect();
+        let items = pending.into_iter().map(|item| item.input).collect();
         (items, parent_turn_id)
+    }
+
+    /// Peek the session FIFO for the mailbox parent provenance of pending
+    /// trigger-turn inter-agent mail without draining anything.
+    ///
+    /// Used at task start so turn metadata is attributed correctly while
+    /// session-scoped pending inputs stay in the shared FIFO until the
+    /// safe-boundary drain.
+    pub(crate) async fn peek_pending_session_parent_turn_id(&self) -> Option<String> {
+        let queue = self.pending_session_inputs.lock().await;
+        queue
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.input,
+                    TurnInput::InterAgentCommunication(communication)
+                        if communication.trigger_turn
+                )
+            })
+            .map(|item| item.parent_turn_id.as_deref())
+            .reduce(|expected, candidate| expected.filter(|id| candidate == Some(*id)))
+            .and_then(|id| id.filter(|id| !id.trim().is_empty()).map(str::to_string))
     }
 
     pub(crate) async fn turn_state_for_sub_id(
@@ -246,12 +300,12 @@ impl InputQueue {
         if !accepts_mailbox_delivery {
             return (pending_input, None);
         }
-        let (mailbox_items, parent_turn_id) = self.drain_mailbox_input_items().await;
+        let (session_input_items, parent_turn_id) = self.drain_pending_session_inputs().await;
         if pending_input.is_empty() {
-            (mailbox_items, parent_turn_id)
+            (session_input_items, parent_turn_id)
         } else {
             let mut pending_input = pending_input;
-            pending_input.extend(mailbox_items);
+            pending_input.extend(session_input_items);
             (pending_input, parent_turn_id)
         }
     }
@@ -280,7 +334,7 @@ impl InputQueue {
         if has_turn_pending_input {
             return true;
         }
-        self.has_pending_mailbox_items().await
+        self.has_pending_session_inputs().await
     }
 }
 
@@ -418,13 +472,13 @@ mod tests {
             .await;
 
         assert_eq!(
-            input_queue.drain_mailbox_input_items().await.0,
+            input_queue.drain_pending_session_inputs().await.0,
             vec![
                 TurnInput::InterAgentCommunication(mail_one),
                 TurnInput::InterAgentCommunication(mail_two)
             ]
         );
-        assert!(!input_queue.has_pending_mailbox_items().await);
+        assert!(!input_queue.has_pending_session_inputs().await);
     }
 
     #[tokio::test]
@@ -449,7 +503,7 @@ mod tests {
                     )
                     .await;
             }
-            let (_, parent_turn_id) = input_queue.drain_mailbox_input_items().await;
+            let (_, parent_turn_id) = input_queue.drain_pending_session_inputs().await;
             assert_eq!(parent_turn_id.as_deref(), expected_parent_turn_id);
         }
     }
@@ -467,7 +521,7 @@ mod tests {
         input_queue
             .enqueue_mailbox_communication(queued_mail, /*parent_turn_id*/ None)
             .await;
-        assert!(!input_queue.has_trigger_turn_mailbox_items().await);
+        assert!(!input_queue.has_trigger_turn_session_inputs().await);
 
         let trigger_mail = make_mail(
             AgentPath::root(),
@@ -478,6 +532,124 @@ mod tests {
         input_queue
             .enqueue_mailbox_communication(trigger_mail, /*parent_turn_id*/ None)
             .await;
-        assert!(input_queue.has_trigger_turn_mailbox_items().await);
+        assert!(input_queue.has_trigger_turn_session_inputs().await);
+    }
+
+    #[tokio::test]
+    async fn session_input_queue_preserves_fifo_between_mailbox_and_completions() {
+        let input_queue = InputQueue::new();
+        let mail = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "mail",
+            /*trigger_turn*/ true,
+        );
+        let completion = TurnInput::ResponseItem(codex_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![codex_protocol::models::ContentItem::InputText {
+                text: "<unified_exec_completion>done</unified_exec_completion>".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+
+        // Interleave mailbox and completion items: drain order must match
+        // arrival order in the single shared FIFO.
+        input_queue
+            .enqueue_mailbox_communication(mail.clone(), Some("parent-1".to_string()))
+            .await;
+        input_queue
+            .enqueue_pending_session_input(completion.clone(), /*trigger_turn*/ true, None)
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(mail.clone(), None)
+            .await;
+        input_queue
+            .enqueue_pending_session_input(completion.clone(), /*trigger_turn*/ true, None)
+            .await;
+
+        let (items, parent_turn_id) = input_queue.drain_pending_session_inputs().await;
+        assert_eq!(
+            items,
+            vec![
+                TurnInput::InterAgentCommunication(mail.clone()),
+                completion.clone(),
+                TurnInput::InterAgentCommunication(mail),
+                completion,
+            ]
+        );
+        // Trigger-turn parent provenance keeps its existing semantics: with
+        // mixed/absent parents the reduce yields no unambiguous parent.
+        assert_eq!(parent_turn_id.as_deref(), None);
+        assert!(!input_queue.has_pending_session_inputs().await);
+    }
+
+    #[tokio::test]
+    async fn completion_is_trigger_turn_work_and_survives_turn_local_clearing() {
+        let input_queue = InputQueue::new();
+        let completion = TurnInput::ResponseItem(codex_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![codex_protocol::models::ContentItem::InputText {
+                text: "completion".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+        input_queue
+            .enqueue_pending_session_input(completion.clone(), /*trigger_turn*/ true, None)
+            .await;
+        assert!(input_queue.has_pending_session_inputs().await);
+        assert!(input_queue.has_trigger_turn_session_inputs().await);
+
+        // Interrupt clearing only wipes turn-local pending input, never the
+        // session-scoped queue.
+        let active_turn = ActiveTurn::default();
+        input_queue.clear_pending(&active_turn).await;
+        assert!(input_queue.has_pending_session_inputs().await);
+        assert_eq!(
+            input_queue.drain_pending_session_inputs().await.0,
+            vec![completion]
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_does_not_erase_mailbox_parent_provenance() {
+        let input_queue = InputQueue::new();
+        let mail = make_mail(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            "mail",
+            /*trigger_turn*/ true,
+        );
+        let completion = TurnInput::ResponseItem(codex_protocol::models::ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![codex_protocol::models::ContentItem::InputText {
+                text: "completion".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+
+        // A terminal completion interleaved with one unambiguous parented
+        // mailbox item must not erase the mailbox parent.
+        input_queue
+            .enqueue_pending_session_input(completion, /*trigger_turn*/ true, None)
+            .await;
+        input_queue
+            .enqueue_mailbox_communication(mail, Some("parent-1".to_string()))
+            .await;
+
+        assert_eq!(
+            input_queue
+                .peek_pending_session_parent_turn_id()
+                .await
+                .as_deref(),
+            Some("parent-1")
+        );
+        let (_, parent_turn_id) = input_queue.drain_pending_session_inputs().await;
+        assert_eq!(parent_turn_id.as_deref(), Some("parent-1"));
     }
 }

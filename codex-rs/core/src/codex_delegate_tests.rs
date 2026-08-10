@@ -137,7 +137,10 @@ async fn forward_events_filters_private_events_before_blocked_send_is_cancelled(
         .expect("forward_events join error");
 
     let mut ops = Vec::new();
-    while let Ok(sub) = rx_sub.try_recv() {
+    while let Ok(ingress) = rx_sub.try_recv() {
+        let crate::session::SessionIngress::Submission(sub) = ingress else {
+            continue;
+        };
         ops.push(sub.op);
     }
     assert!(
@@ -177,13 +180,21 @@ async fn forward_ops_preserves_submission_trace_context() {
         }),
         parent_turn_id: Some("parent-turn".to_string()),
     };
-    tx_ops.send(submission.clone()).await.unwrap();
+    tx_ops
+        .send(crate::session::SessionIngress::Submission(
+            submission.clone(),
+        ))
+        .await
+        .unwrap();
     drop(tx_ops);
 
     let forwarded = timeout(Duration::from_secs(1), rx_sub.recv())
         .await
         .expect("forward_ops hung")
         .expect("forwarded submission missing");
+    let crate::session::SessionIngress::Submission(forwarded) = forwarded else {
+        panic!("expected a forwarded external submission");
+    };
     assert_eq!(submission.id, forwarded.id);
     assert_eq!(submission.op, forwarded.op);
     assert_eq!(submission.trace, forwarded.trace);
@@ -315,10 +326,13 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
         .expect("handle_request_permissions hung")
         .expect("handle_request_permissions join error");
 
-    let submission = timeout(Duration::from_secs(1), rx_sub.recv())
+    let ingress = timeout(Duration::from_secs(1), rx_sub.recv())
         .await
         .expect("request_permissions response timed out")
         .expect("request_permissions response missing");
+    let crate::session::SessionIngress::Submission(submission) = ingress else {
+        panic!("expected an external submission");
+    };
     assert_eq!(
         submission.op,
         Op::RequestPermissionsResponse {
@@ -409,10 +423,13 @@ async fn handle_request_user_input_preserves_non_blocking_flag_for_round_trip() 
         .expect("handle_request_user_input hung")
         .expect("handle_request_user_input join error");
 
-    let submission = timeout(Duration::from_secs(1), rx_sub.recv())
+    let ingress = timeout(Duration::from_secs(1), rx_sub.recv())
         .await
         .expect("request_user_input response timed out")
         .expect("request_user_input response missing");
+    let crate::session::SessionIngress::Submission(submission) = ingress else {
+        panic!("expected an external submission");
+    };
     assert_eq!(
         submission.op,
         Op::UserInputAnswer {
@@ -532,10 +549,13 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
         .expect("handle_exec_approval hung")
         .expect("handle_exec_approval join error");
 
-    let submission = timeout(Duration::from_secs(2), rx_sub.recv())
+    let ingress = timeout(Duration::from_secs(2), rx_sub.recv())
         .await
         .expect("exec approval response timed out")
         .expect("exec approval response missing");
+    let crate::session::SessionIngress::Submission(submission) = ingress else {
+        panic!("expected an external submission");
+    };
     assert_eq!(
         submission.op,
         Op::ExecApproval {

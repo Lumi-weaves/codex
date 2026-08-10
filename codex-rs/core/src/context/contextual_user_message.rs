@@ -12,6 +12,7 @@ use super::RecommendedPluginsInstructions;
 use super::SkillInstructions;
 use super::SubagentNotification;
 use super::TurnAborted;
+use super::UnifiedExecCompletionEvent;
 use super::UserInstructions;
 use super::UserShellCommand;
 use super::world_state::EnvironmentsState;
@@ -29,6 +30,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     LegacyUnifiedExecProcessLimitWarning::matches_text,
     LegacyApplyPatchExecCommandWarning::matches_text,
     LegacyModelMismatchWarning::matches_text,
+    UnifiedExecCompletionEvent::matches_text,
 ];
 
 fn is_standard_contextual_user_text(text: &str) -> bool {

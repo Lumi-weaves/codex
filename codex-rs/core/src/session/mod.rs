@@ -206,6 +206,7 @@ mod extension_metrics;
 mod handlers;
 mod inject;
 mod input_queue;
+pub(crate) mod internal_event;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -391,13 +392,29 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// submission senders be dropped to terminate the session loop. The shared
 /// completion future observes that shutdown.
 pub(crate) struct SessionIo {
-    pub(crate) tx_sub: Sender<Submission>,
+    pub(crate) tx_sub: Sender<SessionIngress>,
     pub(crate) rx_event: Receiver<Event>,
     // Last known status of the agent.
     pub(crate) agent_status: watch::Receiver<AgentStatus>,
     // Shared future for the background submission loop completion so multiple
     // callers can wait for shutdown.
     pub(crate) session_loop_termination: SessionLoopTermination,
+}
+
+/// Single Core-private FIFO ingress for the session submission loop.
+///
+/// Both external submissions (user input, interrupts, approvals, shutdown)
+/// and internal core events (background terminal completions) travel through
+/// this one channel, so admission order is arrival order and neither class
+/// can starve or reorder the other. This is not a protocol `Op` and never
+/// crosses the app-server surface.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "boxing Submission would add an allocation to every external ingress"
+)]
+pub(crate) enum SessionIngress {
+    Submission(Submission),
+    Internal(self::internal_event::InternalSessionEvent),
 }
 
 pub(crate) type SessionLoopTermination = Shared<BoxFuture<'static, ()>>;
@@ -555,7 +572,11 @@ impl Session {
             git_enrichment_policy,
             windows_sandbox_proxy_settings_mode,
         } = args;
-        let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+        // One Core-private FIFO carries both external submissions and internal
+        // events, so admission order is arrival order. The session keeps only
+        // a weak sender: background machinery can never keep the loop alive.
+        let (tx_ingress, rx_ingress) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+        let internal_session_event_tx = tx_ingress.downgrade();
         let (tx_event, rx_event) = async_channel::unbounded();
 
         let LoadedUserInstructions {
@@ -733,6 +754,7 @@ impl Session {
             exec_policy,
             tx_event.clone(),
             agent_status_tx.clone(),
+            internal_session_event_tx,
             conversation_history,
             fork_persistence,
             session_source_clone,
@@ -773,12 +795,12 @@ impl Session {
         // This task will run until Op::Shutdown is received.
         let session_for_loop = Arc::clone(&session);
         let session_loop_handle = tokio::spawn(async move {
-            submission_loop(session_for_loop, configured_config, rx_sub)
+            submission_loop(session_for_loop, configured_config, rx_ingress)
                 .instrument(info_span!("session_loop", thread_id = %thread_id))
                 .await;
         });
         let io = SessionIo {
-            tx_sub,
+            tx_sub: tx_ingress,
             rx_event,
             agent_status: agent_status_rx,
             session_loop_termination: session_loop_termination_from_handle(session_loop_handle),
@@ -838,7 +860,7 @@ impl SessionIo {
             sub.trace = current_span_w3c_trace_context();
         }
         self.tx_sub
-            .send(sub)
+            .send(SessionIngress::Submission(sub))
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
         Ok(())
@@ -3297,6 +3319,11 @@ impl Session {
 
     pub fn enabled(&self, feature: Feature) -> bool {
         self.features.enabled(feature)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn enable_feature_for_tests(&mut self, feature: Feature) {
+        let _ = self.features.enable(feature);
     }
 
     pub(crate) fn features(&self) -> ManagedFeatures {

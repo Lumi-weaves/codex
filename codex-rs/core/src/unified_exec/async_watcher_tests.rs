@@ -5,20 +5,22 @@ use super::TRAILING_OUTPUT_GRACE;
 use super::spawn_exit_watcher;
 use super::split_valid_utf8_prefix_with_max;
 use super::start_streaming_output;
+use crate::context::ContextualUserFragment;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::NoopSpawnLifecycle;
 use crate::unified_exec::process::UnifiedExecProcess;
+use codex_features::Feature;
 use codex_protocol::items::CommandExecutionStatus;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_sandboxing::SandboxType;
-
 use pretty_assertions::assert_eq;
 use tokio::time::Duration;
 use tokio::time::Instant;
+use tokio::time::timeout;
 
 struct StreamingOutputHarness {
     process: Arc<UnifiedExecProcess>,
@@ -276,4 +278,197 @@ fn split_invalid_utf8_advances_without_shifting_remaining_bytes() {
     }
 
     assert!(buf.is_empty());
+}
+
+/// Build a session with the completion-wake feature enabled and a live
+/// internal-event channel, plus a fake PTY harness. Returns the internal event
+/// receiver so tests can observe exactly-once admission.
+async fn watcher_test_session_with_internal_channel() -> anyhow::Result<(
+    Arc<crate::session::session::Session>,
+    async_channel::Sender<crate::session::SessionIngress>,
+    async_channel::Receiver<crate::session::SessionIngress>,
+    StreamingOutputHarness,
+)> {
+    let (mut session, _turn, _rx) = make_session_and_context_with_rx().await;
+    let (ingress_tx, ingress_rx) = async_channel::bounded(64);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .enable_feature_for_tests(Feature::UnifiedExecCompletionWake);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = ingress_tx.downgrade();
+    let harness = streaming_output_harness().await?;
+    Ok((session, ingress_tx, ingress_rx, harness))
+}
+
+fn completion_fragment_text(ingress: &crate::session::SessionIngress) -> String {
+    let crate::session::SessionIngress::Internal(
+        crate::session::internal_event::InternalSessionEvent::UnifiedExecCompletion(completion),
+    ) = ingress
+    else {
+        panic!("expected an internal completion event");
+    };
+    completion.render()
+}
+
+async fn expect_no_internal_completion(
+    ingress_rx: &mut async_channel::Receiver<crate::session::SessionIngress>,
+) {
+    assert!(
+        timeout(Duration::from_millis(300), ingress_rx.recv())
+            .await
+            .is_err(),
+        "no automatic completion event expected"
+    );
+}
+
+#[tokio::test]
+async fn exit_watcher_sends_completion_event_once_for_background_exit() -> anyhow::Result<()> {
+    let (session, _ingress_tx, mut internal_rx, harness) =
+        watcher_test_session_with_internal_channel().await?;
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event: _,
+    } = harness;
+
+    #[allow(deprecated)]
+    let cwd = context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&session),
+        Arc::clone(&context.turn),
+        context.call_id,
+        vec!["sleep".to_string(), "10".to_string()],
+        cwd,
+        /*process_id*/ 4242,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+
+    let event = timeout(Duration::from_secs(5), internal_rx.recv())
+        .await
+        .expect("completion event should be sent by the exit watcher")
+        .expect("internal channel should stay open");
+    let rendered = completion_fragment_text(&event);
+    assert!(rendered.contains("4242"));
+    assert!(rendered.contains("exit code 0"));
+    assert!(rendered.contains("write_stdin"));
+    assert!(rendered.len() <= 16 * 1024, "fragment must stay bounded");
+
+    // Exactly-once: a second watcher claim must not produce a second event.
+    expect_no_internal_completion(&mut internal_rx).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_watcher_skips_completion_when_exit_observed_synchronously() -> anyhow::Result<()> {
+    let (session, _ingress_tx, mut internal_rx, harness) =
+        watcher_test_session_with_internal_channel().await?;
+    // Simulate a write_stdin poll (or the initial exec_command) having already
+    // returned the exit to the model: removal from the process store records
+    // the completion as observed.
+    harness.process.record_completion_observed();
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event: _,
+    } = harness;
+
+    #[allow(deprecated)]
+    let cwd = context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&session),
+        Arc::clone(&context.turn),
+        context.call_id,
+        vec!["sleep".to_string(), "10".to_string()],
+        cwd,
+        /*process_id*/ 4243,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+
+    expect_no_internal_completion(&mut internal_rx).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_watcher_waits_for_initial_exec_command_observation_lock() -> anyhow::Result<()> {
+    let (session, _ingress_tx, mut internal_rx, harness) =
+        watcher_test_session_with_internal_channel().await?;
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event: _,
+    } = harness;
+
+    // The initial exec_command holds the process interaction lock through its
+    // synchronous observation; the watcher waits on that lock and can only
+    // claim the completion after the lock is released.
+    let initial_observation_lock = process.interaction_lock().lock_owned().await;
+
+    #[allow(deprecated)]
+    let cwd = context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        Arc::clone(&session),
+        Arc::clone(&context.turn),
+        context.call_id,
+        vec!["sleep".to_string(), "10".to_string()],
+        cwd,
+        /*process_id*/ 4244,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+    );
+
+    exit_tx.send(0).expect("send exit");
+    drop(stdout_tx);
+    // While the initial call is still in flight (holding the lock), the
+    // watcher must not send a completion event.
+    expect_no_internal_completion(&mut internal_rx).await;
+
+    // The initial call returns Alive without observing the exit: releasing the
+    // lock lets the watcher claim the background completion.
+    drop(initial_observation_lock);
+    let event = timeout(Duration::from_secs(5), internal_rx.recv())
+        .await
+        .expect("completion should be sent after the initial call settles")
+        .expect("internal channel should stay open");
+    assert!(completion_fragment_text(&event).contains("4244"));
+    expect_no_internal_completion(&mut internal_rx).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_marking_suppresses_completion_event() -> anyhow::Result<()> {
+    let (_session, _ingress_tx, mut internal_rx, harness) =
+        watcher_test_session_with_internal_channel().await?;
+    // Session shutdown / CleanBackgroundTerminals marks entries observed before
+    // terminating them; the watcher must not emit an automatic completion.
+    harness.process.record_completion_observed();
+    harness.process.terminate();
+    expect_no_internal_completion(&mut internal_rx).await;
+    Ok(())
 }

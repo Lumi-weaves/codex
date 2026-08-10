@@ -1143,7 +1143,6 @@ mod tests {
     use codex_protocol::openai_models::AutoReviewMessages;
     use codex_protocol::protocol::AgentStatus;
     use codex_protocol::protocol::ErrorEvent;
-    use codex_protocol::protocol::Submission;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;
@@ -1151,7 +1150,7 @@ mod tests {
     async fn test_review_session() -> (
         GuardianReviewSession,
         async_channel::Sender<Event>,
-        async_channel::Receiver<Submission>,
+        async_channel::Receiver<crate::session::SessionIngress>,
     ) {
         let (session, _turn, _rx) = crate::session::tests::make_session_and_context_with_rx().await;
         let (tx_sub, rx_sub) = async_channel::bounded(4);
@@ -1734,7 +1733,10 @@ mod tests {
             )
             .await
         });
-        let submission = rx_sub.recv().await.expect("guardian submission");
+        let ingress = rx_sub.recv().await.expect("guardian submission");
+        let crate::session::SessionIngress::Submission(submission) = ingress else {
+            panic!("expected an external submission");
+        };
         tx_event
             .send(turn_complete_event("prior-turn", Some("stale"), Some(9)))
             .await
@@ -1937,7 +1939,10 @@ mod tests {
             .expect("queue prior turn completion");
         let tx_interrupt_event = tx_event.clone();
         let interrupt_response = tokio::spawn(async move {
-            let submission = rx_sub.recv().await.expect("interrupt submission");
+            let ingress = rx_sub.recv().await.expect("interrupt submission");
+            let crate::session::SessionIngress::Submission(submission) = ingress else {
+                panic!("expected an external submission");
+            };
             assert!(matches!(submission.op, Op::Interrupt));
             tx_interrupt_event
                 .send(turn_aborted_event("current-turn"))
@@ -1972,7 +1977,10 @@ mod tests {
             .expect("queue prior turn completion");
         let tx_interrupt_event = tx_event.clone();
         let interrupt_response = tokio::spawn(async move {
-            let submission = rx_sub.recv().await.expect("interrupt submission");
+            let ingress = rx_sub.recv().await.expect("interrupt submission");
+            let crate::session::SessionIngress::Submission(submission) = ingress else {
+                panic!("expected an external submission");
+            };
             assert!(matches!(submission.op, Op::Interrupt));
             tx_interrupt_event
                 .send(turn_aborted_event("current-turn"))

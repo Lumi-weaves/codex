@@ -148,6 +148,8 @@ mod tools;
 mod truncation;
 mod turn_state;
 mod unified_exec;
+#[cfg(not(target_os = "windows"))]
+mod unified_exec_async_completion;
 mod unified_exec_process_events;
 #[cfg(unix)]
 mod unified_exec_zsh_fork_approvals;

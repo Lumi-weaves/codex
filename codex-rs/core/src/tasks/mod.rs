@@ -314,8 +314,7 @@ impl Session {
             .await
             .clear_turn(&turn_context.sub_id);
 
-        let (pending_items, parent_turn_id) =
-            self.input_queue.get_pending_input(&self.active_turn).await;
+        let parent_turn_id = self.input_queue.peek_pending_session_parent_turn_id().await;
         if let (MailboxParentProvenance::Attribute, Some(id)) =
             (mailbox_parent_provenance, parent_turn_id)
         {
@@ -328,9 +327,12 @@ impl Session {
             Arc::clone(&turn.turn_state)
         };
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
-        self.input_queue
-            .extend_pending_input_for_turn_state(turn_state.as_ref(), pending_items)
-            .await;
+        // Session-scoped pending inputs (mailbox communication and terminal
+        // completions) intentionally stay in the shared FIFO; the task's
+        // safe-boundary `get_pending_input` drains them when sampling. They
+        // are never copied into turn-local pending storage here, so an
+        // interrupt before sampling cannot erase them (abort cleanup only
+        // clears turn-local input).
         self.emit_turn_start_lifecycle(turn_context.as_ref(), &token_usage_at_turn_start)
             .await;
 
@@ -449,8 +451,8 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.input_queue.has_pending_mailbox_items().await
-            || (!self.input_queue.has_trigger_turn_mailbox_items().await
+        if !self.input_queue.has_pending_session_inputs().await
+            || (!self.input_queue.has_trigger_turn_session_inputs().await
                 && !self.has_outstanding_durable_sleep())
         {
             return;

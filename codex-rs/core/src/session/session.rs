@@ -58,6 +58,11 @@ pub(crate) struct Session {
     pub(crate) pending_user_message_admissions:
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
+    /// Weak sender for Core-private internal session events on the single
+    /// session ingress FIFO. Internal machinery can only upgrade this while
+    /// the session's submission channel is alive, so it can never keep the
+    /// loop or channel alive.
+    pub(crate) internal_session_event_tx: async_channel::WeakSender<super::SessionIngress>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
@@ -519,6 +524,7 @@ impl Session {
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
+        internal_session_event_tx: async_channel::WeakSender<super::SessionIngress>,
         mut initial_history: InitialHistory,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
@@ -1212,6 +1218,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
+                internal_session_event_tx,
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,
