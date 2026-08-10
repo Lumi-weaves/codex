@@ -9,20 +9,22 @@ If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="http
 
 ---
 
-## About the Lumi fork
+## About Lumi Codex
 
-This repository is also home to a lightweight downstream maintained by
-[CubeLander](https://github.com/CubeLander) and
-[Lumi](https://github.com/Lumi-weaves). It follows published OpenAI Codex
-releases rather than an arbitrary `main` snapshot, preserves upstream defaults,
-and keeps each downstream patch narrow enough to remove when upstream provides
-equivalent behavior.
+**Lumi Codex** is an open-source downstream created and maintained by
+[Lumi](https://github.com/Lumi-weaves), with its original workflow ideas and
+product direction developed together with Fletcher Tian. It follows published
+OpenAI Codex releases rather than an arbitrary `main` snapshot, preserves
+upstream defaults, and keeps each downstream patch narrow enough to remove when
+upstream provides equivalent behavior.
 
-The current patch line is
+The current upstream-sync patch line is
 [`lumi/release-0.147.0`](https://github.com/Lumi-weaves/codex/tree/lumi/release-0.147.0),
 based on upstream tag
 [`rust-v0.147.0`](https://github.com/openai/codex/releases/tag/rust-v0.147.0).
-It currently carries two fixes:
+The public-delivery canary is developed on
+[`codex/lumi-public-delivery`](https://github.com/Lumi-weaves/codex/tree/codex/lumi-public-delivery).
+Together these lines carry the following downstream work:
 
 ### Cross-provider MultiAgentV2 delivery
 
@@ -60,9 +62,45 @@ model_auth_source = "model"
 ```
 
 The default remains `model_auth_source = "control"`, so an unconfigured build
-behaves like upstream. This branch is currently distributed as source; the
-OpenAI install commands below install upstream Codex and do not include these
-patches. See [Installing & building](./docs/install.md) to build the fork.
+behaves like upstream.
+
+### Public-delivery canary
+
+Lumi builds identify themselves with a `-lumi.N` version and refuse every
+official OpenAI update action, background update check, doctor update probe,
+and announcement feed. Linux canary releases are installed independently as
+`lumi-codex`; they do not modify `CODEX_HOME` or shadow an existing `codex`
+unless the user explicitly activates the reversible Lumi shim.
+
+After the `rust-v0.147.0-lumi.1` canary assets have been published, its
+version-pinned one-command install is:
+
+```shell
+curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.1/lumi-install.sh | \
+  sh -s -- manage install --release 0.147.0-lumi.1
+```
+
+The command is intentionally version-pinned because GitHub's `latest` endpoint
+does not select prereleases. Until that tag exists, build from source instead;
+do not treat the command above as a live release URL.
+
+```shell
+lumi-codex manage doctor
+lumi-codex manage activate    # optional: make `codex` resolve to Lumi in new shells
+lumi-codex manage deactivate  # restore the prior resolution
+lumi-codex manage rollback
+lumi-codex manage uninstall
+```
+
+See the [installer safety and recovery contract](./scripts/install/LUMI_INSTALL.md).
+The TUI can also cooperate with an explicitly user-started official app-server
+from the same upstream `MAJOR.MINOR.PATCH` release; version mismatch or missing
+identity fails before thread/session traffic. This is not Desktop discovery,
+replacement, or lifecycle ownership. See
+[remote app-server compatibility](./codex-rs/app-server/README.md#remote-client-compatibility).
+
+The OpenAI install commands below install upstream Codex and do not include the
+Lumi patches. See [Installing & building](./docs/install.md) to build the fork.
 
 ---
 

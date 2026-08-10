@@ -1,7 +1,7 @@
 # Lumi Codex standalone installer/manager (Unix canary)
 
-`lumi-install.sh` installs and manages the official Codex CLI package releases
-published on the **Lumi-weaves/codex** GitHub Releases, as an independent
+`lumi-install.sh` installs and manages Lumi Codex package releases published on
+the **Lumi-weaves/codex** GitHub Releases, as an independent
 installation beside any package-managed official Codex. It never touches
 `CODEX_HOME` or official `codex` binaries and never uses the upstream
 `install.sh`. It works both from a local file and through
@@ -112,8 +112,12 @@ Run the script directly (`sh lumi-install.sh <action>`) or through the
 ## Unsupported edges (canary)
 
 - macOS and Windows are not supported yet (Linux only).
-- No public GitHub workflow, release publishing, or artifact signing; no
-  Desktop replacement; no Rust identity management.
+- No artifact signing yet; no Desktop discovery, replacement, or lifecycle
+  ownership. The dedicated Lumi release workflow publishes only the Linux
+  canary package, checksum manifest, and installer to GitHub Releases.
+- GitHub's `latest` endpoint excludes prereleases. Canary bootstrap commands
+  therefore pin the exact `rust-vX.Y.Z-lumi.N` release until a separate stable
+  Lumi channel exists.
 - A crash between the `current` switch and receipt finalization is
   journal-reconciled by the next `install`/`doctor`/`rollback`; a crash before
   the journal write leaves the previous state fully intact.
