@@ -21,6 +21,11 @@ That run also stopped before the release mutation point and published no
 release assets. Later canaries retain the standard runners with a wider build
 watchdog.
 
+`rust-v0.147.0-lumi.3` became the first canary with published release assets
+under the widened watchdog, and its version-pinned install commands are the
+current documented baseline in the README. Later canaries follow the same
+standard-runner route and keep the release mutation point unchanged.
+
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Windows Authenticode signing,
 Linux signatures, provenance attestation, or a stable update channel.

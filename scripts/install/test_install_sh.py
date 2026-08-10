@@ -16,7 +16,7 @@ INSTALL_SCRIPT = Path(__file__).with_name("install.sh")
 POWERSHELL_SCRIPT = Path(__file__).with_name("install.ps1")
 VERSION = "0.142.5"
 MISMATCH_VERSION = "0.145.0"
-LUMI_VERSION = "0.147.0-lumi.3"
+LUMI_VERSION = "0.147.0-lumi.4"
 TARGETS = (
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
