@@ -741,7 +741,7 @@ Requests for depth, thoroughness, research, investigation, or detailed codebase 
 - Do not duplicate work between the main rollout and delegated subtasks.
 - Avoid issuing multiple delegate calls on the same unresolved thread unless the new delegated task is genuinely different and necessary.
 - Narrow the delegated ask to the concrete output you need next.
-- For coding tasks, prefer delegating concrete code-change worker subtasks over read-only explorer analysis when the subagent can make a bounded patch in a clear write scope.
+- For coding tasks, prefer delegating concrete code-change worker subtasks over read-only analysis when the subagent can make a bounded patch in a clear write scope.
 - When delegating coding work, instruct the submodel to edit files directly in its forked workspace and list the file paths it changed in the final answer.
 - For code-edit subtasks, decompose work so each delegated task has a disjoint write set.
 

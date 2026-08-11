@@ -255,7 +255,7 @@ async fn spawn_agent_rejects_when_message_and_items_are_both_set() {
 }
 
 #[tokio::test]
-async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
+async fn spawn_agent_uses_worker_role_and_preserves_approval_policy() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -283,8 +283,8 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
         Arc::new(turn),
         "spawn_agent",
         function_payload(json!({
-            "message": "inspect this repo",
-            "agent_type": "explorer"
+            "message": "implement this change",
+            "agent_type": "worker"
         })),
     );
     let output = SpawnAgentHandler::default()
