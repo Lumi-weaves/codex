@@ -28,6 +28,18 @@ pub(super) fn test_project_path() -> PathBuf {
     PathBuf::from(test_path_display("/tmp/project"))
 }
 
+/// Cache a "no project root" lookup keyed by the fixture cwd.
+///
+/// The fixture cwd intentionally has no project root, and tests must not walk
+/// the real filesystem above it (ambient markers such as a stray `.git` would
+/// otherwise leak into project-root name resolution).
+pub(super) fn cache_no_project_root(chat: &mut ChatWidget) {
+    chat.status_line_project_root_name_cache = Some(CachedProjectRootName {
+        cwd: chat.config.cwd.to_path_buf(),
+        root_name: None,
+    });
+}
+
 pub(super) fn truncated_path_variants(path: &str) -> Vec<String> {
     let chars: Vec<char> = path.chars().collect();
     (1..chars.len())

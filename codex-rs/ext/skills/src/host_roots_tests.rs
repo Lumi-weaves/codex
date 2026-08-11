@@ -400,7 +400,31 @@ async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
     fs::create_dir_all(outer.join(".agents/skills")).expect("create outer skills");
     fs::create_dir_all(cwd.join(".agents/skills")).expect("create cwd skills");
 
-    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &stack(Vec::new()), &cwd)
+    // Use a tempdir-derived marker name so the ancestry walk explicitly has a
+    // project-root marker set that cannot match ambient markers (such as a
+    // stray `.git`) above the fixture directory.
+    let unique_marker = format!(
+        "{}-project-root-marker",
+        temp_dir
+            .path()
+            .file_name()
+            .expect("temp dir name")
+            .to_string_lossy()
+    );
+    let mut config = empty_config();
+    config
+        .as_table_mut()
+        .expect("empty config is a table")
+        .insert(
+            "project_root_markers".to_string(),
+            toml::Value::Array(vec![toml::Value::String(unique_marker)]),
+        );
+    let config_stack = stack(vec![ConfigLayerEntry::new(
+        ConfigLayerSource::SessionFlags,
+        config,
+    )]);
+
+    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &cwd)
         .await
         .into_iter()
         .map(|root| root.path)
