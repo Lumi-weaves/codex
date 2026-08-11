@@ -282,13 +282,12 @@ fn set_web_search_mode(turn: &mut TurnContext, mode: WebSearchMode) {
 }
 
 fn use_chatgpt_auth(turn: &mut TurnContext) {
-    turn.auth_manager = Some(AuthManager::from_auth_for_testing(
+    let auth_manager = Some(AuthManager::from_auth_for_testing(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
     ));
-    turn.provider = create_model_provider(
-        turn.config.model_provider.clone(),
-        turn.auth_manager.clone(),
-    );
+    turn.auth_manager = auth_manager.clone();
+    turn.model_auth_manager = auth_manager.clone();
+    turn.provider = create_model_provider(turn.config.model_provider.clone(), auth_manager);
 }
 
 fn use_bedrock_provider(turn: &mut TurnContext) {
@@ -698,6 +697,11 @@ async fn list_background_terminals_registers_only_with_unified_exec_tools() {
 
     let wake_disabled = probe(|turn| {
         set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(
+            turn,
+            Feature::UnifiedExecCompletionWake,
+            /*enabled*/ false,
+        );
         set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
         turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
     })
