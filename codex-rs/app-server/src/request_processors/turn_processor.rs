@@ -137,6 +137,36 @@ struct ThreadSettingsBuildParams {
     personality: Option<Personality>,
 }
 
+fn requested_model_for_provider_validation<'a>(
+    model: Option<&'a str>,
+    collaboration_mode: Option<&'a CollaborationMode>,
+) -> Option<&'a str> {
+    collaboration_mode.map(CollaborationMode::model).or(model)
+}
+
+fn cross_provider_model_switch_error(
+    model: &str,
+    current_model: &str,
+    active_provider: &str,
+    model_provider_routes: &HashMap<String, String>,
+) -> Option<String> {
+    if model == current_model {
+        return None;
+    }
+    let routed_provider = model_provider_routes.get(model);
+    let current_model_is_routed = model_provider_routes.contains_key(current_model);
+
+    match routed_provider {
+        Some(target_provider) if target_provider != active_provider => Some(format!(
+            "model `{model}` is routed through provider `{target_provider}`, but this task is bound to provider `{active_provider}`; start a new task to switch providers"
+        )),
+        None if current_model_is_routed => Some(format!(
+            "model `{model}` is not routed through the active provider `{active_provider}`; start a new task to switch providers"
+        )),
+        _ => None,
+    }
+}
+
 impl TurnRequestProcessor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
@@ -699,11 +729,29 @@ impl TurnRequestProcessor {
         // `thread/settings/update` only acknowledges that the update was queued.
         // Clients that send dependent partial updates should wait for
         // `thread/settings/updated` or combine the fields in one request.
-        let snapshot = if permissions.is_some() {
+        let requested_model =
+            requested_model_for_provider_validation(model.as_deref(), collaboration_mode.as_ref());
+        let snapshot = if permissions.is_some() || requested_model.is_some() {
             Some(thread.config_snapshot().await)
         } else {
             None
         };
+
+        if let Some(model) = requested_model {
+            let Some(snapshot) = snapshot.as_ref() else {
+                return Err(internal_error(format!(
+                    "{method} model selection missing thread snapshot"
+                )));
+            };
+            if let Some(message) = cross_provider_model_switch_error(
+                model,
+                &snapshot.model,
+                &snapshot.model_provider_id,
+                &snapshot.model_provider_routes,
+            ) {
+                return Err(invalid_request(message));
+            }
+        }
 
         let has_any_overrides = has_environment_override
             || approval_policy.is_some()
@@ -1508,3 +1556,7 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
     client_name == Some("Xcode")
         && client_version.is_some_and(|version| version.starts_with("26.4"))
 }
+
+#[cfg(test)]
+#[path = "turn_processor_tests.rs"]
+mod tests;

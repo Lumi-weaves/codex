@@ -145,6 +145,7 @@ mod thread_processor_behavior_tests {
     use serde_json::Value;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -763,6 +764,7 @@ mod thread_processor_behavior_tests {
         let config_snapshot = ThreadConfigSnapshot {
             model: "gpt-5".to_string(),
             model_provider_id: "openai".to_string(),
+            model_provider_routes: HashMap::new(),
             service_tier: Some("flex".to_string()),
             approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
@@ -947,8 +949,36 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
-    fn merge_persisted_resume_metadata_skips_persisted_values_when_reasoning_effort_overridden()
-    -> Result<()> {
+    fn merge_persisted_resume_metadata_preserves_raw_config_provider_override() -> Result<()> {
+        let mut request_overrides = Some(HashMap::from([(
+            "model_provider".to_string(),
+            serde_json::Value::String("oss".to_string()),
+        )]));
+        let mut typesafe_overrides = ConfigOverrides::default();
+        let persisted_metadata =
+            test_thread_metadata(Some("gpt-5.1-codex-max"), Some(ReasoningEffort::High))?;
+
+        merge_persisted_resume_metadata(
+            &mut request_overrides,
+            &mut typesafe_overrides,
+            &persisted_metadata,
+        );
+
+        assert_eq!(typesafe_overrides.model, None);
+        assert_eq!(typesafe_overrides.model_provider, None);
+        assert_eq!(
+            request_overrides,
+            Some(HashMap::from([(
+                "model_provider".to_string(),
+                serde_json::Value::String("oss".to_string()),
+            )]))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_persisted_resume_metadata_keeps_model_when_reasoning_effort_overridden() -> Result<()>
+    {
         let mut request_overrides = Some(HashMap::from([(
             "model_reasoning_effort".to_string(),
             serde_json::Value::String("low".to_string()),
@@ -963,8 +993,14 @@ mod thread_processor_behavior_tests {
             &persisted_metadata,
         );
 
-        assert_eq!(typesafe_overrides.model, None);
-        assert_eq!(typesafe_overrides.model_provider, None);
+        assert_eq!(
+            typesafe_overrides.model,
+            Some("gpt-5.1-codex-max".to_string())
+        );
+        assert_eq!(
+            typesafe_overrides.model_provider,
+            Some("mock_provider".to_string())
+        );
         assert_eq!(
             request_overrides,
             Some(HashMap::from([(

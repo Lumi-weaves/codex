@@ -158,14 +158,17 @@ fn merge_persisted_resume_metadata(
     typesafe_overrides: &mut ConfigOverrides,
     persisted_metadata: &ThreadMetadata,
 ) {
-    if has_model_resume_override(request_overrides.as_ref(), typesafe_overrides) {
-        return;
+    let model_or_provider_overridden =
+        has_model_or_provider_override(request_overrides.as_ref(), typesafe_overrides);
+    if !model_or_provider_overridden {
+        typesafe_overrides.model = persisted_metadata.model.clone();
+        typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
     }
 
-    typesafe_overrides.model = persisted_metadata.model.clone();
-    typesafe_overrides.model_provider = Some(persisted_metadata.model_provider.clone());
-
-    if let Some(reasoning_effort) = persisted_metadata.reasoning_effort.as_ref() {
+    if !model_or_provider_overridden
+        && !has_reasoning_effort_override(request_overrides.as_ref())
+        && let Some(reasoning_effort) = persisted_metadata.reasoning_effort.as_ref()
+    {
         request_overrides.get_or_insert_with(HashMap::new).insert(
             "model_reasoning_effort".to_string(),
             serde_json::Value::String(reasoning_effort.to_string()),
@@ -217,15 +220,20 @@ fn normalize_thread_list_cwd_filters(
     Ok(Some(normalized_cwds))
 }
 
-fn has_model_resume_override(
+fn has_model_or_provider_override(
     request_overrides: Option<&HashMap<String, serde_json::Value>>,
     typesafe_overrides: &ConfigOverrides,
 ) -> bool {
     typesafe_overrides.model.is_some()
         || typesafe_overrides.model_provider.is_some()
         || request_overrides.is_some_and(|overrides| overrides.contains_key("model"))
-        || request_overrides
-            .is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
+        || request_overrides.is_some_and(|overrides| overrides.contains_key("model_provider"))
+}
+
+fn has_reasoning_effort_override(
+    request_overrides: Option<&HashMap<String, serde_json::Value>>,
+) -> bool {
+    request_overrides.is_some_and(|overrides| overrides.contains_key("model_reasoning_effort"))
 }
 
 fn validate_dynamic_tools(tools: &[DynamicToolSpec]) -> Result<(), String> {
@@ -3199,7 +3207,7 @@ impl ThreadRequestProcessor {
             personality,
         );
         let has_explicit_model_resume_override =
-            has_model_resume_override(request_overrides.as_ref(), &typesafe_overrides);
+            has_model_or_provider_override(request_overrides.as_ref(), &typesafe_overrides);
         let persisted_metadata = self
             .load_and_apply_persisted_resume_metadata(
                 &thread_history,
@@ -4173,6 +4181,10 @@ impl ThreadRequestProcessor {
             developer_instructions,
             /*personality*/ None,
         );
+        if !has_model_or_provider_override(request_overrides.as_ref(), &typesafe_overrides) {
+            typesafe_overrides.model = source_thread.model.clone();
+            typesafe_overrides.model_provider = Some(source_thread.model_provider.clone());
+        }
         typesafe_overrides.ephemeral = ephemeral.then_some(true);
         let latest_context = if paginated_source
             && typesafe_overrides.approvals_reviewer.is_none()

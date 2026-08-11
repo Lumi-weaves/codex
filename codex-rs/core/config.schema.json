@@ -753,6 +753,9 @@
             "unified_exec": {
               "type": "boolean"
             },
+            "unified_exec_completion_wake": {
+              "type": "boolean"
+            },
             "unified_exec_zsh_fork": {
               "type": "boolean"
             },
@@ -5403,6 +5406,9 @@
         "unified_exec": {
           "type": "boolean"
         },
+        "unified_exec_completion_wake": {
+          "type": "boolean"
+        },
         "unified_exec_zsh_fork": {
           "type": "boolean"
         },
@@ -5607,7 +5613,15 @@
           "$ref": "#/definitions/AbsolutePathBuf"
         }
       ],
-      "description": "Optional path to a JSON model catalog (applied on startup only). Per-thread `config` overrides are accepted but do not reapply this (no-ops)."
+      "description": "Optional path to a JSON model catalog used as authoritative metadata for this config layer. Agent roles can supply their own catalog without replacing the root model picker."
+    },
+    "model_catalog_overlay_json": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        }
+      ],
+      "description": "Optional path to a JSON model catalog merged over the active root catalog. Unlike `model_catalog_json`, this preserves bundled and remotely discovered models."
     },
     "model_context_window": {
       "description": "Size of the context window for the model, in tokens.",
@@ -5625,6 +5639,14 @@
     "model_provider": {
       "description": "Provider to use from the model_providers map.",
       "type": "string"
+    },
+    "model_provider_routes": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": {},
+      "description": "Model-specific provider overrides used when a thread selects a model without naming a provider explicitly.",
+      "type": "object"
     },
     "model_providers": {
       "additionalProperties": {
