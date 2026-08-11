@@ -37,6 +37,8 @@ LOCK_FILE="$ROOT/install.lock"
 LOCK_DIR="$ROOT/install.lock.d"
 
 target="${LUMI_TARGET:-}"
+local_package="${LUMI_PACKAGE_ARCHIVE:-}"
+local_checksums="${LUMI_CHECKSUM_MANIFEST:-}"
 platform_label=""
 lock_kind=""
 tmp_dir=""
@@ -145,9 +147,26 @@ parse_args() {
         target="$2"
         shift
         ;;
+      --package-archive)
+        if [ "$#" -lt 2 ]; then
+          echo "--package-archive requires a value." >&2
+          exit 1
+        fi
+        local_package="$2"
+        shift
+        ;;
+      --checksum-manifest)
+        if [ "$#" -lt 2 ]; then
+          echo "--checksum-manifest requires a value." >&2
+          exit 1
+        fi
+        local_checksums="$2"
+        shift
+        ;;
       --help | -h)
         cat <<EOF
 Usage: install.sh [--release VERSION] [--target TARGET]
+                  [--package-archive PATH --checksum-manifest PATH]
 
 Environment:
   LUMI_RELEASE          Version to install; overridden by --release. Accepts
@@ -159,6 +178,9 @@ Environment:
                         (default: \$HOME/.local/bin).
   LUMI_ROOT             Lumi Codex install root (default:
                         \${XDG_DATA_HOME:-\$HOME/.local/share}/lumi-codex).
+  LUMI_PACKAGE_ARCHIVE  Verified local package archive (offline kit mode).
+  LUMI_CHECKSUM_MANIFEST
+                        Local codex-package_SHA256SUMS for offline kit mode.
 
 Installs side-by-side: no PATH or shell profile changes, no official codex
 binary, CODEX_HOME, or auth/config is touched.
@@ -409,6 +431,40 @@ resolve_release_from_github() {
 resolve_release() {
   normalized_version="$(normalize_version "$RELEASE")"
   validate_version "$normalized_version"
+
+  if [ -n "$local_package" ] || [ -n "$local_checksums" ]; then
+    if [ -z "$local_package" ] || [ -z "$local_checksums" ]; then
+      echo "--package-archive and --checksum-manifest must be provided together." >&2
+      exit 1
+    fi
+    if [ "$normalized_version" = "latest" ]; then
+      echo "Offline package installation requires an exact --release version." >&2
+      exit 1
+    fi
+    validate_abs_path "$local_package" "Package archive path"
+    validate_abs_path "$local_checksums" "Checksum manifest path"
+    if [ ! -f "$local_package" ] || [ -L "$local_package" ]; then
+      echo "Package archive must be a regular, non-symlink file: $local_package" >&2
+      exit 1
+    fi
+    if [ ! -f "$local_checksums" ] || [ -L "$local_checksums" ]; then
+      echo "Checksum manifest must be a regular, non-symlink file: $local_checksums" >&2
+      exit 1
+    fi
+
+    resolved_version="$normalized_version"
+    asset="codex-package-$target.tar.gz"
+    checksum_asset="codex-package_SHA256SUMS"
+    if [ "${local_package##*/}" != "$asset" ]; then
+      echo "Offline package filename must be $asset." >&2
+      exit 1
+    fi
+    if [ "${local_checksums##*/}" != "$checksum_asset" ]; then
+      echo "Offline checksum filename must be $checksum_asset." >&2
+      exit 1
+    fi
+    return
+  fi
 
   resolve_release_from_github "$normalized_version"
   select_release_assets
@@ -710,6 +766,8 @@ install_package_release() {
     chmod 0755 "$stage_release/codex-resources/bwrap"
   fi
   ln -sf "bin/codex" "$stage_release/codex"
+  printf '%s\n' "lumi-codex-release-v1" >"$stage_release/.lumi-owner"
+  chmod 0600 "$stage_release/.lumi-owner"
 
   # Fail closed instead of deleting a foreign file or symlink at the release
   # path; a plain directory is our own incomplete state and is replaced.
@@ -718,6 +776,12 @@ install_package_release() {
     exit 1
   fi
   if [ -e "$release_dir" ]; then
+    if { [ ! -f "$release_dir/.lumi-owner" ] || [ -L "$release_dir/.lumi-owner" ]; } &&
+      { [ ! -f "$release_dir/codex-package.json" ] || [ -L "$release_dir/codex-package.json" ] ||
+        ! grep -Eq '"distribution"[[:space:]]*:[[:space:]]*"lumi"' "$release_dir/codex-package.json"; }; then
+      echo "Refusing to remove unowned existing release directory at $release_dir" >&2
+      exit 1
+    fi
     rm -rf "$release_dir"
   fi
   mv "$stage_release" "$release_dir"
@@ -928,14 +992,22 @@ if ! release_dir_is_complete "$release_dir" "$resolved_version" "$target"; then
     warn "Found incomplete existing release at $release_dir; reinstalling."
   fi
 
-  archive_path="$tmp_dir/$asset"
-  checksum_path="$tmp_dir/$checksum_asset"
+  if [ -n "$local_package" ]; then
+    archive_path="$local_package"
+    checksum_path="$local_checksums"
+    step "Verifying local Lumi Codex package"
+    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+    verify_archive_digest "$archive_path" "$expected_digest"
+  else
+    archive_path="$tmp_dir/$asset"
+    checksum_path="$tmp_dir/$checksum_asset"
 
-  step "Downloading Lumi Codex CLI"
-  checksum_digest="$(release_asset_digest "$checksum_asset")"
-  download_file_with_fallback "$checksum_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
-  expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
-  download_file_with_fallback "$download_url" "$archive_path" "$expected_digest" "$asset"
+    step "Downloading Lumi Codex CLI"
+    checksum_digest="$(release_asset_digest "$checksum_asset")"
+    download_file_with_fallback "$checksum_url" "$checksum_path" "$checksum_digest" "$checksum_asset" "$asset"
+    expected_digest="$(package_archive_digest "$asset" "$checksum_path")"
+    download_file_with_fallback "$download_url" "$archive_path" "$expected_digest" "$asset"
+  fi
   validate_archive_members "$archive_path"
 
   step "Installing standalone package to $release_dir"

@@ -77,6 +77,91 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(launched.returncode, 0, launched.stderr)
             self.assertEqual(launched.stdout.strip(), f"codex-cli {VERSION}")
 
+    def test_offline_package_install_never_uses_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, _metadata_json = create_package_release(root)
+
+            result, requests = run_installer_in(
+                root,
+                VERSION,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                script_args=(
+                    "--release",
+                    VERSION,
+                    "--package-archive",
+                    str(archive_path),
+                    "--checksum-manifest",
+                    str(checksum_path),
+                ),
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(requests, [])
+            self.assertIn("Verifying local Lumi Codex package", result.stdout)
+            self.assertTrue(
+                (
+                    root
+                    / "lumi-root"
+                    / "releases"
+                    / f"{VERSION}-x86_64-unknown-linux-musl"
+                    / "bin"
+                    / "codex"
+                ).is_file()
+            )
+
+    def test_offline_package_requires_both_files_and_exact_release(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, _metadata_json = create_package_release(root)
+
+            missing_manifest, requests = run_installer_in(
+                root,
+                VERSION,
+                script_args=("--package-archive", str(archive_path)),
+            )
+            self.assertNotEqual(missing_manifest.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertIn("must be provided together", missing_manifest.stderr)
+
+            latest, requests = run_installer_in(
+                root,
+                "latest",
+                script_args=(
+                    "--package-archive",
+                    str(archive_path),
+                    "--checksum-manifest",
+                    str(checksum_path),
+                ),
+            )
+            self.assertNotEqual(latest.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertIn("requires an exact --release", latest.stderr)
+
+    def test_offline_package_rejects_manifest_mismatch_without_network(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, _metadata_json = create_package_release(root)
+            checksum_path.write_text(
+                "0" * 64 + f"  {archive_path.name}\n", encoding="utf-8"
+            )
+
+            result, requests = run_installer_in(
+                root,
+                VERSION,
+                script_args=(
+                    "--package-archive",
+                    str(archive_path),
+                    "--checksum-manifest",
+                    str(checksum_path),
+                ),
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(requests, [])
+            self.assertIn("checksum did not match", result.stderr)
+
     def test_metadata_fetch_failure_is_not_reported_as_missing_assets(self) -> None:
         result, requests = run_installer(VERSION, metadata_failure=True)
 
@@ -721,6 +806,9 @@ class InstallShTest(unittest.TestCase):
                 root / "lumi-root" / "releases" / f"{VERSION}-x86_64-unknown-linux-musl"
             )
             release_dir.mkdir(parents=True)
+            (release_dir / ".lumi-owner").write_text(
+                "lumi-codex-release-v1\n", encoding="utf-8"
+            )
             (release_dir / "stale-marker").write_text("incomplete", encoding="utf-8")
 
             result, _requests = run_installer_in(
@@ -734,6 +822,29 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("incomplete existing release", result.stderr)
             self.assertTrue((release_dir / "bin" / "codex").is_file())
+
+    def test_unowned_existing_release_directory_is_not_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(root)
+            release_dir = (
+                root / "lumi-root" / "releases" / f"{VERSION}-x86_64-unknown-linux-musl"
+            )
+            release_dir.mkdir(parents=True)
+            sentinel = release_dir / "user-file"
+            sentinel.write_text("preserve\n", encoding="utf-8")
+
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unowned existing release", result.stderr)
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
     def test_repeat_install_reuses_verified_release(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1133,7 +1244,7 @@ def run_installer_in(
         )
     else:
         result = subprocess.run(
-            ["/bin/sh", str(INSTALL_SCRIPT)],
+            ["/bin/sh", str(INSTALL_SCRIPT), *script_args],
             capture_output=True,
             check=False,
             env=env,
