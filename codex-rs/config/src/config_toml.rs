@@ -359,6 +359,15 @@ pub struct ConfigToml {
     /// Agent roles can supply their own catalog without replacing the root model picker.
     pub model_catalog_json: Option<AbsolutePathBuf>,
 
+    /// Optional path to a JSON model catalog merged over the active root catalog.
+    /// Unlike `model_catalog_json`, this preserves bundled and remotely discovered models.
+    pub model_catalog_overlay_json: Option<AbsolutePathBuf>,
+
+    /// Model-specific provider overrides used when a thread selects a model without naming a
+    /// provider explicitly.
+    #[serde(default)]
+    pub model_provider_routes: HashMap<String, String>,
+
     /// Optionally specify a personality for the model
     pub personality: Option<Personality>,
 

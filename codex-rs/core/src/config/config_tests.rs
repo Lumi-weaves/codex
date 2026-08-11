@@ -9083,6 +9083,111 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn model_catalog_overlay_and_provider_routes_load() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let catalog_path = codex_home.path().join("catalog-overlay.json");
+    let mut catalog = bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    catalog.models = catalog.models.into_iter().take(1).collect();
+    std::fs::write(
+        &catalog_path,
+        serde_json::to_string(&catalog).expect("serialize catalog"),
+    )?;
+    let routes = HashMap::from([("provider/custom-model".to_string(), "ollama".to_string())]);
+    let cfg = ConfigToml {
+        model: Some("provider/custom-model".to_string()),
+        model_catalog_overlay_json: Some(catalog_path.abs()),
+        model_provider_routes: routes.clone(),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_catalog_overlay, Some(catalog));
+    assert_eq!(config.model_provider_routes, routes);
+    assert_eq!(config.model_provider_id, "ollama");
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_catalog_overlay_errors_name_the_overlay_setting() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let catalog_path = codex_home.path().join("empty-catalog-overlay.json");
+    std::fs::write(&catalog_path, r#"{"models":[]}"#)?;
+    let cfg = ConfigToml {
+        model_catalog_overlay_json: Some(catalog_path.abs()),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("empty overlay should fail config load");
+
+    assert!(err.to_string().contains("model_catalog_overlay_json"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_provider_routes_reject_unknown_provider() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        model_provider_routes: HashMap::from([(
+            "provider/custom-model".to_string(),
+            "missing-provider".to_string(),
+        )]),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("unknown routed provider should fail config load");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("unknown provider `missing-provider`")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_config_provider_wins_over_model_route() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        model: Some("provider/custom-model".to_string()),
+        model_provider: Some("openai".to_string()),
+        model_provider_routes: HashMap::from([(
+            "provider/custom-model".to_string(),
+            "ollama".to_string(),
+        )]),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, "openai");
+    Ok(())
+}
+
 fn create_test_fixture() -> std::io::Result<PrecedenceTestFixture> {
     let toml = r#"
 model = "o3"

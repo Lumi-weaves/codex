@@ -985,6 +985,12 @@ pub struct Config {
     /// `get_model_info`, replacing the shared catalog for that call/session.
     pub model_catalog: Option<ModelsResponse>,
 
+    /// Optional catalog merged over bundled or remotely discovered root models.
+    pub model_catalog_overlay: Option<ModelsResponse>,
+
+    /// Model slug to provider id routes used when callers omit an explicit provider.
+    pub model_provider_routes: HashMap<String, String>,
+
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
     pub model_verbosity: Option<Verbosity>,
 
@@ -2064,13 +2070,13 @@ pub fn validate_feature_requirements_for_config_toml(
     managed_features::validate_feature_requirements_in_config_toml(cfg, feature_requirements)
 }
 
-fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> {
+fn load_catalog_json(path: &AbsolutePathBuf, setting: &str) -> std::io::Result<ModelsResponse> {
     let file_contents = std::fs::read_to_string(path)?;
     let catalog = serde_json::from_str::<ModelsResponse>(&file_contents).map_err(|err| {
         std::io::Error::new(
             ErrorKind::InvalidData,
             format!(
-                "failed to parse model_catalog_json path `{}` as JSON: {err}",
+                "failed to parse {setting} path `{}` as JSON: {err}",
                 path.display()
             ),
         )
@@ -2079,7 +2085,7 @@ fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> 
         return Err(std::io::Error::new(
             ErrorKind::InvalidData,
             format!(
-                "model_catalog_json path `{}` must contain at least one model",
+                "{setting} path `{}` must contain at least one model",
                 path.display()
             ),
         ));
@@ -2089,9 +2095,10 @@ fn load_catalog_json(path: &AbsolutePathBuf) -> std::io::Result<ModelsResponse> 
 
 fn load_model_catalog(
     model_catalog_json: Option<AbsolutePathBuf>,
+    setting: &str,
 ) -> std::io::Result<Option<ModelsResponse>> {
     model_catalog_json
-        .map(|path| load_catalog_json(&path))
+        .map(|path| load_catalog_json(&path, setting))
         .transpose()
 }
 
@@ -3738,8 +3745,32 @@ impl Config {
             merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
 
+        for (model, provider) in &cfg.model_provider_routes {
+            if model.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "model_provider_routes cannot contain an empty model slug",
+                ));
+            }
+            if !model_providers.contains_key(provider) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "model_provider_routes maps `{model}` to unknown provider `{provider}`"
+                    ),
+                ));
+            }
+        }
+
+        let model = model.or_else(|| cfg.model.clone());
         let model_provider_id = model_provider
             .or(cfg.model_provider)
+            .or_else(|| {
+                model
+                    .as_ref()
+                    .and_then(|model| cfg.model_provider_routes.get(model))
+                    .cloned()
+            })
             .unwrap_or_else(|| "openai".to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
@@ -3875,7 +3906,6 @@ impl Config {
 
         let forced_login_method = cfg.forced_login_method;
 
-        let model = model.or(cfg.model);
         let notices = cfg.notice.unwrap_or_default();
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
@@ -3957,7 +3987,12 @@ impl Config {
         let review_model = override_review_model.or(cfg.review_model);
 
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
-        let model_catalog = load_model_catalog(cfg.model_catalog_json.clone())?;
+        let model_catalog =
+            load_model_catalog(cfg.model_catalog_json.clone(), "model_catalog_json")?;
+        let model_catalog_overlay = load_model_catalog(
+            cfg.model_catalog_overlay_json.clone(),
+            "model_catalog_overlay_json",
+        )?;
 
         let log_dir = cfg
             .log_dir
@@ -4213,6 +4248,8 @@ impl Config {
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
             model_reasoning_summary: cfg.model_reasoning_summary,
             model_catalog,
+            model_catalog_overlay,
+            model_provider_routes: cfg.model_provider_routes,
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
                 .chatgpt_base_url
