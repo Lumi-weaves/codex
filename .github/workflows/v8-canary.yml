@@ -10,7 +10,10 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ${{ github.workflow }}::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
+  # A reusable workflow sees the caller's `github.workflow` value. Use a
+  # literal family name so this child never contends with `blocking-ci` for
+  # the same concurrency slot while the parent is waiting for it.
+  group: v8-canary::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:

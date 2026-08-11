@@ -46,6 +46,12 @@ class LumiCiWorkflowsTest(unittest.TestCase):
     def test_old_postmerge_entrypoint_is_absent(self) -> None:
         self.assertFalse((WORKFLOWS / "postmerge-ci.yml").exists())
 
+    def test_reusable_v8_concurrency_cannot_self_lock_with_caller(self) -> None:
+        text = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        self.assertIn("group: v8-canary::", text)
+        self.assertNotIn("group: ${{ github.workflow }}::", text)
+
 
 if __name__ == "__main__":
     unittest.main()
