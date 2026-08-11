@@ -2678,6 +2678,18 @@
       ],
       "type": "string"
     },
+    "ModelListUpdatedNotification": {
+      "description": "Notification emitted when the model list changes semantically.\n\nClients should invalidate cached picker data and refetch `model/list`. The notification does not carry the catalog itself so a missed notification remains recoverable by refetching.",
+      "properties": {
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "type": "object"
+    },
     "ModelRerouteReason": {
       "enum": [
         "highRiskCyberActivity"
@@ -6801,6 +6813,26 @@
         "params"
       ],
       "title": "App/list/updatedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "model/list/updated"
+          ],
+          "title": "Model/list/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ModelListUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Model/list/updatedNotification",
       "type": "object"
     },
     {

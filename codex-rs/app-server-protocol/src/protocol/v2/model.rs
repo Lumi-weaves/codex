@@ -143,9 +143,22 @@ pub struct ReasoningEffortOption {
 #[ts(export_to = "v2/")]
 pub struct ModelListResponse {
     pub data: Vec<Model>,
+    /// Opaque semantic revision for the catalog snapshot used by this response.
+    pub revision: String,
     /// Opaque cursor to pass to the next call to continue after the last item.
     /// If None, there are no more items to return.
     pub next_cursor: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+/// Notification emitted when the model list changes semantically.
+///
+/// Clients should invalidate cached picker data and refetch `model/list`. The notification does
+/// not carry the catalog itself so a missed notification remains recoverable by refetching.
+pub struct ModelListUpdatedNotification {
+    pub revision: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

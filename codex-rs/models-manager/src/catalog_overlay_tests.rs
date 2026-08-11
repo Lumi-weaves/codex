@@ -106,3 +106,54 @@ async fn overlay_priority_drives_both_picker_and_implicit_default() {
     );
     assert_eq!(default, addition.slug);
 }
+
+#[tokio::test]
+async fn overlay_can_be_added_replaced_and_removed_without_rebuilding_the_manager() {
+    let bundled = bundled_models_response().expect("bundled model catalog should parse");
+    let mut first = bundled.models[0].clone();
+    first.slug = "provider/hot-model".to_string();
+    first.description = Some("first revision".to_string());
+    let manager = with_catalog_overlay(
+        Arc::new(StaticModelsManager::new(None, bundled.clone())),
+        None,
+    );
+
+    assert!(
+        manager
+            .replace_catalog_overlay(Some(ModelsResponse {
+                models: vec![first.clone()],
+            }))
+            .await
+    );
+    assert!(
+        manager
+            .get_remote_models()
+            .await
+            .iter()
+            .any(|model| model == &first)
+    );
+
+    assert!(
+        !manager
+            .replace_catalog_overlay(Some(ModelsResponse {
+                models: vec![first.clone()],
+            }))
+            .await
+    );
+
+    let mut second = first.clone();
+    second.description = Some("second revision".to_string());
+    assert!(
+        manager
+            .replace_catalog_overlay(Some(ModelsResponse {
+                models: vec![second.clone()],
+            }))
+            .await
+    );
+    let models = manager.get_remote_models().await;
+    assert!(models.iter().any(|model| model == &second));
+    assert!(!models.iter().any(|model| model == &first));
+
+    assert!(manager.replace_catalog_overlay(None).await);
+    assert_eq!(manager.get_remote_models().await, bundled.models);
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "Notification emitted when the model list changes semantically.\n\nClients should invalidate cached picker data and refetch `model/list`. The notification does not carry the catalog itself so a missed notification remains recoverable by refetching.",
+  "properties": {
+    "revision": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "revision"
+  ],
+  "title": "ModelListUpdatedNotification",
+  "type": "object"
+}

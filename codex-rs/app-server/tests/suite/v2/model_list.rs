@@ -7,10 +7,15 @@ use app_test_support::TestAppServer;
 use app_test_support::write_chatgpt_auth;
 use app_test_support::write_models_cache;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ConfigBatchWriteParams;
+use codex_app_server_protocol::ConfigEdit;
+use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::Model;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
+use codex_app_server_protocol::ModelListUpdatedNotification;
 use codex_app_server_protocol::ModelServiceTier;
 use codex_app_server_protocol::ModelUpgradeInfo;
 use codex_app_server_protocol::ReasoningEffortOption;
@@ -106,6 +111,7 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
     let ModelListResponse {
         data: items,
         next_cursor,
+        ..
     } = mcp
         .request(|request_id| ClientRequest::ModelList {
             request_id,
@@ -136,6 +142,7 @@ async fn list_models_includes_hidden_models() -> Result<()> {
     let ModelListResponse {
         data: items,
         next_cursor,
+        ..
     } = mcp
         .request(|request_id| ClientRequest::ModelList {
             request_id,
@@ -219,6 +226,7 @@ openai_base_url = "{server_uri}/v1"
     let ModelListResponse {
         data: items,
         next_cursor,
+        ..
     } = mcp
         .request(|request_id| ClientRequest::ModelList {
             request_id,
@@ -273,10 +281,12 @@ async fn list_models_pagination_works() -> Result<()> {
     let expected_models = expected_visible_models();
     let mut cursor = None;
     let mut items = Vec::new();
+    let mut revision = None;
 
     for _ in 0..expected_models.len() {
         let ModelListResponse {
             data: page_items,
+            revision: page_revision,
             next_cursor,
         } = mcp
             .request(|request_id| ClientRequest::ModelList {
@@ -289,6 +299,11 @@ async fn list_models_pagination_works() -> Result<()> {
             })
             .await?;
 
+        if let Some(revision) = revision.as_ref() {
+            assert_eq!(&page_revision, revision);
+        } else {
+            revision = Some(page_revision);
+        }
         assert_eq!(page_items.len(), 1);
         items.extend(page_items);
 
@@ -332,6 +347,202 @@ async fn list_models_rejects_invalid_cursor() -> Result<()> {
 
     assert_eq!(error.id, RequestId::Integer(request_id));
     assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
-    assert_eq!(error.error.message, "invalid cursor: invalid");
+    assert_eq!(error.error.message, "invalid model cursor: invalid");
     Ok(())
+}
+
+#[tokio::test]
+async fn catalog_overlay_reload_adds_replaces_and_removes_models() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    write_models_cache(codex_home.path())?;
+    let overlay_path = codex_home.path().join("catalog-overlay.json");
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+
+    let first_page: ModelListResponse = mcp
+        .request(|request_id| ClientRequest::ModelList {
+            request_id,
+            params: ModelListParams {
+                cursor: None,
+                limit: Some(1),
+                include_hidden: None,
+            },
+        })
+        .await?;
+    let stale_cursor = first_page
+        .next_cursor
+        .ok_or_else(|| Error::msg("model catalog should have a second page"))?;
+    let baseline = request_model_list(&mut mcp).await?;
+    mcp.clear_message_buffer();
+
+    write_overlay(&overlay_path, "provider/hot-model", "first revision")?;
+    let write_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "model_catalog_overlay_json".to_string(),
+                value: json!(overlay_path),
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let _: ConfigWriteResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(write_id)).await??;
+    let added = read_model_list_updated(&mut mcp).await?;
+    let first = request_model_list(&mut mcp).await?;
+    assert_eq!(added.revision, first.revision);
+    assert_ne!(first.revision, baseline.revision);
+    let stale_request_id = mcp
+        .send_list_models_request(ModelListParams {
+            cursor: Some(stale_cursor),
+            limit: Some(1),
+            include_hidden: None,
+        })
+        .await?;
+    let stale_error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(stale_request_id)),
+    )
+    .await??;
+    assert_eq!(stale_error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(stale_error.error.message.contains("catalog changed"));
+    assert_eq!(
+        first
+            .data
+            .iter()
+            .find(|model| model.id == "provider/hot-model")
+            .map(|model| model.description.as_str()),
+        Some("first revision")
+    );
+
+    write_overlay(&overlay_path, "provider/hot-model", "second revision")?;
+    reload_user_config(&mut mcp).await?;
+    let replaced = read_model_list_updated(&mut mcp).await?;
+    let second = request_model_list(&mut mcp).await?;
+    assert_eq!(replaced.revision, second.revision);
+    assert_ne!(second.revision, first.revision);
+    assert_eq!(
+        second
+            .data
+            .iter()
+            .find(|model| model.id == "provider/hot-model")
+            .map(|model| model.description.as_str()),
+        Some("second revision")
+    );
+
+    mcp.clear_message_buffer();
+    reload_user_config(&mut mcp).await?;
+    let duplicate = timeout(
+        Duration::from_millis(150),
+        read_model_list_updated(&mut mcp),
+    )
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "a semantic no-op reload emitted a model-list invalidation"
+    );
+
+    mcp.clear_message_buffer();
+    std::fs::write(&overlay_path, r#"{"models":[]}"#)?;
+    let invalid_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: Vec::new(),
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(invalid_id)),
+    )
+    .await??;
+    assert!(error.error.message.contains("model_catalog_overlay_json"));
+    assert!(
+        timeout(
+            Duration::from_millis(150),
+            read_model_list_updated(&mut mcp)
+        )
+        .await
+        .is_err()
+    );
+    let after_invalid = request_model_list(&mut mcp).await?;
+    assert_eq!(after_invalid.revision, second.revision);
+    assert_eq!(after_invalid.data, second.data);
+
+    let remove_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: vec![ConfigEdit {
+                key_path: "model_catalog_overlay_json".to_string(),
+                value: serde_json::Value::Null,
+                merge_strategy: MergeStrategy::Replace,
+            }],
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let _: ConfigWriteResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(remove_id)).await??;
+    let removed = read_model_list_updated(&mut mcp).await?;
+    let final_list = request_model_list(&mut mcp).await?;
+    assert_eq!(removed.revision, final_list.revision);
+    assert!(
+        final_list
+            .data
+            .iter()
+            .all(|model| model.id != "provider/hot-model")
+    );
+    Ok(())
+}
+
+fn write_overlay(path: &std::path::Path, slug: &str, description: &str) -> Result<()> {
+    let catalog = codex_models_manager::bundled_models_response()?;
+    let mut model = catalog
+        .models
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::msg("bundled model catalog is empty"))?;
+    model.slug = slug.to_string();
+    model.display_name = slug.to_string();
+    model.description = Some(description.to_string());
+    std::fs::write(
+        path,
+        serde_json::to_vec(&ModelsResponse {
+            models: vec![model],
+        })?,
+    )?;
+    Ok(())
+}
+
+async fn request_model_list(mcp: &mut TestAppServer) -> Result<ModelListResponse> {
+    mcp.request(|request_id| ClientRequest::ModelList {
+        request_id,
+        params: ModelListParams {
+            cursor: None,
+            limit: Some(100),
+            include_hidden: None,
+        },
+    })
+    .await
+}
+
+async fn reload_user_config(mcp: &mut TestAppServer) -> Result<()> {
+    let request_id = mcp
+        .send_config_batch_write_request(ConfigBatchWriteParams {
+            edits: Vec::new(),
+            file_path: None,
+            expected_version: None,
+            reload_user_config: true,
+        })
+        .await?;
+    let _: ConfigWriteResponse = timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    Ok(())
+}
+
+async fn read_model_list_updated(mcp: &mut TestAppServer) -> Result<ModelListUpdatedNotification> {
+    timeout(DEFAULT_TIMEOUT, mcp.read_notification("model/list/updated")).await?
 }

@@ -90,6 +90,7 @@ use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
+use crate::model_list_catalog::ModelListCatalog;
 use crate::models_refresh_worker::ModelsRefreshWorker;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
@@ -322,8 +323,12 @@ impl MessageProcessor {
             }
         });
         let models_manager = thread_manager.get_models_manager();
-        let models_refresh_worker =
-            crate::models_refresh_worker::spawn(&models_manager, config.http_client_factory());
+        let model_list_catalog = Arc::new(ModelListCatalog::new(
+            models_manager,
+            config.http_client_factory(),
+            outgoing.clone(),
+        ));
+        let models_refresh_worker = crate::models_refresh_worker::spawn(&model_list_catalog);
         thread_manager
             .plugins_manager()
             .set_analytics_events_client(analytics_events_client.clone());
@@ -346,6 +351,7 @@ impl MessageProcessor {
             config_manager.clone(),
             thread_manager.clone(),
             analytics_events_client.clone(),
+            model_list_catalog.clone(),
         );
         let on_effective_plugins_changed =
             crate::effective_plugin_change::effective_plugins_changed_callback(
@@ -378,6 +384,7 @@ impl MessageProcessor {
             Arc::clone(&config),
             config_manager.clone(),
             Arc::clone(&workspace_settings_cache),
+            model_list_catalog,
         );
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),

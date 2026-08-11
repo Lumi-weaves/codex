@@ -25,6 +25,33 @@ struct TestModelsEndpoint {
     release_second_fetch: Notify,
 }
 
+#[derive(Debug)]
+struct FixedModelsEndpoint {
+    model: ModelInfo,
+    fetch_count: AtomicUsize,
+}
+
+impl ModelsEndpointClient for FixedModelsEndpoint {
+    fn has_command_auth(&self) -> bool {
+        true
+    }
+
+    fn uses_codex_backend(&self) -> ModelsEndpointFuture<'_, bool> {
+        Box::pin(async { false })
+    }
+
+    fn list_models<'a>(
+        &'a self,
+        _client_version: &'a str,
+        _http_client_factory: HttpClientFactory,
+    ) -> ModelsEndpointFuture<'a, CoreResult<(Vec<ModelInfo>, Option<String>)>> {
+        Box::pin(async move {
+            self.fetch_count.fetch_add(1, Ordering::SeqCst);
+            Ok((vec![self.model.clone()], None))
+        })
+    }
+}
+
 impl TestModelsEndpoint {
     fn new() -> Arc<Self> {
         Arc::new(Self {
@@ -82,16 +109,64 @@ async fn refreshes_immediately_periodically_and_stops_when_dropped() {
         endpoint.clone(),
         /*auth_manager*/ None,
     ));
-    let worker = spawn_with_interval(
-        &models_manager,
+    let (outgoing_tx, _outgoing_rx) = tokio::sync::mpsc::channel(8);
+    let model_list_catalog = Arc::new(ModelListCatalog::new(
+        models_manager,
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-        Duration::from_millis(10),
-    );
+        Arc::new(crate::outgoing_message::OutgoingMessageSender::new(
+            outgoing_tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        )),
+    ));
+    let worker = spawn_with_interval(&model_list_catalog, Duration::from_millis(10));
 
     endpoint.wait_for_fetch_count(/*expected*/ 2).await;
     drop(worker);
     endpoint.release_second_fetch.notify_one();
     tokio::time::sleep(Duration::from_millis(30)).await;
 
+    assert_eq!(endpoint.fetch_count.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn identical_remote_refreshes_emit_one_semantic_invalidation() {
+    let mut model = codex_models_manager::bundled_models_response()
+        .expect("bundled model catalog")
+        .models
+        .into_iter()
+        .next()
+        .expect("bundled model");
+    model.description = Some("remote revision".to_string());
+    let endpoint = Arc::new(FixedModelsEndpoint {
+        model,
+        fetch_count: AtomicUsize::new(0),
+    });
+    let models_manager: SharedModelsManager = Arc::new(OpenAiModelsManager::new_without_cache(
+        endpoint.clone(),
+        /*auth_manager*/ None,
+    ));
+    let (outgoing_tx, mut outgoing_rx) = tokio::sync::mpsc::channel(8);
+    let model_list_catalog = ModelListCatalog::new(
+        models_manager,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        Arc::new(crate::outgoing_message::OutgoingMessageSender::new(
+            outgoing_tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        )),
+    );
+
+    model_list_catalog.refresh(RefreshStrategy::Online).await;
+    tokio::time::timeout(Duration::from_secs(1), outgoing_rx.recv())
+        .await
+        .expect("changed catalog notification")
+        .expect("outgoing notification");
+
+    model_list_catalog.refresh(RefreshStrategy::Online).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), outgoing_rx.recv())
+            .await
+            .is_err(),
+        "identical refresh emitted a duplicate invalidation"
+    );
     assert_eq!(endpoint.fetch_count.load(Ordering::SeqCst), 2);
 }

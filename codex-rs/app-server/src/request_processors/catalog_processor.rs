@@ -1,4 +1,5 @@
 use super::*;
+use crate::model_list_catalog::ModelListCatalog;
 use codex_core::config::permission_profile_catalog;
 use futures::StreamExt;
 
@@ -11,6 +12,7 @@ pub(crate) struct CatalogRequestProcessor {
     pub(super) config: Arc<Config>,
     pub(super) config_manager: ConfigManager,
     pub(super) workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
+    model_list_catalog: Arc<ModelListCatalog>,
 }
 
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
@@ -109,6 +111,7 @@ impl CatalogRequestProcessor {
         config: Arc<Config>,
         config_manager: ConfigManager,
         workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
+        model_list_catalog: Arc<ModelListCatalog>,
     ) -> Self {
         Self {
             outgoing,
@@ -118,6 +121,7 @@ impl CatalogRequestProcessor {
             config,
             config_manager,
             workspace_settings_cache,
+            model_list_catalog,
         }
     }
 
@@ -161,13 +165,10 @@ impl CatalogRequestProcessor {
         &self,
         params: ModelListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        Self::list_models(
-            self.thread_manager.clone(),
-            self.config.http_client_factory(),
-            params,
-        )
-        .await
-        .map(|response| Some(response.into()))
+        self.model_list_catalog
+            .list(params)
+            .await
+            .map(|response| Some(response.into()))
     }
 
     pub(crate) async fn experimental_feature_list(
@@ -251,59 +252,6 @@ impl CatalogRequestProcessor {
                 true
             }
         }
-    }
-
-    async fn list_models(
-        thread_manager: Arc<ThreadManager>,
-        http_client_factory: codex_http_client::HttpClientFactory,
-        params: ModelListParams,
-    ) -> Result<ModelListResponse, JSONRPCErrorError> {
-        let ModelListParams {
-            limit,
-            cursor,
-            include_hidden,
-        } = params;
-        let models = supported_models(
-            thread_manager,
-            include_hidden.unwrap_or(false),
-            http_client_factory,
-        )
-        .await;
-        let total = models.len();
-
-        if total == 0 {
-            return Ok(ModelListResponse {
-                data: Vec::new(),
-                next_cursor: None,
-            });
-        }
-
-        let effective_limit = limit.unwrap_or(total as u32).max(1) as usize;
-        let effective_limit = effective_limit.min(total);
-        let start = match cursor {
-            Some(cursor) => cursor
-                .parse::<usize>()
-                .map_err(|_| invalid_request(format!("invalid cursor: {cursor}")))?,
-            None => 0,
-        };
-
-        if start > total {
-            return Err(invalid_request(format!(
-                "cursor {start} exceeds total models {total}"
-            )));
-        }
-
-        let end = start.saturating_add(effective_limit).min(total);
-        let items = models[start..end].to_vec();
-        let next_cursor = if end < total {
-            Some(end.to_string())
-        } else {
-            None
-        };
-        Ok(ModelListResponse {
-            data: items,
-            next_cursor,
-        })
     }
 
     async fn list_collaboration_modes(

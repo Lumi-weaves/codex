@@ -10120,12 +10120,31 @@
             "string",
             "null"
           ]
+        },
+        "revision": {
+          "description": "Opaque semantic revision for the catalog snapshot used by this response.",
+          "type": "string"
         }
       },
       "required": [
-        "data"
+        "data",
+        "revision"
       ],
       "title": "ModelListResponse",
+      "type": "object"
+    },
+    "ModelListUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "description": "Notification emitted when the model list changes semantically.\n\nClients should invalidate cached picker data and refetch `model/list`. The notification does not carry the catalog itself so a missed notification remains recoverable by refetching.",
+      "properties": {
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision"
+      ],
+      "title": "ModelListUpdatedNotification",
       "type": "object"
     },
     "ModelProviderCapabilitiesReadParams": {
@@ -15037,6 +15056,26 @@
             "params"
           ],
           "title": "App/list/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "model/list/updated"
+              ],
+              "title": "Model/list/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ModelListUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Model/list/updatedNotification",
           "type": "object"
         },
         {

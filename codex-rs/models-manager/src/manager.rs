@@ -214,6 +214,18 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         etag: String,
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()>;
+
+    /// Atomically replace a process-scoped catalog overlay when this manager supports one.
+    ///
+    /// Implementations that do not own a mutable overlay leave the catalog unchanged and return
+    /// `false`. A `true` result means the overlay changed semantically; callers can use that as an
+    /// invalidation signal without comparing model lists independently.
+    fn replace_catalog_overlay(
+        &self,
+        _overlay: Option<ModelsResponse>,
+    ) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

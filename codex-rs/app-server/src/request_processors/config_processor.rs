@@ -4,6 +4,7 @@ use crate::config_manager::ConfigManager;
 use crate::config_manager_service::ConfigManagerError;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
+use crate::model_list_catalog::ModelListCatalog;
 use crate::outgoing_message::ConnectionRequestId;
 use crate::outgoing_message::OutgoingMessageSender;
 use codex_analytics::AnalyticsEventsClient;
@@ -66,6 +67,7 @@ pub(crate) struct ConfigRequestProcessor {
     config_manager: ConfigManager,
     thread_manager: Arc<ThreadManager>,
     analytics_events_client: AnalyticsEventsClient,
+    model_list_catalog: Arc<ModelListCatalog>,
 }
 
 impl ConfigRequestProcessor {
@@ -74,12 +76,14 @@ impl ConfigRequestProcessor {
         config_manager: ConfigManager,
         thread_manager: Arc<ThreadManager>,
         analytics_events_client: AnalyticsEventsClient,
+        model_list_catalog: Arc<ModelListCatalog>,
     ) -> Self {
         Self {
             outgoing,
             config_manager,
             thread_manager,
             analytics_events_client,
+            model_list_catalog,
         }
     }
 
@@ -154,7 +158,7 @@ impl ConfigRequestProcessor {
         if !session_defaults_only {
             self.handle_config_mutation().await;
             if reload_user_config {
-                self.reload_user_config().await;
+                self.reload_user_config().await?;
             }
         }
         Ok(ClientResponsePayload::ConfigBatchWrite(response))
@@ -169,7 +173,7 @@ impl ConfigRequestProcessor {
             .handle_config_mutation_result(self.set_experimental_feature_enablement(params).await)
             .await?;
         if !response.enablement.is_empty() {
-            self.reload_user_config().await;
+            self.reload_user_config().await?;
         }
         self.outgoing
             .send_response_as(
@@ -292,17 +296,20 @@ impl ConfigRequestProcessor {
         Ok(ExperimentalFeatureEnablementSetResponse { enablement })
     }
 
-    async fn reload_user_config(&self) {
-        match self.load_latest_config(/*fallback_cwd*/ None).await {
-            Ok(_) => {}
+    async fn reload_user_config(&self) -> Result<(), JSONRPCErrorError> {
+        let latest_config = match self.load_latest_config(/*fallback_cwd*/ None).await {
+            Ok(config) => config,
             Err(err) => {
                 tracing::warn!(
                     "failed to rebuild user config for runtime refresh: {}",
                     err.message
                 );
-                return;
+                return Err(err);
             }
         };
+        self.model_list_catalog
+            .replace_overlay(latest_config.model_catalog_overlay.clone())
+            .await;
         let thread_ids = self.thread_manager.list_thread_ids().await;
         for thread_id in thread_ids {
             let Ok(thread) = self.thread_manager.get_thread(thread_id).await else {
@@ -322,6 +329,7 @@ impl ConfigRequestProcessor {
             };
             thread.refresh_runtime_config(next_config).await;
         }
+        Ok(())
     }
 
     async fn emit_plugin_toggle_events(

@@ -8,17 +8,26 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use std::sync::Arc;
+use std::sync::RwLock;
 use tokio::sync::TryLockError;
 
 #[derive(Debug)]
 struct CatalogOverlayModelsManager {
     inner: SharedModelsManager,
-    overlay: Vec<ModelInfo>,
+    overlay: RwLock<Arc<Vec<ModelInfo>>>,
 }
 
 impl CatalogOverlayModelsManager {
+    fn overlay(&self) -> Arc<Vec<ModelInfo>> {
+        self.overlay
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
     fn merge(&self, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
-        merge_catalog(models, &self.overlay)
+        let overlay = self.overlay();
+        merge_catalog(models, overlay.as_ref())
     }
 }
 
@@ -42,11 +51,9 @@ impl ModelsManager for CatalogOverlayModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'a, String> {
         Box::pin(async move {
+            let overlay = self.overlay();
             if let Some(model) = model
-                && self
-                    .overlay
-                    .iter()
-                    .any(|candidate| candidate.slug == *model)
+                && overlay.iter().any(|candidate| candidate.slug == *model)
             {
                 return model.clone();
             }
@@ -113,18 +120,35 @@ impl ModelsManager for CatalogOverlayModelsManager {
     ) -> ModelsManagerFuture<'_, ()> {
         self.inner.refresh_if_new_etag(etag, http_client_factory)
     }
+
+    fn replace_catalog_overlay(
+        &self,
+        overlay: Option<ModelsResponse>,
+    ) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async move {
+            let replacement = overlay.map_or_else(Vec::new, |overlay| overlay.models);
+            let mut current = self
+                .overlay
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current.as_ref() == &replacement {
+                return false;
+            }
+            *current = Arc::new(replacement);
+            true
+        })
+    }
 }
 
 pub fn with_catalog_overlay(
     manager: SharedModelsManager,
     overlay: Option<ModelsResponse>,
 ) -> SharedModelsManager {
-    let Some(overlay) = overlay else {
-        return manager;
-    };
     Arc::new(CatalogOverlayModelsManager {
         inner: manager,
-        overlay: overlay.models,
+        overlay: RwLock::new(Arc::new(
+            overlay.map_or_else(Vec::new, |overlay| overlay.models),
+        )),
     })
 }
 

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use codex_http_client::HttpClientFactory;
+use crate::model_list_catalog::ModelListCatalog;
 use codex_models_manager::manager::RefreshStrategy;
-use codex_models_manager::manager::SharedModelsManager;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -27,19 +26,15 @@ impl Drop for ModelsRefreshWorker {
     }
 }
 
-pub(crate) fn spawn(
-    models_manager: &SharedModelsManager,
-    http_client_factory: HttpClientFactory,
-) -> ModelsRefreshWorker {
-    spawn_with_interval(models_manager, http_client_factory, MODELS_REFRESH_INTERVAL)
+pub(crate) fn spawn(model_list_catalog: &Arc<ModelListCatalog>) -> ModelsRefreshWorker {
+    spawn_with_interval(model_list_catalog, MODELS_REFRESH_INTERVAL)
 }
 
 fn spawn_with_interval(
-    models_manager: &SharedModelsManager,
-    http_client_factory: HttpClientFactory,
+    model_list_catalog: &Arc<ModelListCatalog>,
     refresh_interval: Duration,
 ) -> ModelsRefreshWorker {
-    let models_manager = Arc::downgrade(models_manager);
+    let model_list_catalog = Arc::downgrade(model_list_catalog);
     let shutdown = CancellationToken::new();
     let worker_shutdown = shutdown.clone();
     let task = tokio::spawn(async move {
@@ -47,13 +42,11 @@ fn spawn_with_interval(
             if worker_shutdown.is_cancelled() {
                 break;
             }
-            let Some(models_manager) = models_manager.upgrade() else {
+            let Some(model_list_catalog) = model_list_catalog.upgrade() else {
                 break;
             };
-            models_manager
-                .list_models(RefreshStrategy::Online, http_client_factory.clone())
-                .await;
-            drop(models_manager);
+            model_list_catalog.refresh(RefreshStrategy::Online).await;
+            drop(model_list_catalog);
 
             tokio::select! {
                 _ = worker_shutdown.cancelled() => break,

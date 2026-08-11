@@ -252,10 +252,15 @@
         "string",
         "null"
       ]
+    },
+    "revision": {
+      "description": "Opaque semantic revision for the catalog snapshot used by this response.",
+      "type": "string"
     }
   },
   "required": [
-    "data"
+    "data",
+    "revision"
   ],
   "title": "ModelListResponse",
   "type": "object"
