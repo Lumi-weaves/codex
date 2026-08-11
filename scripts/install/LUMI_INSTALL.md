@@ -3,9 +3,8 @@
 For the publication graph, upstream adoption boundary, and first-tag gate, see
 [the Lumi distribution design](../../docs/lumi-distribution.md).
 
-`scripts/install/install.sh` (published as `install.sh`) and
-`scripts/install/install.ps1` install Lumi Codex package releases from the
-**Lumi-weaves/codex** GitHub Releases. They are the OpenAI canonical
+`scripts/install/install.sh` (published as `install.sh`) installs Lumi Codex
+package releases from the **Lumi-weaves/codex** GitHub Releases. It is the OpenAI canonical
 precompiled-package installer flow made fork-aware: GitHub release metadata
 (tag + per-asset SHA-256 digests), the `codex-package_SHA256SUMS` checksum
 manifest, staged immutable version directories, an atomic `current` pointer,
@@ -31,25 +30,6 @@ sh scripts/install/install.sh --release 0.147.0-lumi.4
 lumi-codex   # runs the installed Lumi Codex CLI
 ```
 
-## Quick start (Windows)
-
-```powershell
-# Version-pinned canary bootstrap (published release asset):
-$env:LUMI_RELEASE = '0.147.0-lumi.4'
-irm https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.4/install.ps1 | iex
-
-# From a checkout:
-powershell -ExecutionPolicy ByPass -File scripts\install\install.ps1 -Release 0.147.0-lumi.4
-
-lumi-codex   # runs the installed Lumi Codex CLI (lumi-codex.cmd)
-```
-
-Each canary publishes the two canonical Windows packages alongside the three
-Unix packages (Apple Silicon and the two Linux architectures). The PowerShell
-installer selects the native x86_64 or arm64 asset, verifies the same checksum
-manifest, and fails closed if the release is incomplete; it never falls back
-to a legacy package.
-
 ## Versions and targets
 
 - `--release` / `LUMI_RELEASE` accepts `latest`, `x.y.z-lumi.N`, or
@@ -57,15 +37,18 @@ to a legacy package.
   GitHub's `latest` endpoint excludes prereleases, so canary installs pin the
   exact `x.y.z-lumi.N` version.
 - `--target` / `LUMI_TARGET` overrides platform detection and must be one of
-  the three Unix targets (`x86_64-unknown-linux-musl`,
-  `aarch64-unknown-linux-musl`, `aarch64-apple-darwin`) or one of the two Windows targets
-  (`x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`). Unknown or unsafe
-  targets are rejected before any network request.
+  `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, or
+  `aarch64-apple-darwin`. Unknown or unsafe targets are rejected before any
+  network request.
 
 Lumi does not publish x86_64 (Intel) macOS prebuilt binaries. On an Intel Mac
 the Unix installer fails early with an unsupported-platform message instead of
 downloading anything; build from source there. Intel Macs never fall back to
 the ARM package or Rosetta.
+
+Lumi also does not publish Windows packages. Windows source inherited from
+upstream remains in the repository, but Windows is outside the supported Lumi
+distribution contract.
 
 ## Environment
 
@@ -73,8 +56,8 @@ the ARM package or Rosetta.
 | --- | --- | --- |
 | `LUMI_RELEASE` | `latest` | Version to install (overridden by `--release`). |
 | `LUMI_TARGET` | detected | Package target (overridden by `--target`). |
-| `LUMI_ROOT` | `${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex` on Unix; `%LOCALAPPDATA%\lumi-codex` on Windows | Lumi-owned install root; must be absolute; a symlinked/junction root is rejected. |
-| `LUMI_INSTALL_DIR` | `$HOME/.local/bin` on Unix; `%LOCALAPPDATA%\Programs\Lumi\Codex\bin` on Windows | Directory for the visible `lumi-codex` launcher. |
+| `LUMI_ROOT` | `${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex` | Lumi-owned install root; must be absolute and must not be a symlink. |
+| `LUMI_INSTALL_DIR` | `$HOME/.local/bin` | Directory for the visible `lumi-codex` launcher. |
 
 ## Managed layout
 

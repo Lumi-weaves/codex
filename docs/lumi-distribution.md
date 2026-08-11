@@ -26,14 +26,13 @@ under the widened watchdog, and its version-pinned install commands are the
 current documented baseline in the README. Later canaries follow the same
 standard-runner route and keep the release mutation point unchanged.
 
-`rust-v0.147.0-lumi.4` was published before Lumi retired the x86_64 (Intel)
-macOS target from the release contract; that historical prerelease may still
-contain the retired `codex-package-x86_64-apple-darwin.tar.gz` asset. It is
-not rewritten or deleted.
+`rust-v0.147.0-lumi.4` was published before Lumi retired Intel macOS and
+Windows from the release contract; that historical prerelease still contains
+those legacy assets. It is not rewritten or deleted.
 
 All current artifacts are intentionally **unsigned canaries**. The workflow
-does not claim macOS signing or notarization, Windows Authenticode signing,
-Linux signatures, provenance attestation, or a stable update channel.
+does not claim macOS signing or notarization, Linux signatures, provenance
+attestation, or a stable update channel.
 
 ## Product line and upstream tracking
 
@@ -70,19 +69,16 @@ parallel package format:
 - staged immutable release directories, an installation lock, a `current`
   pointer, and exact binary-version verification.
 
-The five Lumi release targets (upstream Codex additionally publishes
-x86_64-apple-darwin; Lumi does not publish Intel macOS prebuilts, so Intel
-Mac users build from source):
+The three Lumi release targets are:
 
 - `aarch64-apple-darwin`
 - `aarch64-unknown-linux-musl`
 - `x86_64-unknown-linux-musl`
-- `aarch64-pc-windows-msvc`
-- `x86_64-pc-windows-msvc`
 
-The workflow uses GitHub-hosted runners only. macOS and Windows ARM packages
-are cross-built where appropriate and validated statically for their target
-architecture; the release job does not pretend to execute a foreign binary.
+The workflow uses GitHub-hosted runners only. Cross-architecture packages are
+validated statically for their target architecture; the release job does not
+pretend to execute a foreign binary. Upstream source for Windows and Intel
+macOS remains mergeable, but Lumi does not validate or publish those targets.
 
 ## Fork-owned differences
 
@@ -94,7 +90,7 @@ The differences are deliberately narrow:
   distribution;
 - Lumi builds refuse official OpenAI update and announcement channels;
 - installation is side-by-side under a Lumi-owned root and exposes only
-  `lumi-codex` (or `lumi-codex.cmd`);
+  `lumi-codex`;
 - installers do not modify `CODEX_HOME`, an existing `codex`, shell profiles,
   PATH, official package-manager state, authentication, or configuration;
 - Unix extraction adds a member/type preflight that rejects absolute paths,
@@ -115,18 +111,18 @@ fork's isolation and inexpensive archive hardening.
 A matching tag push runs `.github/workflows/lumi-release.yml`:
 
 1. validate tag shape and equality with `codex-rs/Cargo.toml`;
-2. build the five-target matrix and create each canonical archive;
+2. build the three-target matrix and create each canonical archive;
 3. fan all builds into one release job;
 4. validate archive member safety, exact package metadata, required resources,
    target architecture, and embedded version;
 5. generate and verify `codex-package_SHA256SUMS`;
-6. stage exactly eight assets: five packages, the checksum manifest,
-   `install.sh`, and `install.ps1`;
+6. stage exactly five assets: three packages, the checksum manifest, and
+   `install.sh`;
 7. create an immutable GitHub prerelease and refuse to overwrite an existing
    release or its assets.
 
 GitHub's `/releases/latest` excludes prereleases. Canary installation must pin
-an exact version with `--release`, `-Release`, or `LUMI_RELEASE`; a no-argument
+an exact version with `--release` or `LUMI_RELEASE`; a no-argument
 installer is not a canary channel.
 
 ## First-tag acceptance gate
@@ -134,11 +130,10 @@ installer is not a canary channel.
 Before documenting a Lumi release URL as live or repinning a managed machine,
 the first real tag run must prove:
 
-- all five hosted-runner builds complete;
-- the release contains exactly the intended eight assets;
+- all three hosted-runner builds complete;
+- the release contains exactly the intended five assets;
 - GitHub API metadata exposes a `sha256:` digest for every asset;
-- a pinned macOS/Linux install and a pinned Windows install complete from the
-  published assets;
+- pinned macOS and Linux installs complete from the published assets;
 - `lumi-codex --version`, Code Mode host discovery, and packaged resources work
   from the real installed layout;
 - an existing official Codex binary and `CODEX_HOME` remain unchanged.
@@ -278,5 +273,4 @@ artifact passes the first-tag gate above.
 - [JIT dispatcher](../scripts/release/lumi_shadow_dispatch_jit.py)
 - [Installer behavior and safety model](../scripts/install/LUMI_INSTALL.md)
 - [Unix installer](../scripts/install/install.sh)
-- [Windows installer](../scripts/install/install.ps1)
 - [Canonical package builder](../scripts/build_codex_package.py)

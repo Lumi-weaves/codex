@@ -86,18 +86,16 @@ curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-
   sh -s -- --release 0.147.0-lumi.4
 ```
 
-```powershell
-$env:LUMI_RELEASE = '0.147.0-lumi.4'
-irm https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.4/install.ps1 | iex
-```
-
-The commands are intentionally version-pinned because GitHub's `latest`
+The command is intentionally version-pinned because GitHub's `latest`
 endpoint does not select prereleases. Until that tag exists, build from source
 instead; do not treat them as live release URLs.
 
 Lumi publishes no x86_64 (Intel) macOS prebuilt; on an Intel Mac the Unix
 installer fails early with that message, and you should build from source
 instead (the ARM package is never used as a fallback).
+Lumi also publishes no Windows packages; inherited Windows source remains in
+the repository for upstream merge compatibility, but it is not part of the
+supported Lumi product line.
 
 ```shell
 lumi-codex
@@ -105,12 +103,8 @@ lumi-codex
 
 `lumi-codex` is a tiny launcher that execs the verified
 `<root>/current/bin/codex`, so the packaged resources and the code-mode host
-stay adjacent to the real binary. The Windows installer
-(`scripts/install/install.ps1`) mirrors the fork repo, tag, root, and version
-behavior and consumes the x86_64 or arm64 Windows package published with every
-canary; an incomplete release fails closed. The earlier Lumi
-canary manager actions (doctor, activate, rollback, uninstall) were removed
-with the manager; see the
+stay adjacent to the real binary. The earlier Lumi canary manager actions
+(doctor, activate, rollback, uninstall) were removed with the manager; see the
 [installer documentation](./scripts/install/LUMI_INSTALL.md) for the full
 flow, layout, and safety model, and
 [distribution design](./docs/lumi-distribution.md) for the adopted upstream

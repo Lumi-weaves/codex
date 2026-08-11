@@ -11,16 +11,18 @@ budget.
 Lumi Codex publishes unsigned canary packages for:
 
 - Linux x86_64 and arm64 (`musl`);
-- Apple Silicon macOS (`aarch64-apple-darwin`); and
-- Windows x86_64 and arm64 (`msvc`).
+- Apple Silicon macOS (`aarch64-apple-darwin`).
 
-Linux x86_64 is the primary development and CI platform. Apple Silicon, Linux
-arm64, and Windows are distribution targets. Windows publication requires a
-successful build and package validation, but not OpenAI's full Windows Bazel,
-Cargo nextest, native-main, or argument-comment-lint matrices.
+Linux x86_64 is the primary development and CI platform. Apple Silicon and
+Linux arm64 are distribution targets.
 
 Lumi Codex does not publish or continuously validate Intel macOS. A maintainer
 who needs `x86_64-apple-darwin` must build it independently.
+
+Lumi Codex also does not publish or validate Windows. Upstream Windows source
+remains in the fork so upstream merges do not create needless conflicts, but
+it is outside Lumi's product contract until an observed user need justifies a
+new, narrowly scoped investment.
 
 ## What the upstream workflows protect
 
@@ -104,8 +106,8 @@ Do not duplicate the entire required suite merely because a commit reached
 
 - V8 or code-mode dependency changes require a targeted Linux x86_64 canary.
   Apple Silicon and Linux arm64 package behavior is checked by the shadow
-  release flow before publishing. Windows V8 source matrices and Intel macOS
-  canaries are excluded.
+  release flow before publishing. Windows and Intel macOS canaries are
+  excluded.
 - Full Cargo nextest, remote-executor, or additional architecture probes are
   manual diagnostics beyond the single primary-platform test run until
   repeated failures demonstrate that a scheduled lane would pay for itself.
@@ -124,9 +126,7 @@ created.
 evidence for our own Apple Silicon, Linux arm64, and Linux x86_64 builders. A
 shadow artifact is never silently promoted into a release.
 
-Windows x86_64 and arm64 remain build-and-package release targets. They do not
-create a standing Windows CI matrix. Intel macOS is absent from both CI and
-new releases.
+Windows and Intel macOS are absent from both CI and new releases.
 
 Official OpenAI release-preparation schedules, signing, npm/R2/DotSlash,
 Winget, and website deployment are not Lumi delivery dependencies.
