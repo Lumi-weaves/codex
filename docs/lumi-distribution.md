@@ -30,6 +30,11 @@ standard-runner route and keep the release mutation point unchanged.
 Windows from the release contract; that historical prerelease still contains
 those legacy assets. It is not rewritten or deleted.
 
+`rust-v0.147.0-lumi.5` adds a config-owned model catalog overlay and explicit
+per-model provider routing. It is the first Lumi canary that can expose Qwen
+3.8 Max in both the CLI and ChatGPT Desktop model pickers, route new tasks to
+OpenCodex, and preserve a fail-closed provider boundary for existing tasks.
+
 All current artifacts are intentionally **unsigned canaries**. The workflow
 does not claim macOS signing or notarization, Linux signatures, provenance
 attestation, or a stable update channel.

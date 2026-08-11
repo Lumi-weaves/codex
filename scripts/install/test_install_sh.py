@@ -15,7 +15,7 @@ import unittest
 INSTALL_SCRIPT = Path(__file__).with_name("install.sh")
 VERSION = "0.142.5"
 MISMATCH_VERSION = "0.145.0"
-LUMI_VERSION = "0.147.0-lumi.4"
+LUMI_VERSION = "0.147.0-lumi.5"
 TARGETS = (
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",

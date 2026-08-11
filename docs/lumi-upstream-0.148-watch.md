@@ -62,7 +62,7 @@ routine merge:
   while preserving `alpha.6` in the downstream version would require a wider
   release-tooling contract change.
 
-Accordingly, `main` remains on `0.147.0-lumi.4`. A published stable
+Accordingly, `main` remains on `0.147.0-lumi.5`. A published stable
 `rust-v0.148.0` with real release notes is the next integration trigger.
 
 ## Stable-release recheck

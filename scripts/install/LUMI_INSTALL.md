@@ -21,11 +21,11 @@ to the real binary (required for code mode on macOS).
 
 ```sh
 # Version-pinned canary bootstrap (published release asset):
-curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.4/install.sh | \
-  sh -s -- --release 0.147.0-lumi.4
+curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.5/install.sh | \
+  sh -s -- --release 0.147.0-lumi.5
 
 # From a checkout:
-sh scripts/install/install.sh --release 0.147.0-lumi.4
+sh scripts/install/install.sh --release 0.147.0-lumi.5
 
 lumi-codex   # runs the installed Lumi Codex CLI
 ```

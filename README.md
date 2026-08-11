@@ -78,12 +78,12 @@ manifest against the GitHub release-metadata digest and the package archive
 against the manifest, and never modify `CODEX_HOME`, an existing `codex`
 binary, a shell profile, or PATH.
 
-After the `rust-v0.147.0-lumi.4` canary assets have been published, its
+After the `rust-v0.147.0-lumi.5` canary assets have been published, its
 version-pinned one-command install is:
 
 ```shell
-curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.4/install.sh | \
-  sh -s -- --release 0.147.0-lumi.4
+curl -fsSL https://github.com/Lumi-weaves/codex/releases/download/rust-v0.147.0-lumi.5/install.sh | \
+  sh -s -- --release 0.147.0-lumi.5
 ```
 
 The command is intentionally version-pinned because GitHub's `latest`
