@@ -5,15 +5,18 @@ use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadSection;
+use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_extension_api::ExtensionDataInit;
+use codex_extension_api::ThreadIdleCause;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_thread_store::PersistContext;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -194,6 +197,42 @@ fn merge_persisted_approvals_reviewer(
         }
         _ => None,
     });
+}
+
+fn latest_persisted_approval_policy(
+    history: &[RolloutItem],
+) -> Option<codex_protocol::protocol::AskForApproval> {
+    history
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(index, item)| match item {
+            RolloutItem::TurnContext(turn_context) => {
+                let updated_policy = turn_context.turn_id.as_ref().and_then(|turn_id| {
+                    let turn_start = history[..index].iter().rposition(|item| {
+                        matches!(
+                            item,
+                            RolloutItem::EventMsg(EventMsg::TurnStarted(event))
+                                if &event.turn_id == turn_id
+                        )
+                    })?;
+                    history[turn_start + 1..index]
+                        .iter()
+                        .rev()
+                        .find_map(|item| match item {
+                            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                                Some(event.thread_settings.approval_policy)
+                            }
+                            _ => None,
+                        })
+                });
+                Some(updated_policy.unwrap_or(turn_context.approval_policy))
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(event.thread_settings.approval_policy)
+            }
+            _ => None,
+        })
 }
 
 fn normalize_thread_list_cwd_filters(
@@ -2505,7 +2544,7 @@ impl ThreadRequestProcessor {
                 codex_app_server_protocol::ThreadHistoryMode::Paginated
             ) {
                 self.thread_store
-                    .persist_thread(thread_id)
+                    .persist_thread(thread_id, PersistContext::Standard)
                     .await
                     .map_err(|err| thread_read_history_load_error(thread_id, err))?;
                 thread.turns = self
@@ -3206,6 +3245,27 @@ impl ThreadRequestProcessor {
             developer_instructions,
             personality,
         );
+        if typesafe_overrides.approval_policy.is_none()
+            && let Some(value) = request_overrides
+                .as_mut()
+                .and_then(|overrides| overrides.remove("approval_policy"))
+        {
+            let approval_policy = match serde_json::from_value(value) {
+                Ok(approval_policy) => approval_policy,
+                Err(err) => {
+                    self.outgoing
+                        .send_error(
+                            request_id,
+                            invalid_params(format!(
+                                "invalid `approval_policy` config override: {err}"
+                            )),
+                        )
+                        .await;
+                    return Ok(());
+                }
+            };
+            typesafe_overrides.approval_policy = Some(approval_policy);
+        }
         let has_explicit_model_resume_override =
             has_model_or_provider_override(request_overrides.as_ref(), &typesafe_overrides);
         let persisted_metadata = self
@@ -3280,7 +3340,7 @@ impl ThreadRequestProcessor {
                 if paginated_resume
                     && let Err(error) = self
                         .thread_store
-                        .persist_thread(thread_id)
+                        .persist_thread(thread_id, PersistContext::Standard)
                         .await
                         .map_err(thread_store_resume_read_error)
                 {
@@ -3455,7 +3515,10 @@ impl ThreadRequestProcessor {
                     .await;
                 }
                 self.thread_goal_processor
-                    .emit_resume_goal_snapshot_and_continue(thread_id, codex_thread.as_ref())
+                    .emit_resume_goal_snapshot(thread_id)
+                    .await;
+                codex_thread
+                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
                     .await;
             }
             Err(err) => {
@@ -3483,6 +3546,10 @@ impl ThreadRequestProcessor {
             request_overrides.as_ref(),
             typesafe_overrides,
         );
+        if typesafe_overrides.approval_policy.is_none() {
+            typesafe_overrides.approval_policy =
+                latest_persisted_approval_policy(&resumed_history.history);
+        }
         let state_db_ctx = self.state_db.clone()?;
         let persisted_metadata = state_db_ctx
             .get_thread(resumed_history.conversation_id)
@@ -3622,7 +3689,7 @@ impl ThreadRequestProcessor {
             }
             if paginated_resume && (include_turns || params.initial_turns_page.is_some()) {
                 self.thread_store
-                    .persist_thread(existing_thread_id)
+                    .persist_thread(existing_thread_id, PersistContext::Standard)
                     .await
                     .map_err(thread_store_resume_read_error)?;
             }
@@ -5198,6 +5265,12 @@ pub(crate) fn thread_from_stored_thread(
         section: thread.section.map(|section| ThreadSection {
             id: section.id,
             name: section.name,
+            appearance: section
+                .appearance
+                .map(|appearance| ThreadSectionAppearance {
+                    icon: appearance.icon,
+                    color: appearance.color,
+                }),
         }),
         section_entered_at: thread
             .section_entered_at

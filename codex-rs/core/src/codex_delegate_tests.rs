@@ -181,9 +181,7 @@ async fn forward_ops_preserves_submission_trace_context() {
         parent_turn_id: Some("parent-turn".to_string()),
     };
     tx_ops
-        .send(crate::session::SessionIngress::Submission(
-            submission.clone(),
-        ))
+        .send(crate::session::SessionIngress::Submission(submission))
         .await
         .unwrap();
     drop(tx_ops);
@@ -195,10 +193,18 @@ async fn forward_ops_preserves_submission_trace_context() {
     let crate::session::SessionIngress::Submission(forwarded) = forwarded else {
         panic!("expected a forwarded external submission");
     };
-    assert_eq!(submission.id, forwarded.id);
-    assert_eq!(submission.op, forwarded.op);
-    assert_eq!(submission.trace, forwarded.trace);
-    assert_eq!(submission.parent_turn_id, forwarded.parent_turn_id);
+    assert_eq!(forwarded.id, "sub-1");
+    assert!(matches!(forwarded.op, Op::Interrupt));
+    assert_eq!(
+        forwarded.trace,
+        Some(codex_protocol::protocol::W3cTraceContext {
+            traceparent: Some(
+                "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
+            ),
+            tracestate: Some("vendor=state".to_string()),
+        })
+    );
+    assert_eq!(forwarded.parent_turn_id, Some("parent-turn".to_string()));
 
     timeout(Duration::from_secs(1), forward)
         .await
@@ -212,6 +218,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
         crate::session::tests::make_session_and_context_with_rx().await;
     let cancel_token = CancellationToken::new();
     cancel_token.cancel();
+    let parent_environments = parent_ctx.environments.clone();
 
     let result = timeout(
         Duration::from_secs(/*secs*/ 1),
@@ -221,6 +228,7 @@ async fn run_codex_thread_interactive_respects_pre_cancelled_spawn() {
             Arc::clone(&parent_session.services.models_manager),
             parent_session,
             parent_ctx,
+            parent_environments,
             cancel_token,
             SubAgentSource::Review,
             /*initial_history*/ None,
@@ -333,13 +341,11 @@ async fn handle_request_permissions_uses_tool_call_id_for_round_trip() {
     let crate::session::SessionIngress::Submission(submission) = ingress else {
         panic!("expected an external submission");
     };
-    assert_eq!(
-        submission.op,
-        Op::RequestPermissionsResponse {
-            id: call_id,
-            response: expected_response,
-        }
-    );
+    let Op::RequestPermissionsResponse { id, response } = submission.op else {
+        panic!("expected request permissions response");
+    };
+    assert_eq!(id, call_id);
+    assert_eq!(response, expected_response);
 }
 
 #[tokio::test]
@@ -430,13 +436,11 @@ async fn handle_request_user_input_preserves_non_blocking_flag_for_round_trip() 
     let crate::session::SessionIngress::Submission(submission) = ingress else {
         panic!("expected an external submission");
     };
-    assert_eq!(
-        submission.op,
-        Op::UserInputAnswer {
-            id: child_event_id,
-            response: expected_response,
-        }
-    );
+    let Op::UserInputAnswer { id, response } = submission.op else {
+        panic!("expected user input answer");
+    };
+    assert_eq!(id, child_event_id);
+    assert_eq!(response, expected_response);
 }
 
 #[tokio::test]
@@ -556,14 +560,17 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
     let crate::session::SessionIngress::Submission(submission) = ingress else {
         panic!("expected an external submission");
     };
-    assert_eq!(
-        submission.op,
-        Op::ExecApproval {
-            id: "callback-approval-1".to_string(),
-            turn_id: Some("child-turn-1".to_string()),
-            decision: ReviewDecision::Abort,
-        }
-    );
+    let Op::ExecApproval {
+        id,
+        turn_id,
+        decision,
+    } = submission.op
+    else {
+        panic!("expected exec approval");
+    };
+    assert_eq!(id, "callback-approval-1");
+    assert_eq!(turn_id, Some("child-turn-1".to_string()));
+    assert_eq!(decision, ReviewDecision::Abort);
 }
 
 #[tokio::test]

@@ -1,81 +1,78 @@
-# Upstream 0.148 watch note
+# Upstream 0.148 integration note
 
-Status recorded on 2026-08-11. This is an integration checkpoint, not a
-commitment to adopt an alpha release.
+Status recorded on 2026-08-11. This is an isolated alpha integration baseline,
+not yet a Lumi `main` promotion or release.
 
-## Current upstream state
+## Upstream state
 
-- The latest stable OpenAI Codex release is still `rust-v0.147.0`.
-- The newest published 0.148 tag is the prerelease
-  [`rust-v0.148.0-alpha.6`](https://github.com/openai/codex/releases/tag/rust-v0.148.0-alpha.6),
-  peeled to `bccbfd143de6e35a20bafe735fb5187f3b1930ea`.
-- The alpha release bodies contain only the release title, not a curated
-  changelog. The useful change inventory therefore comes from the upstream
-  commits and referenced pull requests.
-- At inspection time, upstream `main` was already 40 commits beyond alpha.6,
-  including follow-up work in gRPC Code Mode, thread persistence, packaged
-  runtime discovery, and unified-exec telemetry.
+- The latest published 0.148 tag inspected here is
+  `rust-v0.148.0-alpha.7`, peeled to
+  `fb954fd60f5d8182ced65fbe041466c4333a98a0`.
+- The alpha release body has no curated changelog. The integration inventory
+  therefore comes from the upstream commits and source diff.
+- Relative to Lumi `origin/main` at `0a232c8f35`, Git reports 51 Lumi commits
+  and 149 upstream commits from merge base
+  `92b83e226df59dc5ec43a49259d7716821e20c85`.
+- The large count partly reflects rewritten upstream history: older 0.147 tag
+  commits are not ancestors of alpha.7 even though much of their content had
+  already reached Lumi.
 
-The 0.148 alpha line includes several worthwhile changes: a gRPC/TCP Code Mode
-host, a major plugin/skills-loader consolidation, durable user-message queue
-dispatch, asynchronous hooks, MCP event subscriptions, richer runtime
-diagnostics, full-history agent roles, base-instruction provenance, session
-archive/resume/export improvements, and line-ending preservation for
-`apply_patch`.
+The useful 0.148 changes include the gRPC/TCP Code Mode host, consolidated
+skills loading, durable queued user messages, asynchronous hooks, MCP event
+subscriptions, runtime diagnostics, richer thread persistence and export,
+base-instruction provenance, and line-ending-safe patch application.
 
-## Merge probe
+## Alpha.7 integration receipt
 
-An isolated merge probe compared Lumi `main` at
-`2efe4eff70fe2492d85f41f7d13f128c1ea8e137` with
-`rust-v0.148.0-alpha.6`.
+The merge was built in the isolated worktree/branch
+`codex/upstream-0.148-integration` from Lumi `0.147.0-lumi.5`. The downstream
+version is deliberately `0.148.0-alpha.7-lumi.1` so prerelease provenance is
+not hidden.
 
-- merge base: `92b83e226df59dc5ec43a49259d7716821e20c85`;
-- divergence: 47 Lumi commits and 104 upstream commits;
-- exact changed-path overlap: 59 files;
-- explicit conflicts: three text files (`Cargo.toml`, `Cargo.lock`, and
-  `core/src/tasks/mod.rs`) plus two generated app-server schema archives;
-- after a provisional resolution, `cargo check` passed for `codex-core`,
-  `codex-app-server`, and `codex-cli`;
-- all eight `unified_exec_async_completion` integration tests passed;
-- compiling the broader core test surface then exposed ten downstream porting
-  gaps around the new durable-queue `start_task` argument and the move from
-  `UnifiedExecContext.turn` to `step_context.turn`.
+Resolved semantic boundaries:
 
-The probe worktree was removed after observation. Lumi `main` was not changed.
+- preserved Lumi's single serialized `SessionIngress` FIFO for external
+  submissions, terminal completions, and TTY-attention events while adopting
+  upstream's move-only `Submission`/`Op` dispatch;
+- kept completion admission queue-before-resolution and session-scoped
+  pending input, so an interrupt before inference sampling cannot erase a
+  terminal completion;
+- composed awaited-terminal finality with upstream `ThreadIdleCause` using a
+  session-owned one-shot idle claim. Resolution, task finalization, and queued
+  continuation paths may race, but only one can restore finality and emit the
+  retained `Completed`, `Interrupted`, or `Failed` cause;
+- retained separate control-plane and model-inference authentication managers;
+- regenerated Cargo.lock for the Lumi version without refreshing external
+  dependency selections;
+- retained `ThreadActiveFlag::WaitingOnBackgroundTerminal` and regenerated
+  stable and experimental app-server schema exports;
+- repaired `just write-app-server-schema` to use upstream's Python generator
+  after the Rust generator binary was removed.
 
-## Why alpha.6 should not advance Lumi `main`
+Validation completed on the integration baseline:
 
-The visible conflicts are tractable, but the semantic boundary is not yet a
-routine merge:
+- `cargo check --locked` for `codex-core`, `codex-app-server`, and `codex-cli`;
+- clean second-generation stable and experimental app-server schemas;
+- all eight `unified_exec_async_completion` integration tests;
+- focused FIFO, completion-ingress, interrupt, cleanup, finality, retained idle
+  cause, and schema fixture tests.
 
-- awaited-terminal finality and cleanup must compose deliberately with
-  upstream `ThreadIdleCause` and durable queued-user-message dispatch;
-- completion/TTY-attention inputs must remain FIFO, exactly once, and must not
-  trigger thread idle or unload prematurely;
-- app-server schemas must be regenerated while retaining Lumi's
-  `WaitingOnBackgroundTerminal` status and all new upstream protocol fields;
-- role-local worker base instructions must compose with upstream base-
-  instruction provenance and full-history roles;
-- Lumi's separate control-plane and model-inference authentication managers
-  must survive the new account, telemetry, routing, and identity paths;
-- adopting an alpha as `0.148.0-lumi.N` would hide its prerelease provenance,
-  while preserving `alpha.6` in the downstream version would require a wider
-  release-tooling contract change.
+Rust core tests require `RUST_MIN_STACK=8388608`; without it, the large
+completion-ingress future can overflow the default test-thread stack even
+though the same test passes with the repository's intended stack size.
 
-Accordingly, `main` remains on `0.147.0-lumi.5`. A published stable
-`rust-v0.148.0` with real release notes is the next integration trigger.
+## Remaining promotion gates
 
-## Stable-release recheck
+Before this baseline can advance Lumi `main`:
 
-When `rust-v0.148.0` exists, repeat the port on a disposable sync worktree and
-require at least:
+1. reapply the stashed same-task provider-switch prototype against the merged
+   provider/client runtime instead of restoring its old routing structure
+   mechanically;
+2. rerun dual-auth, model-catalog, app-server waiting-status, packaging,
+   installer, and Code Mode host gates;
+3. run the Lumi CI contract and one Desktop completion-wake smoke;
+4. review the final diff and publish only after the alpha provenance and
+   residual upstream risk are explicit.
 
-1. regenerated Cargo lockfile and app-server schemas with a clean second
-   generation;
-2. awaited-terminal, durable-queue, TTY-attention, interrupt, cleanup, and
-   exactly-once completion tests;
-3. app-server waiting-status, resume, diagnostics, and unload tests;
-4. custom-provider worker-base, follow-up routing, model-catalog, and dual-auth
-   tests;
-5. canonical package, installer, Code Mode host, shadow workflow, and one
-   Desktop end-to-end completion-wake smoke before promotion to `main`.
+The original prototype remains recoverable in stash
+`c69e323daa41a3f5c08b817daa8f56f4eefbdb14` until its rebased form is accepted.

@@ -6,18 +6,17 @@
 //! completion ingress resolves the token after the model-visible completion
 //! fragment is queued; synchronous observation/disposal resolves it directly.
 //!
-//! The registry is deliberately dumb state plus the narrow bookkeeping needed
-//! to restore a truthful final status: the most recent `last_agent_message`
-//! from a `TurnComplete` whose final status was held back. The session layer
-//! (`Session` methods in `session/mod.rs`) owns the status-transition policy:
-//! keep `AgentStatus::Running` while awaited ids remain, suppress V2 parent
-//! completion notification, and restore `Completed` only when the last token
-//! is resolved with no continuation (no active turn, no pending session
-//! inputs). Exited unified-exec entries are filtered before completion
-//! admission, so this registry never consults `list_processes()`.
+//! The registry also owns the one-shot idle claim for an awaited batch. It
+//! retains the most recent held final message and the authoritative upstream
+//! `ThreadIdleCause`, then lets exactly one safe-boundary caller consume them
+//! after the last token resolves and no continuation remains. The session
+//! layer (`Session` methods in `session/mod.rs`) owns status transitions and
+//! lifecycle emission. Exited unified-exec entries are filtered before
+//! completion admission, so this registry never consults `list_processes()`.
 
 use std::collections::HashSet;
 
+use codex_extension_api::ThreadIdleCause;
 use tokio::sync::Mutex;
 
 /// Session-scoped awaited-terminal registry (see module docs).
@@ -30,13 +29,26 @@ pub(crate) struct AwaitedTerminals {
 struct AwaitedTerminalState {
     /// Process ids of live terminals the session is currently awaiting.
     awaited: HashSet<i32>,
-    /// Most recent `last_agent_message` from a `TurnComplete` that was held
-    /// back (kept non-final) because awaited terminals remained. Retained
-    /// only while a final completion is being suppressed; `None` when nothing
-    /// is being held back, or when the suppressed completion carried no
-    /// message. Used to restore `Completed` when the last terminal is
-    /// resolved with no continuation.
-    waiting_final_message: Option<String>,
+    /// Final status held back while an awaited batch remains in flight.
+    waiting_final: Option<WaitingFinal>,
+    /// One-shot ownership token for the thread-idle lifecycle that belongs to
+    /// the current awaited batch. It survives resolution while a continuation
+    /// is queued and is consumed only once the session is truly idle.
+    idle_claim_pending: bool,
+    /// Most recent terminal cause observed while the claim is pending.
+    pending_idle_cause: Option<ThreadIdleCause>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WaitingFinal {
+    pub(crate) last_agent_message: Option<String>,
+    pub(crate) idle_cause: ThreadIdleCause,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AwaitedIdleClaim {
+    pub(crate) waiting_final: Option<WaitingFinal>,
+    pub(crate) idle_cause: Option<ThreadIdleCause>,
 }
 
 impl AwaitedTerminals {
@@ -53,7 +65,10 @@ impl AwaitedTerminals {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn register(&self, process_id: i32) {
-        self.state.lock().await.awaited.insert(process_id);
+        let mut state = self.state.lock().await;
+        if state.awaited.insert(process_id) && !state.idle_claim_pending {
+            state.idle_claim_pending = true;
+        }
     }
 
     /// Resolve a terminal id after its completion was admitted or it was
@@ -93,29 +108,73 @@ impl AwaitedTerminals {
         changed
     }
 
-    /// Record the final message of a `TurnComplete` that was held non-final
-    /// because awaited terminals remain.
-    ///
-    /// Only a message-bearing completion replaces the retained message: a
-    /// message-less auxiliary completion (for example a standalone user-shell
-    /// turn) must not erase the model's final words from an earlier
-    /// suppressed turn. The most recent waiting *message* therefore always
-    /// wins while `None` never clobbers a retained message.
-    pub(crate) async fn note_waiting_final(&self, last_agent_message: Option<String>) {
-        if let Some(message) = last_agent_message {
-            self.state.lock().await.waiting_final_message = Some(message);
+    /// Attach the current task's terminal cause to an outstanding awaited
+    /// batch. The returned boolean is the task tail's ownership token: when
+    /// true, ordinary idle emission must not race the batch's one-shot claim.
+    pub(crate) async fn note_idle_cause_if_pending(&self, cause: ThreadIdleCause) -> bool {
+        let mut state = self.state.lock().await;
+        if !state.idle_claim_pending {
+            return false;
         }
+        state.pending_idle_cause = Some(cause);
+        if let Some(waiting_final) = state.waiting_final.as_mut() {
+            waiting_final.idle_cause = cause;
+        }
+        true
     }
 
-    /// Drop the retained waiting final message because a real final status
-    /// superseded it.
-    pub(crate) async fn clear_waiting_final(&self) {
-        self.state.lock().await.waiting_final_message = None;
+    /// Atomically hold a `TurnComplete` final status when terminals remain.
+    /// A message-less auxiliary completion preserves the latest real final
+    /// message while still updating the cause.
+    pub(crate) async fn hold_final_if_awaited(
+        &self,
+        last_agent_message: Option<String>,
+        fallback_cause: ThreadIdleCause,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if state.awaited.is_empty() {
+            state.waiting_final = None;
+            return false;
+        }
+
+        let idle_cause = state.pending_idle_cause.unwrap_or(fallback_cause);
+        match state.waiting_final.as_mut() {
+            Some(waiting_final) => {
+                if last_agent_message.is_some() {
+                    waiting_final.last_agent_message = last_agent_message;
+                }
+                waiting_final.idle_cause = idle_cause;
+            }
+            None => {
+                state.waiting_final = Some(WaitingFinal {
+                    last_agent_message,
+                    idle_cause,
+                });
+            }
+        }
+        true
     }
 
-    /// Take (and clear) the retained waiting final message, if any.
-    pub(crate) async fn take_waiting_final(&self) -> Option<String> {
-        self.state.lock().await.waiting_final_message.take()
+    /// Atomically consume the awaited batch's idle claim after all ids have
+    /// resolved. A running session must have a held final before it may claim;
+    /// interrupted/errored sessions may claim without one.
+    pub(crate) async fn claim_idle_if_resolved(
+        &self,
+        allow_without_waiting_final: bool,
+    ) -> Option<AwaitedIdleClaim> {
+        let mut state = self.state.lock().await;
+        if !state.awaited.is_empty()
+            || !state.idle_claim_pending
+            || (state.waiting_final.is_none() && !allow_without_waiting_final)
+        {
+            return None;
+        }
+
+        state.idle_claim_pending = false;
+        Some(AwaitedIdleClaim {
+            waiting_final: state.waiting_final.take(),
+            idle_cause: state.pending_idle_cause.take(),
+        })
     }
 }
 
@@ -149,29 +208,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn waiting_final_message_keeps_most_recent_message() {
+    async fn waiting_final_keeps_most_recent_message_and_cause() {
         let registry = AwaitedTerminals::new();
-        assert_eq!(registry.take_waiting_final().await, None);
-
-        registry.note_waiting_final(Some("first".to_string())).await;
-        registry
-            .note_waiting_final(Some("second".to_string()))
-            .await;
+        registry.register(42).await;
+        assert!(
+            registry
+                .note_idle_cause_if_pending(ThreadIdleCause::Completed)
+                .await
+        );
+        assert!(
+            registry
+                .hold_final_if_awaited(Some("first".to_string()), ThreadIdleCause::Completed,)
+                .await
+        );
+        assert!(
+            registry
+                .hold_final_if_awaited(Some("second".to_string()), ThreadIdleCause::Completed,)
+                .await
+        );
+        assert!(registry.resolve(42).await);
         assert_eq!(
-            registry.take_waiting_final().await,
-            Some("second".to_string())
+            registry.claim_idle_if_resolved(false).await,
+            Some(AwaitedIdleClaim {
+                waiting_final: Some(WaitingFinal {
+                    last_agent_message: Some("second".to_string()),
+                    idle_cause: ThreadIdleCause::Completed,
+                }),
+                idle_cause: Some(ThreadIdleCause::Completed),
+            })
         );
 
         // A message-less suppressed completion must not erase the retained
         // final message.
-        registry.note_waiting_final(Some("third".to_string())).await;
-        registry.note_waiting_final(None).await;
-        assert_eq!(
-            registry.take_waiting_final().await,
-            Some("third".to_string())
+        registry.register(43).await;
+        assert!(
+            registry
+                .hold_final_if_awaited(Some("third".to_string()), ThreadIdleCause::Completed,)
+                .await
         );
-
-        registry.clear_waiting_final().await;
-        assert_eq!(registry.take_waiting_final().await, None);
+        assert!(
+            registry
+                .note_idle_cause_if_pending(ThreadIdleCause::Failed)
+                .await
+        );
+        assert!(
+            registry
+                .hold_final_if_awaited(None, ThreadIdleCause::Completed)
+                .await
+        );
+        assert!(registry.resolve(43).await);
+        assert_eq!(
+            registry.claim_idle_if_resolved(false).await,
+            Some(AwaitedIdleClaim {
+                waiting_final: Some(WaitingFinal {
+                    last_agent_message: Some("third".to_string()),
+                    idle_cause: ThreadIdleCause::Failed,
+                }),
+                idle_cause: Some(ThreadIdleCause::Failed),
+            })
+        );
+        assert_eq!(registry.claim_idle_if_resolved(true).await, None);
     }
 }
