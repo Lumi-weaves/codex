@@ -135,13 +135,18 @@ terminal process finishes without a synchronous observation of its exit, the
 session enqueues a bounded, model-visible completion fragment (process
 identity, exit/failure status, duration, output-size metadata, and a small
 head/tail excerpt of the transcript) and wakes a model turn to consume it.
-`unified_exec_completion_wake` is a session-scoped rollout flag that is
-**disabled by default** (`default_enabled: false`), and unified exec behavior
-is unchanged unless it is enabled:
+`unified_exec_completion_wake` is a session-scoped runtime flag. On the Lumi
+product line it is **enabled by default**: awaited background terminals keep
+the task active, and their completion is wake-if-idle / queue-if-busy without
+requiring a launch-time override. This product default matters for Desktop and
+Remote-SSH reconnects, whose replacement app-server otherwise starts from the
+ordinary persisted configuration rather than the previous process's ad-hoc
+CLI flags. It can still be explicitly disabled for diagnosis or legacy
+behavior:
 
 ```toml
 [features]
-unified_exec_completion_wake = true
+unified_exec_completion_wake = false
 ```
 
 The wake policy is wake-if-idle / queue-if-busy: an idle session is woken
@@ -150,6 +155,12 @@ regular turn admits the completion at its next safe inference boundary, and a
 turn already past its visible-answer boundary leaves the item queued to wake a
 fresh turn after the old turn clears. Interrupts never lose queued completions
 because abort cleanup only clears turn-local pending input.
+
+Background terminal ownership is scoped to the lifetime of the app-server
+runtime. A Desktop reconnect that replaces the remote app-server terminates
+that runtime's terminals; the task transcript and ordinary thread state
+survive, but live process handles and their future completions do not migrate
+to the replacement process.
 
 ---
 

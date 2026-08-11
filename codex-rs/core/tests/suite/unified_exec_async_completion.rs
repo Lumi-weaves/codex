@@ -1,6 +1,6 @@
-//! Integration coverage for the experimental unified-exec async completion
-//! wake: a background terminal process that finishes without a synchronous
-//! observation wakes a model turn carrying a bounded completion fragment.
+//! Integration coverage for unified-exec async completion wake: a background
+//! terminal process that finishes without a synchronous observation wakes a
+//! model turn carrying a bounded completion fragment.
 
 use anyhow::Result;
 use codex_features::Feature;
@@ -45,6 +45,14 @@ fn completion_feature_config(config: &mut codex_core::config::Config) {
     config
         .features
         .enable(Feature::UnifiedExecCompletionWake)
+        .expect("test config should allow feature update");
+}
+
+fn unified_exec_default_config(config: &mut codex_core::config::Config) {
+    config.use_experimental_unified_exec_tool = true;
+    config
+        .features
+        .enable(Feature::UnifiedExec)
         .expect("test config should allow feature update");
 }
 
@@ -153,14 +161,14 @@ fn sse_template(events: Vec<Value>) -> ResponseTemplate {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn background_completion_wakes_idle_turn_when_enabled() -> Result<()> {
+async fn background_completion_wakes_idle_turn_by_default() -> Result<()> {
     // TODO(anp): Remove after unified-exec fixtures use target-native commands.
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(completion_feature_config);
+    let mut builder = test_codex().with_config(unified_exec_default_config);
     let test = builder.build_with_auto_env(&server).await?;
 
     let call_id = "uexec-async-completion-idle";
@@ -600,7 +608,7 @@ async fn write_stdin_observing_exit_does_not_start_an_extra_turn() -> Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn disabled_feature_preserves_existing_behavior() -> Result<()> {
+async fn explicit_opt_out_preserves_existing_behavior() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -612,7 +620,10 @@ async fn disabled_feature_preserves_existing_behavior() -> Result<()> {
             .features
             .enable(Feature::UnifiedExec)
             .expect("test config should allow feature update");
-        // UnifiedExecCompletionWake deliberately left disabled.
+        config
+            .features
+            .disable(Feature::UnifiedExecCompletionWake)
+            .expect("test config should allow feature update");
     });
     let test = builder.build_with_auto_env(&server).await?;
 

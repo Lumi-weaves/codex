@@ -116,11 +116,12 @@ pub enum Feature {
     /// on either `unified_exec` or `shell_zsh_fork` because those features have
     /// separate rollout and enterprise controls.
     UnifiedExecZshFork,
-    /// EXPERIMENTAL - wake a model turn when a background unified-exec terminal
-    /// process finishes without a synchronous observation of its exit.
+    /// Wake a model turn when a background unified-exec terminal process
+    /// finishes without a synchronous observation of its exit.
     ///
     /// This is a session-scoped rollout flag, not a per-operation wake policy.
-    /// Disabled by default; when disabled, unified exec behavior is unchanged.
+    /// Stable and enabled by default on the Lumi product line; an explicit
+    /// false value retains the legacy non-waking unified-exec behavior.
     UnifiedExecCompletionWake,
     /// Removed compatibility flag. Transcript scrollback reflow on terminal resize is always on.
     TerminalResizeReflow,
@@ -897,8 +898,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::UnifiedExecCompletionWake,
         key: "unified_exec_completion_wake",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        // Lumi's awaited-terminal runtime is product behavior, not a launch-
+        // command experiment. Keeping it enabled by default also prevents a
+        // Desktop/Remote-SSH app-server restart from silently dropping back
+        // to legacy non-waking terminal semantics.
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::ShellSnapshot,
