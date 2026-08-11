@@ -395,6 +395,21 @@ class SuccessDispatchTest(unittest.TestCase):
         )
         self._assert_success_common(code, transport, popen, err, "x86_64")
 
+    def test_queued_job_started_at_without_runner_is_eligible(self):
+        jobs = [
+            make_gate(),
+            make_build_job(
+                started_at="2026-08-11T02:51:14Z",
+                runner_id=0,
+                runner_name="",
+                runner_group_id=0,
+            ),
+        ]
+        code, transport, popen, err = run_cli(
+            "arm64", responses=responses_for("arm64", jobs=jobs)
+        )
+        self._assert_success_common(code, transport, popen, err, "arm64")
+
     def test_child_exit_code_propagated(self):
         code, _transport, _popen, _err = run_cli(exit_code=7)
         self.assertEqual(code, 7)
@@ -632,12 +647,6 @@ class FailClosedTest(unittest.TestCase):
         )
         self.assert_rejected(responses, 4)
 
-    def test_chosen_job_started(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(started_at="2026-08-10T00:00:00Z")]
-        )
-        self.assert_rejected(responses, 4)
-
     def test_chosen_job_runner_assigned(self):
         responses = responses_for(
             jobs=[make_gate(), make_build_job(runner_name="some-runner")]
@@ -864,6 +873,18 @@ class JitResponseValidationTest(unittest.TestCase):
                 labels=[{"id": 1, "name": "self-hosted", "type": "read-only"}]
             )
         )
+
+    def test_runner_live_repository_jit_read_only_label_accepted(self):
+        label = expected_label("arm64")
+        responses = responses_for(
+            jit_response=make_jit_response(
+                labels=[{"id": 0, "name": label, "type": "read-only"}]
+            )
+        )
+        code, transport, _popen, err = run_cli(responses=responses)
+        self.assertEqual(code, 0)
+        self.assertEqual(transport.post_count, 1)
+        self.assertNotIn(TOKEN, err)
 
     def test_runner_extra_custom_label(self):
         label = expected_label("arm64")

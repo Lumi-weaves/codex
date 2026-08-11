@@ -181,13 +181,20 @@ Activation contract:
   `lumi-shadow-arm64-<run-id>-<attempt>` or
   `lumi-shadow-x86_64-<run-id>-<attempt>` (only the documented GitHub-added
   read-only label `self-hosted` is tolerated in the job's label list);
+- GitHub's live jobs response sets `started_at` when a self-hosted job enters
+  the queue and uses numeric `0` for unassigned runner/group IDs. The
+  dispatcher therefore treats only `status=queued`, no conclusion, an empty
+  runner name, and null/empty/zero runner IDs as unassigned; any positive ID
+  or nonempty runner name still fails closed;
 - the attempt-specific jobs are re-read immediately before the single
   non-retried `generate-jitconfig` POST, which requests the deterministic
   runner name, the explicit runner group, exactly the expected label, and
   work folder `_work`;
 - the returned runner must match the requested name, be idle, and carry the
-  expected label as its only custom label (GitHub-added read-only labels
-  are allowed); the `encoded_jit_config` must be nonempty, at most 65536
+  expected label exactly once. Repository-level JIT currently reports that
+  requested label as GitHub `read-only` rather than `custom`; other custom
+  labels are rejected while GitHub-added read-only labels are allowed. The
+  `encoded_jit_config` must be nonempty, at most 65536
   bytes (the shared conservative 64KiB hard cap both host controllers
   enforce, well under the Linux execve single-string limit), canonical
   base64. It is then streamed exactly once (plus one newline) to the

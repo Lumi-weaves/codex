@@ -353,17 +353,19 @@ def _select_job(
     job = chosen[0]
     _require(job.get("status") == "queued", "chosen job is not queued")
     _require(job.get("conclusion") is None, "chosen job already concluded")
-    _require(job.get("started_at") is None, "chosen job already started")
+    # GitHub fills started_at when a self-hosted job enters the queue, before
+    # any runner is assigned. Assignment is represented by the runner fields
+    # below; status=queued plus empty runner identity is the safe boundary.
     _require(
         job.get("runner_name") in (None, ""),
         "chosen job already has a runner assigned",
     )
     _require(
-        job.get("runner_id") in (None, ""),
+        job.get("runner_id") in (None, "", 0),
         "chosen job already has a runner assigned",
     )
     _require(
-        job.get("runner_group_id") in (None, ""),
+        job.get("runner_group_id") in (None, "", 0),
         "chosen job already has a runner group assigned",
     )
     _require(job.get("run_id") == run_id, "chosen job run_id mismatch")
@@ -438,7 +440,7 @@ def _check_jit_response(data: Any, runner_name: str, expected_label: str) -> str
     )
     labels = runner.get("labels")
     _require(isinstance(labels, list), "generated runner labels are missing")
-    custom: list[str] = []
+    names: list[str] = []
     for label in labels:
         _require(
             isinstance(label, dict)
@@ -446,11 +448,16 @@ def _check_jit_response(data: Any, runner_name: str, expected_label: str) -> str
             and label.get("type") in ("custom", "read-only"),
             "generated runner has an invalid label",
         )
+        name = label["name"]
+        names.append(name)
         if label["type"] == "custom":
-            custom.append(label["name"])
+            _require(
+                name == expected_label,
+                "generated runner carries an unexpected custom label",
+            )
     _require(
-        custom == [expected_label],
-        "generated runner custom labels are not exactly the expected label",
+        names.count(expected_label) == 1,
+        "generated runner does not carry the expected label exactly once",
     )
     encoded = data.get("encoded_jit_config")
     _require(
