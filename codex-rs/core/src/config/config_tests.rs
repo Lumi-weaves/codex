@@ -9137,6 +9137,19 @@ async fn model_catalog_overlay_and_provider_routes_load() -> std::io::Result<()>
     assert_eq!(config.model_catalog_overlay, Some(catalog));
     assert_eq!(config.model_provider_routes, routes);
     assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider_override, None);
+    assert_eq!(
+        config
+            .model_provider_for_model("provider/custom-model")
+            .map(|(provider_id, _)| provider_id),
+        Some("ollama")
+    );
+    assert_eq!(
+        config
+            .model_provider_for_model("gpt-5.6-sol")
+            .map(|(provider_id, _)| provider_id),
+        Some("openai")
+    );
     Ok(())
 }
 
@@ -9190,7 +9203,7 @@ async fn model_provider_routes_reject_unknown_provider() -> std::io::Result<()> 
 }
 
 #[tokio::test]
-async fn explicit_config_provider_wins_over_model_route() -> std::io::Result<()> {
+async fn model_route_wins_over_global_provider_fallback() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
         model: Some("provider/custom-model".to_string()),
@@ -9209,7 +9222,50 @@ async fn explicit_config_provider_wins_over_model_route() -> std::io::Result<()>
     )
     .await?;
 
-    assert_eq!(config.model_provider_id, "openai");
+    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider_override.as_deref(), Some("openai"));
+    assert_eq!(
+        config
+            .model_provider_for_model("provider/custom-model")
+            .map(|(provider_id, _)| provider_id),
+        Some("ollama")
+    );
+    assert_eq!(
+        config
+            .model_provider_for_model("provider/unrouted-model")
+            .map(|(provider_id, _)| provider_id),
+        Some("openai")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn model_route_wins_over_request_provider_fallback() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let routed_model = "provider/custom-model";
+    let cfg = ConfigToml {
+        model_provider_routes: HashMap::from([(routed_model.to_string(), "ollama".to_string())]),
+        ..Default::default()
+    };
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            model: Some(routed_model.to_string()),
+            model_provider: Some("openai".to_string()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, "ollama");
+    assert_eq!(config.model_provider_override.as_deref(), Some("openai"));
+    assert_eq!(
+        config
+            .model_provider_for_model("provider/unrouted-model")
+            .map(|(provider_id, _)| provider_id),
+        Some("openai")
+    );
     Ok(())
 }
 

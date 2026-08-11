@@ -651,6 +651,12 @@ pub struct Config {
     /// Key into the model_providers map that specifies which provider to use.
     pub model_provider_id: String,
 
+    /// Global provider selected by the request or config.
+    ///
+    /// A model-specific entry in `model_provider_routes` is more specific and
+    /// takes precedence. This provider is the fallback for unrouted models.
+    pub model_provider_override: Option<String>,
+
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
 
@@ -1624,6 +1630,25 @@ impl Config {
             personality: self.personality,
             model_catalog: self.model_catalog.clone(),
         }
+    }
+
+    /// Resolves the runtime provider for a model selection without changing thread identity.
+    ///
+    /// A model-specific route wins over the global provider selection. Unrouted models use the
+    /// global provider when configured and otherwise fall back to the built-in OpenAI provider.
+    pub(crate) fn model_provider_for_model(
+        &self,
+        model: &str,
+    ) -> Option<(&str, &ModelProviderInfo)> {
+        let provider_id = self
+            .model_provider_routes
+            .get(model)
+            .map(String::as_str)
+            .or(self.model_provider_override.as_deref())
+            .unwrap_or("openai");
+        self.model_providers
+            .get(provider_id)
+            .map(|provider| (provider_id, provider))
     }
 
     /// Returns auth routing resolved from the effective feature configuration.
@@ -3749,14 +3774,12 @@ impl Config {
         }
 
         let model = model.or_else(|| cfg.model.clone());
-        let model_provider_id = model_provider
-            .or(cfg.model_provider)
-            .or_else(|| {
-                model
-                    .as_ref()
-                    .and_then(|model| cfg.model_provider_routes.get(model))
-                    .cloned()
-            })
+        let model_provider_override = model_provider.or(cfg.model_provider);
+        let model_provider_id = model
+            .as_ref()
+            .and_then(|model| cfg.model_provider_routes.get(model))
+            .cloned()
+            .or_else(|| model_provider_override.clone())
             .unwrap_or_else(|| "openai".to_string());
         let model_provider = model_providers
             .get(&model_provider_id)
@@ -4123,6 +4146,7 @@ impl Config {
                 .model_auto_compact_token_limit_scope
                 .unwrap_or_default(),
             model_provider_id,
+            model_provider_override,
             model_provider,
             model_auth_source: cfg.model_auth_source.unwrap_or_default(),
             cwd: resolved_cwd,

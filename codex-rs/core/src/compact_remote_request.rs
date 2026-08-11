@@ -74,8 +74,7 @@ pub(super) async fn run_remote_compact_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
-    let new_history = sess
-        .services
+    let new_history = turn_context
         .model_client
         .compact_conversation_history(
             &prompt,

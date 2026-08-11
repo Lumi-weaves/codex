@@ -139,6 +139,7 @@ pub struct TurnContext {
     pub(crate) model_info: ModelInfo,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: SharedModelProvider,
+    pub(crate) model_client: ModelClient,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) reasoning_summary: ReasoningSummaryConfig,
     pub(crate) session_source: SessionSource,
@@ -284,6 +285,20 @@ impl TurnContext {
     ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
+        let resolved_provider = config
+            .model_provider_for_model(&model)
+            .map(|(provider_id, provider)| (provider_id.to_string(), provider.clone()));
+        let (provider, model_client) = match resolved_provider {
+            Some((provider_id, provider_info)) if provider_id != config.model_provider_id => {
+                config.model_provider_id = provider_id;
+                config.model_provider = provider_info.clone();
+                let provider =
+                    create_model_provider(provider_info, self.model_auth_manager.clone());
+                let model_client = self.model_client.rebind_provider(Arc::clone(&provider));
+                (provider, model_client)
+            }
+            _ => (self.provider.clone(), self.model_client.clone()),
+        };
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
@@ -330,7 +345,8 @@ impl TurnContext {
                 .session_telemetry
                 .clone()
                 .with_model(model.as_str(), model_info.slug.as_str()),
-            provider: self.provider.clone(),
+            provider,
+            model_client,
             reasoning_effort,
             reasoning_summary: self.reasoning_summary,
             session_source: self.session_source.clone(),
@@ -477,6 +493,9 @@ impl Session {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
         let config = session_configuration.original_config_do_not_use.clone();
         let mut per_turn_config = (*config).clone();
+        per_turn_config.model = Some(session_configuration.collaboration_mode.model().to_string());
+        per_turn_config.model_provider_id = session_configuration.provider_id.clone();
+        per_turn_config.model_provider = session_configuration.provider.info().clone();
         per_turn_config.cwd = cwd;
         per_turn_config.permissions.approval_policy = session_configuration.approval_policy.clone();
         let workspace_roots = session_configuration.primary_workspace_roots();
@@ -531,6 +550,7 @@ impl Session {
         model_auth_manager: Option<Arc<AuthManager>>,
         session_telemetry: &SessionTelemetry,
         provider: SharedModelProvider,
+        model_client: ModelClient,
         session_configuration: &SessionConfiguration,
         multi_agent_version: MultiAgentVersion,
         user_shell: &shell::Shell,
@@ -602,6 +622,7 @@ impl Session {
             model_info,
             session_telemetry: session_telemetry_for_context,
             provider,
+            model_client,
             reasoning_effort,
             reasoning_summary,
             session_source,
@@ -642,6 +663,7 @@ impl Session {
         sub_id: String,
         updates: SessionSettingsUpdate,
     ) -> CodexResult<Arc<TurnContext>> {
+        let updates = self.with_model_provider_update(updates).await;
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
@@ -716,6 +738,7 @@ impl Session {
             self.refresh_managed_network_proxy_for_current_permission_profile()
                 .await;
         }
+        self.install_model_provider_update(&updates).await;
         Ok(self
             .new_turn_from_configuration(
                 sub_id,
@@ -826,6 +849,7 @@ impl Session {
             Some(Arc::clone(&self.services.model_auth_manager)),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
+            self.services.model_client.current().as_ref().clone(),
             &session_configuration,
             multi_agent_version,
             self.services.user_shell.as_ref(),

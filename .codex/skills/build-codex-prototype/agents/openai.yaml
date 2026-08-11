@@ -1,0 +1,4 @@
+interface:
+  display_name: "Build Codex Prototype"
+  short_description: "Export a runnable Codex prototype from a profile"
+  default_prompt: "Use $build-codex-prototype to export and verify a runnable local Codex prototype."

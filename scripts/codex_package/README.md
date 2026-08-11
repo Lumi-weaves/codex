@@ -24,6 +24,25 @@ The builder creates a canonical Codex package directory:
 The package directory is the primary artifact. Archive formats such as
 `.tar.gz`, `.tar.zst`, and `.zip` are serializations of that directory.
 
+## Local prototype profiles
+
+Checked-in JSON profiles under `scripts/codex_package/profiles/` define
+repeatable, locally runnable prototype exports without duplicating the package
+builder's artifact logic. Run the default profile from the repository root:
+
+```sh
+just export-prototype
+```
+
+The default `lumi-local` profile selects the native host target and the
+`dev-small` Cargo profile. On Linux, `native` deliberately resolves to the GNU
+target rather than the musl release target. The export is built in a staging
+directory and then replaces
+`codex-rs/target/prototypes/lumi-local` so a failed build leaves the previous
+prototype intact. The command prints the absolute entrypoint path when it
+finishes. Pass another checked-in profile name as the recipe argument, for
+example `just export-prototype my-profile`.
+
 If `--target` is omitted, the builder uses the release target for the current
 host platform. On Linux, that default is a musl target to match Codex release
 artifacts; pass a GNU Linux target explicitly for native glibc local builds. If

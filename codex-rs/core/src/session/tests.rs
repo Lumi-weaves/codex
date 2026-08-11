@@ -4090,6 +4090,7 @@ async fn set_rate_limits_retains_previous_credits() {
     };
     let session_configuration = SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4199,6 +4200,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
     };
     let session_configuration = SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -4747,6 +4749,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
 
     SessionConfiguration {
         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5543,6 +5546,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5709,6 +5713,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -5845,23 +5850,26 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(auth_manager.clone()),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.info().clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
+        model_client: ModelClientRouter::new(
+            session_configuration.provider_id.clone(),
+            ModelClient::new(
+                Some(auth_manager.clone()),
+                AgentIdentityAuthPolicy::JwtOnly,
+                thread_id,
+                session_configuration.provider.info().clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.originator.clone(),
+                config.model_verbosity,
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Session::build_model_client_beta_features_header(config.as_ref()),
+                /*concurrent_reasoning_summaries_enabled*/
+                config
+                    .features
+                    .enabled(Feature::ConcurrentReasoningSummaries),
+                /*attestation_provider*/ None,
+                config.http_client_factory(),
+            ),
         ),
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
@@ -5896,6 +5904,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),
+        services.model_client.current().as_ref().clone(),
         &session_configuration,
         config.multi_agent_version_from_features(),
         services.user_shell.as_ref(),
@@ -5992,6 +6001,7 @@ pub(crate) async fn make_session_with_config_and_rx(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -6109,6 +6119,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -9015,6 +9026,7 @@ where
             config.model_provider.clone(),
             Some(Arc::clone(&auth_manager)),
         ),
+        provider_id: config.model_provider_id.clone(),
         collaboration_mode,
         model_reasoning_summary: config.model_reasoning_summary,
         developer_instructions: config.developer_instructions.clone(),
@@ -9150,23 +9162,26 @@ where
         )),
         attestation_provider: None,
         time_provider: Arc::new(crate::current_time::SystemTimeProvider),
-        model_client: ModelClient::new(
-            Some(Arc::clone(&auth_manager)),
-            AgentIdentityAuthPolicy::JwtOnly,
-            thread_id,
-            session_configuration.provider.info().clone(),
-            session_configuration.session_source.clone(),
-            session_configuration.originator.clone(),
-            config.model_verbosity,
-            config.features.enabled(Feature::EnableRequestCompression),
-            config.features.enabled(Feature::RuntimeMetrics),
-            Session::build_model_client_beta_features_header(config.as_ref()),
-            /*concurrent_reasoning_summaries_enabled*/
-            config
-                .features
-                .enabled(Feature::ConcurrentReasoningSummaries),
-            /*attestation_provider*/ None,
-            config.http_client_factory(),
+        model_client: ModelClientRouter::new(
+            session_configuration.provider_id.clone(),
+            ModelClient::new(
+                Some(Arc::clone(&auth_manager)),
+                AgentIdentityAuthPolicy::JwtOnly,
+                thread_id,
+                session_configuration.provider.info().clone(),
+                session_configuration.session_source.clone(),
+                session_configuration.originator.clone(),
+                config.model_verbosity,
+                config.features.enabled(Feature::EnableRequestCompression),
+                config.features.enabled(Feature::RuntimeMetrics),
+                Session::build_model_client_beta_features_header(config.as_ref()),
+                /*concurrent_reasoning_summaries_enabled*/
+                config
+                    .features
+                    .enabled(Feature::ConcurrentReasoningSummaries),
+                /*attestation_provider*/ None,
+                config.http_client_factory(),
+            ),
         ),
         executed_tool_calls,
         code_mode_service: crate::tools::code_mode::CodeModeService::new(
@@ -9201,6 +9216,7 @@ where
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),
+        services.model_client.current().as_ref().clone(),
         &session_configuration,
         config.multi_agent_version_from_features(),
         services.user_shell.as_ref(),
@@ -9429,6 +9445,76 @@ async fn refreshed_mcp_binding_captures_current_approval_authority() {
         new_turn.config.permissions.approval_policy.value(),
         AskForApproval::Never
     );
+}
+
+#[tokio::test]
+async fn model_route_switch_rebinds_provider_without_replacing_the_session() {
+    let (session, old_turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let thread_id = session.thread_id();
+    let routed_model = "provider/routed-model";
+
+    {
+        let mut state = session.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.model_provider_override = Some("openai".to_string());
+        config
+            .model_provider_routes
+            .insert(routed_model.to_string(), "ollama".to_string());
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
+    }
+
+    let routed_mode = session.collaboration_mode().await.with_updates(
+        Some(routed_model.to_string()),
+        /*effort*/ None,
+        /*developer_instructions*/ None,
+    );
+    session
+        .update_settings(SessionSettingsUpdate {
+            collaboration_mode: Some(routed_mode),
+            ..Default::default()
+        })
+        .await
+        .expect("routed model settings should update");
+
+    let routed_snapshot = session.thread_config_snapshot().await;
+    assert_eq!(session.thread_id(), thread_id);
+    assert_eq!(routed_snapshot.model, routed_model);
+    assert_eq!(routed_snapshot.model_provider_id, "ollama");
+    let routed_turn = session.new_default_turn().await;
+    assert_eq!(routed_turn.config.model_provider_id, "ollama");
+    assert_eq!(
+        routed_turn.provider.info().name,
+        routed_turn.config.model_provider.name
+    );
+    assert_eq!(
+        routed_turn.model_client.provider_info().name,
+        routed_turn.config.model_provider.name
+    );
+    assert_ne!(
+        old_turn.provider.info().name,
+        routed_turn.provider.info().name
+    );
+
+    let openai_mode = session.collaboration_mode().await.with_updates(
+        Some("gpt-5.6-sol".to_string()),
+        /*effort*/ None,
+        /*developer_instructions*/ None,
+    );
+    session
+        .update_settings(SessionSettingsUpdate {
+            collaboration_mode: Some(openai_mode),
+            ..Default::default()
+        })
+        .await
+        .expect("unrouted model settings should update");
+
+    let openai_snapshot = session.thread_config_snapshot().await;
+    assert_eq!(session.thread_id(), thread_id);
+    assert_eq!(openai_snapshot.model_provider_id, "openai");
+    let openai_turn = session.new_default_turn().await;
+    assert!(openai_turn.provider.info().is_openai());
+    assert!(openai_turn.model_client.provider_info().is_openai());
 }
 
 #[tokio::test]

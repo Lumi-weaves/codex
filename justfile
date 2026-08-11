@@ -35,6 +35,11 @@ file-search *args:
 code-mode-host *args:
     cargo run --bin codex-code-mode-host -- {args}
 
+# Export the checked-in local prototype profile as a runnable package directory.
+[no-cd]
+export-prototype profile="lumi-local":
+    {{ python }} {{ justfile_directory() }}/scripts/export_codex_prototype.py --profile "$1"
+
 # Build the CLI and run the app-server test client
 app-server-test-client *args:
     cargo build -p codex-cli

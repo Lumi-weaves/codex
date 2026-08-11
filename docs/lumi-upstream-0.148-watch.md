@@ -61,13 +61,32 @@ Rust core tests require `RUST_MIN_STACK=8388608`; without it, the large
 completion-ingress future can overflow the default test-thread stack even
 though the same test passes with the repository's intended stack size.
 
+## Prototype replay decisions
+
+The stashed async-poll/provider prototype has now been replayed on the clean
+alpha.7 baseline. The replay keeps a yielded terminal inside the same logical
+turn: a model poll may produce commentary or no message and park; queued user
+input, terminal output needing stdin, or terminal completion resumes that turn.
+A final message is an exclusive handoff and does not complete a turn while the
+turn still owns awaited work.
+
+Provider selection is deliberately route-first. A model-specific entry in
+`model_provider_routes` is more specific than the global `model_provider`,
+which remains the fallback for unrouted models. This ordering is required for
+same-task switching and also prevents the effective provider copied during
+resume or fork from pinning all later models to that provider. Focused core,
+app-server settings-update, resume, and fork tests lock the boundary.
+
+The prototype exporter is profile-driven (`just export-prototype`) and builds
+the CLI and Code Mode host into one isolated package before atomically replacing
+the previous runnable candidate.
+
 ## Remaining promotion gates
 
-Before this baseline can advance Lumi `main`:
+Before this integration can advance Lumi `main`:
 
-1. reapply the stashed same-task provider-switch prototype against the merged
-   provider/client runtime instead of restoring its old routing structure
-   mechanically;
+1. complete the replayed async-poll, provider resume/fork, and prompt-contract
+   regression suite;
 2. rerun dual-auth, model-catalog, app-server waiting-status, packaging,
    installer, and Code Mode host gates;
 3. run the Lumi CI contract and one Desktop completion-wake smoke;

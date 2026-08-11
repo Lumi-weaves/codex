@@ -30,6 +30,9 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadSearchOccurrencesParams;
 use codex_app_server_protocol::ThreadSearchOccurrencesResponse;
+use codex_app_server_protocol::ThreadSettingsUpdateParams;
+use codex_app_server_protocol::ThreadSettingsUpdateResponse;
+use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
 use codex_app_server_protocol::ThreadSource;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
@@ -279,6 +282,105 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     expected_started_thread.turns.clear();
     assert_eq!(started.thread, expected_started_thread);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_fork_keeps_model_routes_live_after_copying_effective_provider() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_extra_config(&format!(
+            r#"
+[model_provider_routes]
+"routed-model-a" = "routed_provider_a"
+"routed-model-b" = "routed_provider_b"
+
+[model_providers.routed_provider_a]
+name = "Routed provider A"
+base_url = "{0}/v1"
+wire_api = "responses"
+supports_websockets = false
+
+[model_providers.routed_provider_b]
+name = "Routed provider B"
+base_url = "{0}/v1"
+wire_api = "responses"
+supports_websockets = false
+"#,
+            server.uri()
+        ))
+        .write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let start_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
+    let update_id = mcp
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            model: Some("routed-model-a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadSettingsUpdateResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(update_id)).await??;
+    let updated: ThreadSettingsUpdatedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/settings/updated"),
+    )
+    .await??;
+    assert_eq!(updated.thread_settings.model_provider, "routed_provider_a");
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "materialize routed provider state".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+
+    let fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: thread.id,
+            model: Some("routed-model-a".to_string()),
+            // Mirrors a copied source-thread effective provider. It remains a
+            // fallback rather than pinning later routed models.
+            model_provider: Some("routed_provider_a".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let forked: ThreadForkResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
+    assert_eq!(forked.model, "routed-model-a");
+    assert_eq!(forked.model_provider, "routed_provider_a");
+
+    let update_id = mcp
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: forked.thread.id,
+            model: Some("routed-model-b".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadSettingsUpdateResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(update_id)).await??;
+    let updated: ThreadSettingsUpdatedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/settings/updated"),
+    )
+    .await??;
+    assert_eq!(updated.thread_settings.model, "routed-model-b");
+    assert_eq!(updated.thread_settings.model_provider, "routed_provider_b");
     Ok(())
 }
 

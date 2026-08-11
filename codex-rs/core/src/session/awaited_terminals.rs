@@ -1,10 +1,11 @@
 //! Session-owned registry of awaited background unified-exec terminals.
 //!
 //! When the model is handed a live ("yielded") terminal, the session records
-//! its process id here so a later `TurnComplete` cannot finalize the session
-//! while that terminal is still being awaited in the background. The
-//! completion ingress resolves the token after the model-visible completion
-//! fragment is queued; synchronous observation/disposal resolves it directly.
+//! its process id here. A regular turn stays active at later poll boundaries
+//! until the awaited work produces model-visible input or is disposed. The
+//! completion ingress queues that input before resolving the token;
+//! synchronous observation/disposal resolves it directly. A watch channel
+//! wakes the parked turn for resolution paths that do not enqueue input.
 //!
 //! The registry also owns the one-shot idle claim for an awaited batch. It
 //! retains the most recent held final message and the authoritative upstream
@@ -18,11 +19,12 @@ use std::collections::HashSet;
 
 use codex_extension_api::ThreadIdleCause;
 use tokio::sync::Mutex;
+use tokio::sync::watch;
 
 /// Session-scoped awaited-terminal registry (see module docs).
-#[derive(Default)]
 pub(crate) struct AwaitedTerminals {
     state: Mutex<AwaitedTerminalState>,
+    count_tx: watch::Sender<usize>,
 }
 
 #[derive(Default)]
@@ -53,7 +55,11 @@ pub(crate) struct AwaitedIdleClaim {
 
 impl AwaitedTerminals {
     pub(crate) fn new() -> Self {
-        Self::default()
+        let (count_tx, _count_rx) = watch::channel(0);
+        Self {
+            state: Mutex::new(AwaitedTerminalState::default()),
+            count_tx,
+        }
     }
 
     /// Register a live terminal id that was yielded to the model.
@@ -65,16 +71,38 @@ impl AwaitedTerminals {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn register(&self, process_id: i32) {
-        let mut state = self.state.lock().await;
-        if state.awaited.insert(process_id) && !state.idle_claim_pending {
-            state.idle_claim_pending = true;
+        let count = {
+            let mut state = self.state.lock().await;
+            if !state.awaited.insert(process_id) {
+                None
+            } else {
+                if !state.idle_claim_pending {
+                    state.idle_claim_pending = true;
+                }
+                Some(state.awaited.len())
+            }
+        };
+        if let Some(count) = count {
+            self.count_tx.send_replace(count);
         }
     }
 
     /// Resolve a terminal id after its completion was admitted or it was
     /// observed/disposed synchronously. Returns whether the id was awaited.
     pub(crate) async fn resolve(&self, process_id: i32) -> bool {
-        self.state.lock().await.awaited.remove(&process_id)
+        let count = {
+            let mut state = self.state.lock().await;
+            state
+                .awaited
+                .remove(&process_id)
+                .then_some(state.awaited.len())
+        };
+        if let Some(count) = count {
+            self.count_tx.send_replace(count);
+            true
+        } else {
+            false
+        }
     }
 
     /// Snapshot of the currently awaited terminal ids (unsorted).
@@ -105,7 +133,17 @@ impl AwaitedTerminals {
         let mut state = self.state.lock().await;
         let changed = !state.awaited.is_empty();
         state.awaited.clear();
+        drop(state);
+        if changed {
+            self.count_tx.send_replace(0);
+        }
         changed
+    }
+
+    /// Subscribe before reading awaited state when a task may need to park.
+    /// The count is only a wake hint; callers re-read the authoritative set.
+    pub(crate) fn subscribe_count(&self) -> watch::Receiver<usize> {
+        self.count_tx.subscribe()
     }
 
     /// Attach the current task's terminal cause to an outstanding awaited
@@ -175,6 +213,12 @@ impl AwaitedTerminals {
             waiting_final: state.waiting_final.take(),
             idle_cause: state.pending_idle_cause.take(),
         })
+    }
+}
+
+impl Default for AwaitedTerminals {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

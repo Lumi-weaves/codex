@@ -181,6 +181,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::client::ModelClient;
+use crate::client::ModelClientRouter;
 use crate::codex_thread::ThreadConfigSnapshot;
 #[cfg(test)]
 use crate::compact::collect_user_messages;
@@ -217,6 +218,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod poll_wait;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -746,6 +748,7 @@ impl Session {
                 config.model_provider.clone(),
                 Some(Arc::clone(&model_auth_manager)),
             ),
+            provider_id: config.model_provider_id.clone(),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
             service_tier,
@@ -1602,6 +1605,7 @@ impl Session {
         &self,
         updates: SessionSettingsUpdate,
     ) -> ConstraintResult<()> {
+        let updates = self.with_model_provider_update(updates).await;
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
             let mut state = self.state.lock().await;
@@ -1651,6 +1655,7 @@ impl Session {
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
         }
+        self.install_model_provider_update(&updates).await;
         Ok(())
     }
 
@@ -1658,11 +1663,60 @@ impl Session {
         &self,
         updates: &SessionSettingsUpdate,
     ) -> ConstraintResult<ThreadConfigSnapshot> {
+        let updates = self.with_model_provider_update(updates.clone()).await;
         let state = self.state.lock().await;
         state
             .session_configuration
-            .apply(updates)
+            .apply(&updates)
             .map(|configuration| configuration.thread_config_snapshot())
+    }
+
+    async fn with_model_provider_update(
+        &self,
+        mut updates: SessionSettingsUpdate,
+    ) -> SessionSettingsUpdate {
+        let Some(target_model) = updates
+            .collaboration_mode
+            .as_ref()
+            .map(CollaborationMode::model)
+        else {
+            return updates;
+        };
+        let resolved = {
+            let state = self.state.lock().await;
+            let current_provider_id = &state.session_configuration.provider_id;
+            state
+                .session_configuration
+                .original_config_do_not_use
+                .model_provider_for_model(target_model)
+                .and_then(|(provider_id, provider)| {
+                    (provider_id != current_provider_id)
+                        .then(|| (provider_id.to_string(), provider.clone()))
+                })
+        };
+        if let Some((provider_id, provider)) = resolved {
+            updates.model_provider = Some((
+                provider_id,
+                create_model_provider(
+                    provider,
+                    Some(Arc::clone(&self.services.model_auth_manager)),
+                ),
+            ));
+        }
+        updates
+    }
+
+    async fn install_model_provider_update(&self, updates: &SessionSettingsUpdate) {
+        let Some((provider_id, provider)) = updates.model_provider.as_ref() else {
+            return;
+        };
+        self.services
+            .model_client
+            .activate(provider_id, Arc::clone(provider));
+        // A startup prewarm belongs to the provider/model selected when it was created.
+        if let Some(startup_prewarm) = self.take_session_startup_prewarm().await {
+            startup_prewarm.abort().await;
+        }
     }
 
     pub(crate) async fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
@@ -2093,9 +2147,10 @@ impl Session {
     }
 
     /// Register a live unified-exec terminal id that was yielded to the
-    /// model. While any awaited terminal remains, a `TurnComplete` keeps the
-    /// session status non-final (`Running`) and a V2 subagent does not notify
-    /// its parent as completed.
+    /// model. Regular turns use this ownership token to remain parked between
+    /// polls. As a defensive fallback, any `TurnComplete` emitted by another
+    /// task path while a token remains keeps the session non-final (`Running`)
+    /// and does not notify a V2 parent as completed.
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
@@ -2294,13 +2349,13 @@ impl Session {
     /// Applies awaited-terminal turn-status semantics to a status derived
     /// from a delivered event.
     ///
-    /// A `TurnComplete` remains a real turn terminal event with final text
-    /// visible to clients, but while awaited terminal ids remain the session
-    /// status must stay non-final: reuse the existing `Running` status so the
-    /// protocol surface does not grow. The completion's `last_agent_message`
-    /// is retained so a later cleanup with no continuation can restore a
-    /// truthful `Completed`. A `TurnComplete` with zero awaited terminals is
-    /// a normal final completion and supersedes any retained message.
+    /// Regular turns park before emitting `TurnComplete`, so this is a
+    /// defensive fallback for other task paths. If one completes while
+    /// awaited terminal ids remain, keep the session non-final using the
+    /// existing `Running` status and retain its `last_agent_message` so later
+    /// cleanup with no continuation can restore a truthful `Completed`. A
+    /// `TurnComplete` with zero awaited terminals is a normal final completion
+    /// and supersedes any retained message.
     async fn awaited_terminal_status(
         &self,
         msg: &EventMsg,

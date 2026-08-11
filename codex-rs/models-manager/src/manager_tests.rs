@@ -1577,3 +1577,60 @@ fn bundled_models_json_roundtrips() {
         "bundled models.json should contain at least one model"
     );
 }
+
+#[test]
+fn bundled_codex_prompts_treat_messages_as_optional_poll_actions() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+
+    for slug in [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "codex-auto-review",
+    ] {
+        let model = response
+            .models
+            .iter()
+            .find(|model| model.slug == slug)
+            .unwrap_or_else(|| panic!("bundled catalog should contain {slug}"));
+        let instructions = model
+            .model_messages
+            .as_ref()
+            .and_then(|messages| messages.instructions_template.as_deref())
+            .unwrap_or_else(|| panic!("{slug} should have an instructions template"));
+
+        assert!(
+            instructions.contains("two optional communication channels")
+                || instructions.contains("two optional channels"),
+            "{slug} should describe commentary and final as optional actions"
+        );
+        assert!(
+            instructions.contains("At a poll boundary, you may emit no user-facing message."),
+            "{slug} should permit a silent poll boundary"
+        );
+        assert!(
+            instructions.contains("Do not combine a final message with tool calls, awaited operations, or pending external events."),
+            "{slug} should make final an exclusive handoff"
+        );
+        assert!(
+            !instructions.contains("After you have completed all your work, send a message"),
+            "{slug} should not require a final message"
+        );
+        for mandatory_update_phrase in [
+            "provide user updates frequently",
+            "start with a user update",
+            "very frequently provide updates",
+            "Explicitly tell the user in the `commentary`",
+            "Before performing file edits of any kind, you provide updates",
+        ] {
+            assert!(
+                !instructions.contains(mandatory_update_phrase),
+                "{slug} should not require commentary via `{mandatory_update_phrase}`"
+            );
+        }
+    }
+}

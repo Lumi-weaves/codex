@@ -35,6 +35,8 @@ use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
 use crate::session::TurnInput;
+use crate::session::poll_wait::AwaitedPollWaitOutcome;
+use crate::session::poll_wait::wait_for_awaited_poll_resume;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
@@ -162,7 +164,7 @@ pub(crate) async fn run_turn(
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
     let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+        prewarmed_client_session.unwrap_or_else(|| turn_context.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
     // new user message are recorded. Estimate pending incoming items (context
     // diffs/full reinjection + user input) and trigger compaction preemptively
@@ -264,6 +266,10 @@ pub(crate) async fn run_turn(
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
+    // Once this task has yielded a terminal, it owns the corresponding
+    // completion continuation even if the terminal resolves during a busy
+    // sampling request and its input is temporarily mailboxed for NextTurn.
+    let mut owns_awaited_poll_continuation = false;
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
@@ -404,6 +410,8 @@ pub(crate) async fn run_turn(
                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
                 .await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
+                let has_awaited_terminals = sess.has_awaited_terminals().await;
+                owns_awaited_poll_continuation |= has_awaited_terminals;
                 let token_limit_reached = token_status.token_limit_reached;
 
                 trace!(
@@ -481,6 +489,24 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
+                    // Completion ingress queues model-visible input before it
+                    // resolves the awaited token. Keep the same logical turn
+                    // alive both while the token exists and across the narrow
+                    // post-resolution window where its queued input remains.
+                    let has_owned_pending_completion = owns_awaited_poll_continuation
+                        && sess.input_queue.has_pending_session_inputs().await;
+                    if has_awaited_terminals || has_owned_pending_completion {
+                        match wait_for_awaited_poll_resume(
+                            sess.as_ref(),
+                            turn_context.as_ref(),
+                            &cancellation_token,
+                        )
+                        .await?
+                        {
+                            AwaitedPollWaitOutcome::Resume => continue,
+                            AwaitedPollWaitOutcome::AwaitedWorkCleared => {}
+                        }
+                    }
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
@@ -1090,6 +1116,13 @@ async fn maybe_run_previous_model_inline_compact(
             .with_model(previous_model.clone(), &sess.services.models_manager)
             .await,
     );
+    let mut previous_provider_client_session =
+        (previous_model_turn_context.config.model_provider_id
+            != turn_context.config.model_provider_id)
+            .then(|| previous_model_turn_context.model_client.new_session());
+    let client_session = previous_provider_client_session
+        .as_mut()
+        .unwrap_or(client_session);
 
     if should_compact_for_comp_hash_change {
         let step_context = sess

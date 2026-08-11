@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::agent::AgentControl;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::attestation::AttestationProvider;
-use crate::client::ModelClient;
+use crate::client::ModelClientRouter;
 use crate::config::NetworkProxyAuditMetadata;
 use crate::config::StartedNetworkProxy;
 use crate::current_time::TimeProvider;
@@ -94,8 +94,8 @@ pub(crate) struct SessionServices {
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
     pub(crate) time_provider: Arc<dyn TimeProvider>,
-    /// Session-scoped model client shared across turns.
-    pub(crate) model_client: ModelClient,
+    /// Provider-rebindable model client. Each turn captures a stable clone from this slot.
+    pub(crate) model_client: ModelClientRouter,
     pub(crate) executed_tool_calls: Option<Arc<ExecutedToolCallRecorder>>,
     pub(crate) code_mode_service: CodeModeService,
     pub(crate) tool_search_handler_cache: ToolSearchHandlerCache,

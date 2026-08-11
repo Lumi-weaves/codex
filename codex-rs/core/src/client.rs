@@ -30,6 +30,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use arc_swap::ArcSwap;
 use codex_api::AgentIdentityTelemetry;
 use codex_api::ApiError;
 use codex_api::AuthProvider;
@@ -259,6 +260,44 @@ pub struct ModelClient {
     http_client_factory: HttpClientFactory,
 }
 
+/// Task-scoped cache of provider-bound model clients.
+///
+/// Turns capture a stable `ModelClient` clone, while switching away from and back to a provider
+/// reuses that provider's transport fallback and cached WebSocket state.
+#[derive(Debug)]
+pub(crate) struct ModelClientRouter {
+    active: ArcSwap<ModelClient>,
+    clients: StdMutex<HashMap<String, ModelClient>>,
+}
+
+impl ModelClientRouter {
+    pub(crate) fn new(provider_id: String, client: ModelClient) -> Self {
+        Self {
+            active: ArcSwap::from_pointee(client.clone()),
+            clients: StdMutex::new(HashMap::from([(provider_id, client)])),
+        }
+    }
+
+    pub(crate) fn current(&self) -> Arc<ModelClient> {
+        self.active.load_full()
+    }
+
+    pub(crate) fn activate(&self, provider_id: &str, provider: SharedModelProvider) -> ModelClient {
+        let client = {
+            let mut clients = self
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            clients
+                .entry(provider_id.to_string())
+                .or_insert_with(|| self.active.load().rebind_provider(provider))
+                .clone()
+        };
+        self.active.store(Arc::new(client.clone()));
+        client
+    }
+}
+
 /// A turn-scoped streaming session created from a [`ModelClient`].
 ///
 /// The session establishes a Responses WebSocket connection lazily and reuses it across multiple
@@ -443,6 +482,37 @@ impl ModelClient {
         http_client_factory: HttpClientFactory,
     ) -> Self {
         let model_provider = create_model_provider(provider_info, auth_manager);
+        Self::new_with_provider(
+            model_provider,
+            agent_identity_policy,
+            thread_id,
+            session_source,
+            originator,
+            model_verbosity,
+            enable_request_compression,
+            include_timing_metrics,
+            beta_features_header,
+            concurrent_reasoning_summaries_enabled,
+            attestation_provider,
+            http_client_factory,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_provider(
+        model_provider: SharedModelProvider,
+        agent_identity_policy: AgentIdentityAuthPolicy,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        originator: String,
+        model_verbosity: Option<VerbosityConfig>,
+        enable_request_compression: bool,
+        include_timing_metrics: bool,
+        beta_features_header: Option<String>,
+        concurrent_reasoning_summaries_enabled: bool,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        http_client_factory: HttpClientFactory,
+    ) -> Self {
         let codex_api_key_env_enabled = model_provider
             .auth_manager()
             .as_ref()
@@ -474,6 +544,26 @@ impl ModelClient {
         }
     }
 
+    /// Rebuilds provider-owned transport/auth state while retaining thread-scoped identity and
+    /// request policy. Existing turn sessions keep their old provider snapshot.
+    pub(crate) fn rebind_provider(&self, model_provider: SharedModelProvider) -> Self {
+        Self::new_with_provider(
+            model_provider,
+            self.agent_identity_policy,
+            self.state.thread_id,
+            self.state.session_source.clone(),
+            self.state.originator.clone(),
+            self.state.model_verbosity,
+            self.state.enable_request_compression,
+            self.state.include_timing_metrics,
+            self.state.beta_features_header.clone(),
+            self.state.concurrent_reasoning_summaries_enabled,
+            self.state.attestation_provider.clone(),
+            self.http_client_factory.clone(),
+        )
+        .with_prompt_cache_key_override(self.prompt_cache_key_override.clone())
+    }
+
     pub(crate) fn with_prompt_cache_key_override(
         mut self,
         prompt_cache_key_override: Option<String>,
@@ -502,6 +592,11 @@ impl ModelClient {
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.provider.auth_manager()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_info(&self) -> &ModelProviderInfo {
+        self.state.provider.info()
     }
 
     fn take_cached_websocket_session(&self) -> WebsocketSession {

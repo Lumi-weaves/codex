@@ -93,6 +93,71 @@ async fn thread_settings_update_emits_notification_and_updates_future_turns() ->
 }
 
 #[tokio::test]
+async fn thread_settings_update_switches_to_a_model_routed_provider() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("done")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_root_config("compact_prompt = \"compact\"\nmodel_auto_compact_token_limit = 200000")
+        .with_provider_config("supports_websockets = false")
+        .with_extra_config(&format!(
+            r#"
+[model_provider_routes]
+"routed-model" = "routed_provider"
+
+[model_providers.routed_provider]
+name = "Routed provider for test"
+base_url = "{}/v1"
+wire_api = "responses"
+request_max_retries = 0
+stream_max_retries = 0
+supports_websockets = false
+"#,
+            server.uri()
+        ))
+        .write(codex_home.path())?;
+    write_models_cache(codex_home.path())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let thread = start_thread(&mut mcp).await?.thread;
+
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            model: Some("routed-model".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    start_text_turn(&mut mcp, thread.id.clone()).await?;
+
+    let updated = read_thread_settings_updated(&mut mcp).await?;
+    assert_eq!(updated.thread_id, thread.id);
+    assert_eq!(updated.thread_settings.model, "routed-model");
+    assert_eq!(updated.thread_settings.model_provider, "routed_provider");
+
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let request_bodies = received_response_bodies(&server).await?;
+    assert!(
+        request_bodies
+            .iter()
+            .any(|body| body.get("model").and_then(Value::as_str) == Some("routed-model")),
+        "future turn did not use the routed model: {request_bodies:#?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()> {
     let server = responses::start_mock_server().await;
     let body = responses::sse(vec![

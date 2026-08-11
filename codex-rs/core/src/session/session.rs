@@ -81,6 +81,8 @@ pub(crate) struct Session {
 pub(crate) struct SessionConfiguration {
     /// Runtime provider and its provider-specific execution policy.
     pub(super) provider: SharedModelProvider,
+    /// Config key for `provider`; this changes with model-routed selections.
+    pub(super) provider_id: String,
 
     pub(super) collaboration_mode: CollaborationMode,
     pub(super) model_reasoning_summary: Option<ReasoningSummaryConfig>,
@@ -239,7 +241,7 @@ impl SessionConfiguration {
     pub(super) fn thread_config_snapshot(&self) -> ThreadConfigSnapshot {
         ThreadConfigSnapshot {
             model: self.collaboration_mode.model().to_string(),
-            model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+            model_provider_id: self.provider_id.clone(),
             model_provider_routes: self
                 .original_config_do_not_use
                 .model_provider_routes
@@ -326,6 +328,10 @@ impl SessionConfiguration {
                 });
         if let Some(collaboration_mode) = updates.collaboration_mode.clone() {
             next_configuration.collaboration_mode = collaboration_mode;
+        }
+        if let Some((provider_id, provider)) = updates.model_provider.clone() {
+            next_configuration.provider_id = provider_id;
+            next_configuration.provider = provider;
         }
         if let Some(summary) = updates.reasoning_summary {
             next_configuration.model_reasoning_summary = Some(summary);
@@ -533,6 +539,7 @@ pub(crate) struct SessionSettingsUpdate {
     pub(crate) active_permission_profile: Option<ActivePermissionProfile>,
     pub(crate) windows_sandbox_level: Option<WindowsSandboxLevel>,
     pub(crate) collaboration_mode: Option<CollaborationMode>,
+    pub(crate) model_provider: Option<(String, SharedModelProvider)>,
     pub(crate) reasoning_summary: Option<ReasoningSummaryConfig>,
     pub(crate) service_tier: Option<Option<String>>,
     pub(crate) final_output_json_schema: Option<Option<Value>>,
@@ -1272,7 +1279,9 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
+                model_client: ModelClientRouter::new(
+                    session_configuration.provider_id.clone(),
+                    ModelClient::new(
                     Some(model_auth_manager),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
@@ -1297,6 +1306,7 @@ impl Session {
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,
                         session_configuration.parent_thread_id,
+                    ),
                     ),
                 ),
                 executed_tool_calls,

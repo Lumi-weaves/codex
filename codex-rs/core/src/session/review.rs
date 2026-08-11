@@ -40,7 +40,6 @@ pub(super) async fn spawn_review_thread(
     );
 
     let review_prompt = resolved.prompt.clone();
-    let provider = parent_turn_context.provider.clone();
     let auth_manager = parent_turn_context.auth_manager.clone();
     let model_auth_manager = parent_turn_context.model_auth_manager.clone();
     let model_info = review_model_info.clone();
@@ -50,6 +49,24 @@ pub(super) async fn spawn_review_thread(
     // Preserve configured overrides without carrying over the parent model's defaults.
     per_turn_config.token_budget = config.token_budget.clone();
     per_turn_config.model = Some(model.clone());
+    let resolved_provider = per_turn_config
+        .model_provider_for_model(&model)
+        .map(|(provider_id, provider)| (provider_id.to_string(), provider.clone()));
+    let (provider, model_client) = match resolved_provider {
+        Some((provider_id, provider_info)) if provider_id != per_turn_config.model_provider_id => {
+            per_turn_config.model_provider_id = provider_id;
+            per_turn_config.model_provider = provider_info.clone();
+            let provider = create_model_provider(provider_info, model_auth_manager.clone());
+            let model_client = parent_turn_context
+                .model_client
+                .rebind_provider(Arc::clone(&provider));
+            (provider, model_client)
+        }
+        _ => (
+            parent_turn_context.provider.clone(),
+            parent_turn_context.model_client.clone(),
+        ),
+    };
     per_turn_config.features = review_features.clone();
     if let Some(current_effort) = per_turn_config.model_reasoning_effort.as_ref()
         && review_model_info.slug != parent_turn_context.model_info.slug
@@ -134,6 +151,7 @@ pub(super) async fn spawn_review_thread(
         model_info: model_info.clone(),
         session_telemetry: session_telemetry_for_context,
         provider: provider_for_context,
+        model_client,
         reasoning_effort,
         reasoning_summary,
         session_source,
