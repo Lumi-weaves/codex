@@ -4,6 +4,13 @@ inputs:
   target:
     description: Rust target triple with Codex-built V8 release artifacts.
     required: true
+  sandbox:
+    description: >-
+      "true" downloads and verifies the ptrcomp-sandbox release artifact
+      pair; "false" downloads and verifies the plain release artifact pair.
+      Any other value fails.
+    required: false
+    default: "true"
 
 runs:
   using: composite
@@ -11,6 +18,7 @@ runs:
     - name: Configure rusty_v8 artifact overrides and verify checksums
       shell: bash
       env:
+        SANDBOX: ${{ inputs.sandbox }}
         TARGET: ${{ inputs.target }}
       run: |
         set -euo pipefail
@@ -20,7 +28,14 @@ runs:
         base_url="https://github.com/openai/codex/releases/download/${release_tag}"
         binding_dir="${RUNNER_TEMP}/rusty_v8"
         
-        profile="ptrcomp_sandbox_release"
+        if [[ "${SANDBOX}" == "true" ]]; then
+          profile="ptrcomp_sandbox_release"
+        elif [[ "${SANDBOX}" == "false" ]]; then
+          profile="release"
+        else
+          echo "sandbox input must be exactly 'true' or 'false', got '${SANDBOX}'" >&2
+          exit 1
+        fi
 
         if [[ "$TARGET" == *-pc-windows-msvc ]]; then
           archive_name="rusty_v8_${profile}_${TARGET}.lib.gz"

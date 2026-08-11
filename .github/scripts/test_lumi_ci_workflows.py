@@ -51,6 +51,38 @@ class LumiCiWorkflowsTest(unittest.TestCase):
         self.assertIn("group: v8-canary::", text)
         self.assertNotIn("group: ${{ github.workflow }}::", text)
 
+    def test_manual_v8_canary_verifies_published_artifacts(self) -> None:
+        text = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        # Manual-only surface remains.
+        self.assertIn("workflow_dispatch:", text)
+        self.assertNotIn("workflow_call:", text)
+
+        # The 60-minute bound remains.
+        self.assertIn("timeout-minutes: 60", text)
+
+        # Both Linux x86_64 sandbox matrix modes remain.
+        self.assertIn("variant: release", text)
+        self.assertIn("variant: ptrcomp-sandbox", text)
+
+        # The checksum-pinned setup action receives the matrix sandbox.
+        self.assertIn("uses: ./.github/actions/setup-rusty-v8", text)
+        self.assertIn("sandbox: ${{ matrix.sandbox }}", text)
+
+        # The cold Bazel build/stage/upload path is gone.
+        for value in (
+            "setup-bazel-ci",
+            "run_bazel_with_buildbuddy.py",
+            "stage-release-pair",
+            "upload-artifact",
+        ):
+            with self.subTest(value=value):
+                self.assertNotIn(value, text)
+
+        # The focused Cargo smoke test remains.
+        self.assertIn("test -p codex-v8-poc", text)
+        self.assertIn("--features sandbox", text)
+
     def test_sdk_build_includes_code_mode_host(self) -> None:
         text = (WORKFLOWS / "lumi-ci.yml").read_text(encoding="utf-8")
 

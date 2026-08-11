@@ -1,17 +1,18 @@
 name: v8-canary
 
-# This is an intentionally manual diagnostic. A live fork run showed that two
-# cold hosted Linux builds were still running after 75 minutes without
-# OpenAI's BuildBuddy topology, so V8 compilation is not an automatic Lumi CI
-# gate. Distribution architectures are covered by the shadow/release contract;
-# Windows and Intel macOS are unsupported.
+# This is an intentionally manual diagnostic. It downloads the checksum-pinned
+# published release/sandbox artifact pairs for the resolved rusty_v8 version
+# and smoke-tests each pair with Cargo, instead of cold-building V8. A live
+# fork run showed that two cold hosted Linux builds were still running after
+# 75 minutes without OpenAI's BuildBuddy topology, so V8 compilation is not
+# an automatic Lumi CI gate. Distribution architectures are covered by the
+# shadow/release contract; Windows and Intel macOS are unsupported.
 on:
   workflow_dispatch:
 
 concurrency:
-  # A reusable workflow sees the caller's `github.workflow` value. Use a
-  # literal family name so this child never contends with `blocking-ci` for
-  # the same concurrency slot while the parent is waiting for it.
+  # Use a literal family name so this workflow never contends with
+  # `blocking-ci` for the same concurrency slot.
   group: v8-canary::${{ github.event.pull_request.number > 0 && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
   cancel-in-progress: ${{ github.ref_name != 'main' }}
 
@@ -23,7 +24,6 @@ jobs:
       # output. Missing must mean "run" so older branches cannot silently skip
       # the expensive V8 coverage while reporting success.
       canary_required: ${{ steps.changes.outputs.canary_required || 'true' }}
-      v8_version: ${{ steps.v8_version.outputs.version }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -36,14 +36,6 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.12"
-
-      - name: Resolve exact v8 crate version
-        id: v8_version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="$(python3 .github/scripts/rusty_v8_bazel.py resolved-v8-crate-version)"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Detect V8 canary changes
         id: changes
@@ -71,47 +63,33 @@ jobs:
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
-  build:
-    name: Build ${{ matrix.variant }} ${{ matrix.target }}
+  verify:
+    name: Verify ${{ matrix.variant }} ${{ matrix.target }}
     needs: metadata
-    # Metadata always runs; only relevant changes pay for the large matrix.
+    # Metadata always runs; only relevant changes pay for the matrix.
     if: ${{ needs.metadata.outputs.canary_required == 'true' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
       actions: read
-    environment:
-      name: bazel
-      deployment: false
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
             sandbox: false
             target: x86_64-unknown-linux-gnu
-            v8_cpu: x64
             variant: release
           - runner: ubuntu-24.04
-            bazel_config: ci-v8
-            platform: linux_amd64
             sandbox: true
             target: x86_64-unknown-linux-gnu
-            v8_cpu: x64
             variant: ptrcomp-sandbox
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-
-      - name: Set up Bazel
-        uses: ./.github/actions/setup-bazel-ci
-        with:
-          target: ${{ matrix.target }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -123,69 +101,13 @@ jobs:
         with:
           toolchain: "1.95.0"
 
-      - name: Build Bazel V8 release pair
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-          PLATFORM: ${{ matrix.platform }}
-          SANDBOX: ${{ matrix.sandbox }}
-          TARGET: ${{ matrix.target }}
-          V8_CPU: ${{ matrix.v8_cpu }}
-        shell: bash
-        run: |
-          set -euo pipefail
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+          sandbox: ${{ matrix.sandbox }}
 
-          target_suffix="${TARGET//-/_}"
-          pair_kind="release_pair"
-          if [[ "${SANDBOX}" == "true" ]]; then
-            pair_kind="sandbox_release_pair"
-          fi
-          pair_target="//third_party/v8:rusty_v8_${pair_kind}_${target_suffix}"
-
-          bazel_args=(
-            build
-            "--platforms=@llvm//platforms:${PLATFORM}"
-            --config=rusty-v8-upstream-libcxx
-            "--config=v8-target-${V8_CPU}"
-            "${pair_target}"
-            --build_metadata=COMMIT_SHA=$(git rev-parse HEAD)
-          )
-          if [[ "${SANDBOX}" != "true" ]]; then
-            bazel_args+=(--config=v8-release-compat)
-          fi
-
-          ./.github/scripts/run_bazel_with_buildbuddy.py \
-            --noexperimental_remote_repo_contents_cache \
-            "${bazel_args[@]}" \
-            "--config=${{ matrix.bazel_config }}"
-
-      - name: Stage release pair
-        env:
-          BAZEL_CONFIG: ${{ matrix.bazel_config }}
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
-          PLATFORM: ${{ matrix.platform }}
-          SANDBOX: ${{ matrix.sandbox }}
-          TARGET: ${{ matrix.target }}
-          V8_CPU: ${{ matrix.v8_cpu }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          stage_args=(
-            --platform "${PLATFORM}"
-            --target "${TARGET}"
-            --output-dir "dist/${TARGET}"
-            --bazel-config "${BAZEL_CONFIG}"
-            --bazel-config "v8-target-${V8_CPU}"
-          )
-          if [[ "${SANDBOX}" == "true" ]]; then
-            stage_args+=(--sandbox)
-          else
-            stage_args+=(--bazel-config v8-release-compat)
-          fi
-
-          python3 .github/scripts/rusty_v8_bazel.py stage-release-pair "${stage_args[@]}"
-
-      - name: Smoke test staged artifact with Cargo
+      - name: Smoke test downloaded artifacts with Cargo
         env:
           SANDBOX: ${{ matrix.sandbox }}
           TARGET: ${{ matrix.target }}
@@ -193,20 +115,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          host_arch="$(uname -m)"
-          case "${TARGET}:${host_arch}" in
-            x86_64-unknown-linux-gnu:x86_64)
-              ;;
-            *)
-              echo "Skipping non-native Cargo smoke for ${TARGET} on ${host_arch}."
-              exit 0
-              ;;
-          esac
-
-          archive="$(find "dist/${TARGET}" -maxdepth 1 -type f -name 'librusty_v8_*.a.gz' -print -quit)"
-          binding="$(find "dist/${TARGET}" -maxdepth 1 -type f -name 'src_binding_*.rs' -print -quit)"
-          if [[ -z "${archive}" || -z "${binding}" ]]; then
-            echo "Missing staged archive or binding for ${TARGET}." >&2
+          if [[ -z "${RUSTY_V8_ARCHIVE:-}" || -z "${RUSTY_V8_SRC_BINDING_PATH:-}" ]]; then
+            echo "setup-rusty-v8 did not export artifact overrides for ${TARGET}." >&2
             exit 1
           fi
 
@@ -218,16 +128,8 @@ jobs:
           (
             cd codex-rs
             CARGO_TARGET_DIR="${RUNNER_TEMP}/rusty-v8-cargo-smoke-${TARGET}-${SANDBOX}" \
-            RUSTY_V8_ARCHIVE="${GITHUB_WORKSPACE}/${archive}" \
-            RUSTY_V8_SRC_BINDING_PATH="${GITHUB_WORKSPACE}/${binding}" \
             cargo "${cargo_args[@]}"
           )
-
-      - name: Upload staged artifacts
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}
-          path: dist/${{ matrix.target }}/*
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
