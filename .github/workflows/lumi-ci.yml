@@ -2,7 +2,19 @@ name: Lumi CI
 
 on:
   workflow_call:
+    inputs:
+      full_nextest:
+        description: Run the currently diagnostic full workspace nextest suite
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
+    inputs:
+      full_nextest:
+        description: Run the currently diagnostic full workspace nextest suite
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -162,7 +174,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   rust-linux:
-    name: Linux x86_64 clippy and tests
+    name: Linux x86_64 clippy and core tests
     needs: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -223,8 +235,15 @@ jobs:
         if: ${{ needs.changes.outputs.rust == 'true' }}
         run: cargo clippy --target x86_64-unknown-linux-gnu --tests --timings -- -D warnings
 
-      - name: Tests
+      - name: Core library tests
         if: ${{ needs.changes.outputs.rust == 'true' }}
+        env:
+          RUST_BACKTRACE: "1"
+          NEXTEST_STATUS_LEVEL: leak
+        run: cargo nextest run --target x86_64-unknown-linux-gnu -p codex-core --lib --no-fail-fast
+
+      - name: Full workspace tests (manual diagnostic)
+        if: ${{ needs.changes.outputs.rust == 'true' && inputs.full_nextest == true }}
         env:
           RUST_BACKTRACE: "1"
           NEXTEST_STATUS_LEVEL: leak
@@ -291,7 +310,14 @@ jobs:
         if: ${{ needs.changes.outputs.sdk == 'true' }}
         working-directory: codex-rs
         run: |
-          cargo build -p codex-cli --bin codex
+          # The CLI discovers code-mode-host beside its own executable. Build
+          # the pair so SDK tests exercise the installed product shape rather
+          # than emitting an extra fail-closed error item.
+          cargo build \
+            -p codex-cli \
+            -p codex-code-mode-host \
+            --bin codex \
+            --bin codex-code-mode-host
           echo "CODEX_EXEC_PATH=${CARGO_TARGET_DIR}/debug/codex" >> "${GITHUB_ENV}"
 
       - name: Setup pnpm

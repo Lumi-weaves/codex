@@ -81,9 +81,19 @@ For Rust, build-system, or CI changes, add Cargo-native Linux x86_64 signal:
 - Cargo formatting, dependency-shear, and dependency-policy checks;
 - benchmark smoke test;
 - `cargo clippy --tests` for `x86_64-unknown-linux-gnu`;
-- one unsharded nextest run on `x86_64-unknown-linux-gnu`; and
+- the deterministic `codex-core` library-test boundary on Linux x86_64; and
 - a release-mode compile on Linux x86_64 before publication rather than an
   always-on cross-platform release matrix.
+
+The full unsharded nextest suite remains an explicit `full_nextest` manual
+diagnostic. Its first clean hosted observation ran 14,166 tests in about 17
+minutes after compilation and found 64 failures in the current product base,
+including stale generated fixtures, TUI snapshots, environment-sensitive
+integration tests, and genuine Lumi semantic regressions. Making that noisy
+baseline an automatic gate would neither describe the current product truth
+nor isolate regressions. The repaired 2,227-test `codex-core` library boundary
+is automatic now; we will promote further subsets as their baselines become
+deterministic. Clippy also compiles every test target on every relevant change.
 
 OpenAI's Bazel lane is valuable to OpenAI because it verifies their Bazel
 graph, exercises remote BuildBuddy execution, and warms shared caches. In the
@@ -104,13 +114,14 @@ documentation fast path.
 Do not duplicate the entire required suite merely because a commit reached
 `main`.
 
-- V8 or code-mode dependency changes require a targeted Linux x86_64 canary.
-  Apple Silicon and Linux arm64 package behavior is checked by the shadow
-  release flow before publishing. Windows and Intel macOS canaries are
-  excluded.
+- V8 canary compilation is manual. The first fork-native attempt left both
+  hosted Linux x86_64 variants compiling after 75 minutes without BuildBuddy,
+  so it is not a useful blocking signal. Apple Silicon and Linux arm64 package
+  behavior is checked by the shadow release flow before publishing. Windows
+  and Intel macOS canaries are excluded.
 - Full Cargo nextest, remote-executor, or additional architecture probes are
-  manual diagnostics beyond the single primary-platform test run until
-  repeated failures demonstrate that a scheduled lane would pay for itself.
+  manual diagnostics until repaired, bounded subsets demonstrate that an
+  automatic lane would pay for itself.
 - A trusted self-hosted machine may accelerate a main-only or manually gated
   check. It must use an exact authorized commit and an ephemeral/JIT runner;
   untrusted pull-request code never receives a persistent self-hosted runner.

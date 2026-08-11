@@ -38,7 +38,6 @@ class LumiCiWorkflowsTest(unittest.TestCase):
             calls,
             [
                 "./.github/workflows/lumi-ci.yml",
-                "./.github/workflows/v8-canary.yml",
             ],
         )
         self.assertIn("name: CI required", text)
@@ -51,6 +50,23 @@ class LumiCiWorkflowsTest(unittest.TestCase):
 
         self.assertIn("group: v8-canary::", text)
         self.assertNotIn("group: ${{ github.workflow }}::", text)
+
+    def test_sdk_build_includes_code_mode_host(self) -> None:
+        text = (WORKFLOWS / "lumi-ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("-p codex-cli", text)
+        self.assertIn("-p codex-code-mode-host", text)
+        self.assertIn("--bin codex-code-mode-host", text)
+
+    def test_expensive_diagnostics_are_manual_or_opt_in(self) -> None:
+        blocking = (WORKFLOWS / "blocking-ci.yml").read_text(encoding="utf-8")
+        lumi = (WORKFLOWS / "lumi-ci.yml").read_text(encoding="utf-8")
+        v8 = (WORKFLOWS / "v8-canary.yml").read_text(encoding="utf-8")
+
+        self.assertNotIn("./.github/workflows/v8-canary.yml", blocking)
+        self.assertNotIn("workflow_call:", v8)
+        self.assertIn("inputs.full_nextest == true", lumi)
+        self.assertIn("-p codex-core --lib --no-fail-fast", lumi)
 
 
 if __name__ == "__main__":
