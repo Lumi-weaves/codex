@@ -209,21 +209,7 @@ jobs:
         if: ${{ needs.changes.outputs.rust == 'true' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest
-          version: 0.9.103
-
-      - name: Install sccache
-        if: ${{ needs.changes.outputs.rust == 'true' }}
-        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: sccache
-          version: 0.7.5
-
-      - name: Enable sccache
-        if: ${{ needs.changes.outputs.rust == 'true' }}
-        run: |
-          echo 'RUSTC_WRAPPER=sccache' >> "${GITHUB_ENV}"
-          echo 'SCCACHE_GHA_ENABLED=true' >> "${GITHUB_ENV}"
+          tool: nextest@0.9.103
 
       - name: Enable unprivileged user namespaces
         if: ${{ needs.changes.outputs.rust == 'true' }}
@@ -243,11 +229,6 @@ jobs:
           RUST_BACKTRACE: "1"
           NEXTEST_STATUS_LEVEL: leak
         run: cargo nextest run --target x86_64-unknown-linux-gnu --no-fail-fast
-
-      - name: sccache statistics
-        if: ${{ always() && needs.changes.outputs.rust == 'true' }}
-        continue-on-error: true
-        run: sccache --show-stats
 
       - name: Check for a clean worktree
         if: ${{ always() && !cancelled() && needs.changes.outputs.rust == 'true' }}
