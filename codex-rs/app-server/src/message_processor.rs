@@ -23,6 +23,7 @@ use crate::outgoing_message::RequestContext;
 use crate::request_processors::AccountRequestProcessor;
 use crate::request_processors::AppsRequestProcessor;
 use crate::request_processors::CatalogRequestProcessor;
+use crate::request_processors::CatalogRequestProcessorArgs;
 use crate::request_processors::CommandExecRequestProcessor;
 use crate::request_processors::ConfigRequestProcessor;
 use crate::request_processors::EnvironmentRequestProcessor;
@@ -376,16 +377,16 @@ impl MessageProcessor {
             Arc::clone(&workspace_settings_cache),
             app_list_shutdown_token,
         );
-        let catalog_processor = CatalogRequestProcessor::new(
-            outgoing.clone(),
-            Arc::clone(&skills_watcher),
-            auth_manager.clone(),
-            Arc::clone(&thread_manager),
-            Arc::clone(&config),
-            config_manager.clone(),
-            Arc::clone(&workspace_settings_cache),
+        let catalog_processor = CatalogRequestProcessor::new(CatalogRequestProcessorArgs {
+            outgoing: outgoing.clone(),
+            skills_watcher: Arc::clone(&skills_watcher),
+            auth_manager: auth_manager.clone(),
+            thread_manager: Arc::clone(&thread_manager),
+            config: Arc::clone(&config),
+            config_manager: config_manager.clone(),
+            workspace_settings_cache: Arc::clone(&workspace_settings_cache),
             model_list_catalog,
-        );
+        });
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
             Arc::clone(&config),

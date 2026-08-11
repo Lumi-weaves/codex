@@ -15,6 +15,17 @@ pub(crate) struct CatalogRequestProcessor {
     model_list_catalog: Arc<ModelListCatalog>,
 }
 
+pub(crate) struct CatalogRequestProcessorArgs {
+    pub(crate) outgoing: Arc<OutgoingMessageSender>,
+    pub(crate) skills_watcher: Arc<SkillsWatcher>,
+    pub(crate) auth_manager: Arc<AuthManager>,
+    pub(crate) thread_manager: Arc<ThreadManager>,
+    pub(crate) config: Arc<Config>,
+    pub(crate) config_manager: ConfigManager,
+    pub(crate) workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
+    pub(crate) model_list_catalog: Arc<ModelListCatalog>,
+}
+
 const SKILLS_LIST_CWD_CONCURRENCY: usize = 5;
 
 fn skills_to_info(
@@ -103,16 +114,17 @@ fn errors_to_info(
 }
 
 impl CatalogRequestProcessor {
-    pub(crate) fn new(
-        outgoing: Arc<OutgoingMessageSender>,
-        skills_watcher: Arc<SkillsWatcher>,
-        auth_manager: Arc<AuthManager>,
-        thread_manager: Arc<ThreadManager>,
-        config: Arc<Config>,
-        config_manager: ConfigManager,
-        workspace_settings_cache: Arc<workspace_settings::WorkspaceSettingsCache>,
-        model_list_catalog: Arc<ModelListCatalog>,
-    ) -> Self {
+    pub(crate) fn new(args: CatalogRequestProcessorArgs) -> Self {
+        let CatalogRequestProcessorArgs {
+            outgoing,
+            skills_watcher,
+            auth_manager,
+            thread_manager,
+            config,
+            config_manager,
+            workspace_settings_cache,
+            model_list_catalog,
+        } = args;
         Self {
             outgoing,
             skills_watcher,
