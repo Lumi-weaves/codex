@@ -197,8 +197,8 @@ Activation contract:
 
 The dispatcher and `LUMI_GITHUB_TOKEN` stay only on the trusted local
 control host (Omen for the x86_64 target, the control host's SSH session
-for the arm64 target). Export the token from tomorrow's credential/session
-setup first, never inline; the runner child receives only the encoded
+for the arm64 target). Export the token from the activation-time secure
+credential session first, never inline; the runner child receives only the encoded
 config on stdin, and SSH stdin carries only that encoded config. Examples
 use placeholders only; never put the token in shell history, dotfiles, or
 the repository.
@@ -207,7 +207,7 @@ Local Omen control host, x86_64 target (the mydotfiles Omen controller
 `omen-codex-build-worker` runs the one-shot JIT runner; it stays attached
 until the runner exits):
 
-    export LUMI_GITHUB_TOKEN   # from tomorrow's credential/session setup
+    export LUMI_GITHUB_TOKEN   # from the activation-time secure prompt
     python3 scripts/release/lumi_shadow_dispatch_jit.py \
       --run-id <RUN_ID> --run-attempt <ATTEMPT> --target x86_64 \
       --runner-group-id <RUNNER_GROUP_ID> -- \
@@ -216,17 +216,16 @@ until the runner exits):
 
 Trusted local control host, arm64 target over SSH. The dispatcher runs on
 the control host; `ssh` is the runner child and its stdin carries only the
-encoded config. The remote helper path is deployed tomorrow (placeholder
-beneath); the helper is the mydotfiles Mac controller
+encoded config. The remote helper is the deployed mydotfiles Mac controller
 `macmini-codex-build-worker`, never actions-runner/run.sh. The SSH session
 stays attached until the runner exits:
 
-    export LUMI_GITHUB_TOKEN   # from tomorrow's credential/session setup
+    export LUMI_GITHUB_TOKEN   # from the activation-time secure prompt
     python3 scripts/release/lumi_shadow_dispatch_jit.py \
       --run-id <RUN_ID> --run-attempt <ATTEMPT> --target arm64 \
       --runner-group-id <RUNNER_GROUP_ID> -- \
-      ssh -T lumi-builder@macmini \
-      /Users/lumi-builder/.local/bin/macmini-codex-build-worker runner-run-jit
+      ssh -T lumi@macmini \
+      /Users/lumi/.local/bin/macmini-codex-build-worker runner-run-jit
 
 The controller session stays attached until the one-shot runner exits; the
 dispatcher propagates the runner's exit status. The encoded config is
