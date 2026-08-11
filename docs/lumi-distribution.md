@@ -157,8 +157,9 @@ controller on an external trusted machine inspects an authorized
 in this repository stores or derives credentials; activation requires a
 short-lived GitHub token with the narrowest API authority (read repository
 actions state, create JIT runner configurations), granted by the operator at
-activation time and never committed. Permissions and real activation are
-deliberately deferred to tomorrow's separate activation step.
+activation time and never committed. The Omen and Mac mini controllers are
+deployed; activation remains manual and credential-scoped rather than a
+persistent registered-runner service.
 
 Activation contract:
 
@@ -238,6 +239,25 @@ The controller session stays attached until the one-shot runner exits; the
 dispatcher propagates the runner's exit status. The encoded config is
 ephemeral by design: it exists only in the dispatcher's memory and the
 runner's stdin.
+
+The first live JIT exercise was workflow run `31453601255`, attempt 1, from
+source `62f515e1a85b17b5918f9cc8521e35c78097e2b5`. Both deterministic runners
+accepted their exact jobs: the isolated Omen x86 container and the native
+Apple Silicon listener each connected, became busy, and removed their JIT
+credentials after exit. This accepted the dispatcher/controller boundary but
+not the package build: the Mac job exposed a missing `~/.cargo/bin` entry in
+the Actions PATH after rustup installation, while the x86 job spent more than
+40 minutes in a redundant second repository checkout over the flaky direct
+bridge. The already-failing run was cancelled without publishing artifacts.
+
+The workflow now addresses those observed failures rather than masking them:
+the hosted gate uploads the small trusted `scripts/release` and
+`scripts/codex_package` helper surface once as a one-day, attempt-scoped
+artifact, and each self-hosted job downloads it instead of cloning the large
+repository a second time. The Mac job verifies the account-owned rustup shim
+and adds `~/.cargo/bin` through `GITHUB_PATH` before entering
+`dtolnay/rust-toolchain`. A new live run is still required before the shadow
+package path is considered end-to-end accepted.
 
 ## Privacy and fleet boundary
 

@@ -137,6 +137,20 @@ jobs:
           echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
           echo "::endgroup::"
 
+      - name: Upload trusted shadow worker helpers
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          # Ship the small workflow-commit helper surface once from the hosted
+          # authorization gate. Self-hosted jobs must not clone the same large
+          # repository a second time merely to recover helpers that may be
+          # absent from an older gated source commit.
+          name: lumi-shadow-worker-tools-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            scripts/release
+            scripts/codex_package
+          if-no-files-found: error
+          retention-days: 1
+
   build-shadow:
     name: Build and validate shadow packages (aarch64)
     needs: gate
@@ -156,14 +170,13 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
 
-      - name: Checkout shadow worker helpers (workflow commit)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download trusted shadow worker helpers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           # The gated commit may predate this workflow, so its tree lacks the
-          # shadow helpers; take them from the commit the workflow ran from.
-          ref: ${{ github.sha }}
+          # shadow helpers; the hosted gate packaged them from github.sha.
+          name: lumi-shadow-worker-tools-${{ github.run_id }}-${{ github.run_attempt }}
           path: shadow-tools
-          persist-credentials: false
 
       - name: Install bounded curl wrapper first in PATH
         shell: bash
@@ -273,6 +286,19 @@ jobs:
               'curl -fsS --retry 5 --retry-delay 2 --retry-all-errors -o /dev/null --max-time 20 https://github.com' \
             || { echo "guest proxy http://192.168.5.2:7890 is not reachable; start myproxy/mihomo (no silent direct)"; exit 1; }
           echo "::endgroup::"
+
+      - name: Expose rustup shims to composite actions
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The dedicated Mac account has rustup installed in ~/.cargo/bin,
+          # but GitHub's runner PATH does not include that per-user directory.
+          # dtolnay/rust-toolchain can find rustup through Homebrew and then
+          # invokes `rustc` in a later action substep, so expose the canonical
+          # rustup shim directory before entering the composite action.
+          [[ -x "${HOME}/.cargo/bin/rustup" ]] \
+            || { echo "missing rustup shim: ${HOME}/.cargo/bin/rustup"; exit 1; }
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
@@ -504,14 +530,13 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }}
           persist-credentials: false
 
-      - name: Checkout shadow worker helpers (workflow commit)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Download trusted shadow worker helpers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           # The gated commit may predate this workflow, so its tree lacks the
-          # shadow helpers; take them from the commit the workflow ran from.
-          ref: ${{ github.sha }}
+          # shadow helpers; the hosted gate packaged them from github.sha.
+          name: lumi-shadow-worker-tools-${{ github.run_id }}-${{ github.run_attempt }}
           path: shadow-tools
-          persist-credentials: false
 
       - name: Install bounded curl wrapper first in PATH
         shell: bash

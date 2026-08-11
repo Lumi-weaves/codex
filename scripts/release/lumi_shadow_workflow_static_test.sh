@@ -13,6 +13,8 @@
 #   * apt uses exact Acquire::http::Proxy / Acquire::https::Proxy args;
 #   * every network curl on the path is bounded (finite retry/connect/max-time)
 #     and downloads remain checksum-verified;
+#   * the hosted gate packages the small workflow-commit helper surface once,
+#     so self-hosted jobs never clone the large repository a second time;
 #   * the JIT dispatcher (lumi_shadow_dispatch_jit.py) hardcodes the exact
 #     workflow job names, per-run label formulas, and workflow path, so the
 #     external controller can never route to a renamed job or label.
@@ -183,17 +185,38 @@ grep -q -- '--retry 5 --retry-delay 2 --retry-all-errors' "${workflow}" \
   || { echo "FAIL: guest health probe lacks explicit bounded retries" >&2; exit 1; }
 
 # 12. The hosted gate stays the single authorization/source gate: exactly
-#     one hosted job, main-only, and it must not depend on anything.
+#     one hosted job, main-only, and it must not depend on anything. It ships
+#     the trusted workflow-commit helpers once as a short-retention artifact.
 [[ "$(grep -c 'runs-on: ubuntu-24.04' "${workflow}")" -eq 1 ]] \
   || { echo "FAIL: expected exactly one hosted (ubuntu-24.04) job" >&2; exit 1; }
 grep -q 'Require dispatch from current main' "${workflow}" \
   || { echo "FAIL: main-only dispatch check missing" >&2; exit 1; }
 grep -q 'Resolve source to exact commit SHA' "${workflow}" \
   || { echo "FAIL: source gate step missing" >&2; exit 1; }
+grep -q 'name: lumi-shadow-worker-tools-\${{ github.run_id }}-\${{ github.run_attempt }}' "${workflow}" \
+  || { echo "FAIL: attempt-scoped helper artifact missing" >&2; exit 1; }
+grep -q 'retention-days: 1' "${workflow}" \
+  || { echo "FAIL: helper artifact must have one-day retention" >&2; exit 1; }
+[[ "$(grep -c 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' "${workflow}")" -eq 2 ]] \
+  || { echo "FAIL: both self-hosted jobs must download the trusted helper artifact" >&2; exit 1; }
+[[ "$(grep -c 'Checkout shadow worker helpers' "${workflow}")" -eq 0 ]] \
+  || { echo "FAIL: redundant workflow-commit helper checkout remains" >&2; exit 1; }
+
+# The dedicated Mac account's rustup shim directory must enter GITHUB_PATH
+# before dtolnay/rust-toolchain; the live runner proved that finding rustup via
+# Homebrew alone does not make the later `rustc` action substep resolvable.
+rust_path_line="$(grep -n 'Expose rustup shims to composite actions' "${workflow}" | head -n1 | cut -d: -f1)"
+rust_action_line="$(grep -n 'Install Rust toolchain' "${workflow}" | head -n1 | cut -d: -f1)"
+[[ -n "${rust_path_line}" && -n "${rust_action_line}" && "${rust_path_line}" -lt "${rust_action_line}" ]] \
+  || { echo "FAIL: rustup shim PATH step must precede toolchain action" >&2; exit 1; }
+grep -Fq '${HOME}/.cargo/bin/rustup' "${workflow}" \
+  || { echo "FAIL: rustup shim preflight missing" >&2; exit 1; }
+grep -Fq 'echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"' "${workflow}" \
+  || { echo "FAIL: rustup shim directory is not exported through GITHUB_PATH" >&2; exit 1; }
 
 # 13. x86 sibling job block: needs the gate, dynamic per-run label, finite
-#     timeout, contents:read, exact gated checkout and workflow-commit
-#     helper checkout, bounded curl wrapper first, and one shadow-only
+#     timeout, contents:read, one exact gated checkout and one hosted-gate
+#     helper artifact download, bounded curl wrapper first, and one shadow-only
 #     artifact upload.
 x86_block="$(sed -n '/^  build-shadow-x86:/,/^  [a-z]/p' "${workflow}")"
 [[ -n "${x86_block}" ]] || { echo "FAIL: build-shadow-x86 job missing" >&2; exit 1; }
@@ -209,8 +232,10 @@ grep -q 'ref: \${{ needs.gate.outputs.sha }}' <<<"${x86_block}" \
   || { echo "FAIL: x86 job lacks the exact gated checkout" >&2; exit 1; }
 grep -q 'persist-credentials: false' <<<"${x86_block}" \
   || { echo "FAIL: x86 checkout does not disable credential persistence" >&2; exit 1; }
-grep -q 'ref: \${{ github.sha }}' <<<"${x86_block}" \
-  || { echo "FAIL: x86 job lacks the workflow-commit helper checkout" >&2; exit 1; }
+[[ "$(grep -c 'actions/checkout@' <<<"${x86_block}")" -eq 1 ]] \
+  || { echo "FAIL: x86 job must checkout the large repository exactly once" >&2; exit 1; }
+grep -q 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' <<<"${x86_block}" \
+  || { echo "FAIL: x86 job lacks the trusted helper artifact download" >&2; exit 1; }
 grep -q 'shadow-tools' <<<"${x86_block}" \
   || { echo "FAIL: x86 job does not stage shadow-tools" >&2; exit 1; }
 grep -q 'lumi_shadow_curl.sh' <<<"${x86_block}" \
