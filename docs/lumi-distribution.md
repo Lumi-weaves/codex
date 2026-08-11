@@ -149,6 +149,12 @@ unsigned canary.
 
 ## Manual shadow workflow and just-in-time runner activation
 
+For the separate, GitHub-hosted, user-facing installer-kit workflow and its
+reversible CLI/macOS Desktop-backend takeover contract, see
+[Manual multi-platform installer kits](lumi-manual-installer.md). It is
+manual-only, defaults to one target, retains artifacts for three days, and
+does not publish a release.
+
 The shadow workflow `.github/workflows/lumi-release-shadow-worker.yml` is
 manual-only and never triggered by automation in this repository. A human
 controller on an external trusted machine inspects an authorized

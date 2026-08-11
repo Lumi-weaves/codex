@@ -109,6 +109,14 @@ stay adjacent to the real binary. The earlier Lumi canary manager actions
 flow, layout, and safety model, and
 [distribution design](./docs/lumi-distribution.md) for the adopted upstream
 contract, fork boundary, release graph, and first-tag acceptance gate.
+For an unpublished current-`main` candidate, the manual-only
+`lumi-manual-installer` Actions workflow builds one selected platform (or all
+three) and emits a three-day offline installer kit. Its terminal installer
+offers reversible `codex` CLI and macOS Codex Desktop **backend** takeover;
+it does not modify the Desktop app or `CODEX_HOME`. See the
+[manual installer contract](./docs/lumi-manual-installer.md). Its narrow
+`rollback` restores only the CLI/Desktop-backend takeover paths; it is not the
+removed release/version manager.
 The TUI can also cooperate with an explicitly user-started official app-server
 from the same upstream `MAJOR.MINOR.PATCH` release; version mismatch or missing
 identity fails before thread/session traffic. This is not Desktop discovery,

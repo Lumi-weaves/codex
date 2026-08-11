@@ -122,6 +122,12 @@ Do not duplicate the entire required suite merely because a commit reached
 - Full Cargo nextest, remote-executor, or additional architecture probes are
   manual diagnostics until repaired, bounded subsets demonstrate that an
   automatic lane would pay for itself.
+- `lumi-manual-installer.yml` is a user-requested, non-publishing delivery
+  lane. It defaults to one selected target, can build all three supported
+  targets explicitly, emits three-day offline installer kits, and has no
+  automatic trigger. Local installation and any reversible CLI/macOS Desktop
+  backend takeover occur only after the artifact is downloaded and run by the
+  user.
 - A trusted self-hosted machine may accelerate a main-only or manually gated
   check. It must use an exact authorized commit and an ephemeral/JIT runner;
   untrusted pull-request code never receives a persistent self-hosted runner.

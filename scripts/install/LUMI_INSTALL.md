@@ -17,6 +17,14 @@ launcher that execs the real `<root>/current/bin/codex`, so the packaged
 `codex-resources`, `codex-path`, and the `codex-code-mode-host` stay adjacent
 to the real binary (required for code mode on macOS).
 
+The manual Actions installer kit can also pass a local canonical archive and
+checksum manifest with `--package-archive` plus `--checksum-manifest`. Both
+paths are required together, must be absolute regular non-symlink files, and
+require an exact `--release`; this offline mode performs no release download.
+The kit's separate interactive wrapper may then offer reversible CLI and
+macOS Desktop-backend takeover. See
+[the manual installer contract](../../docs/lumi-manual-installer.md).
+
 ## Quick start (macOS / Linux)
 
 ```sh
@@ -58,6 +66,8 @@ distribution contract.
 | `LUMI_TARGET` | detected | Package target (overridden by `--target`). |
 | `LUMI_ROOT` | `${XDG_DATA_HOME:-$HOME/.local/share}/lumi-codex` | Lumi-owned install root; must be absolute and must not be a symlink. |
 | `LUMI_INSTALL_DIR` | `$HOME/.local/bin` | Directory for the visible `lumi-codex` launcher. |
+| `LUMI_PACKAGE_ARCHIVE` | unset | Absolute local canonical archive for offline kit mode. |
+| `LUMI_CHECKSUM_MANIFEST` | unset | Absolute local SHA-256 manifest; required with the local archive. |
 
 ## Managed layout
 
@@ -65,6 +75,7 @@ distribution contract.
 <root>/
   current -> releases/<version>-<target>   # atomic pointer switch
   releases/<version>-<target>/             # immutable verified package
+    .lumi-owner                            # installer ownership marker
   install.lock | install.lock.d            # flock/lockf or mkdir lock
 ```
 

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Static (and optionally native) validation of shadow package archives.
+"""Static (and optionally native) validation of Lumi package archives.
 
-Owned exclusively by .github/workflows/lumi-release-shadow-worker.yml. The
-canonical lumi-release workflow validates its release assets with an inline
-Python validator that this workflow must not modify; this helper mirrors the
-same canonical checks for the shadow workflow targets:
+Used by the manual installer and shadow workflows. The canonical lumi-release
+workflow validates its release assets with an inline Python validator that
+these workflows must not modify; this helper mirrors the same checks for their
+three supported targets:
 
   * safe tar members: no absolute paths, no `..` components, no duplicate
     names, regular files and directories only;
@@ -222,7 +222,7 @@ def validate_archive(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Validate a shadow-workflow Codex package archive against the "
+            "Validate a Lumi Codex package archive against the "
             "canonical Lumi package checks."
         )
     )

@@ -1,0 +1,263 @@
+# Manual, non-publishing Lumi Codex installer-kit build.
+#
+# This workflow has no push, pull_request, schedule, or release trigger. A
+# maintainer chooses one target (the low-bandwidth default) or all supported
+# targets from the Actions UI. Each artifact is a short-lived, self-contained
+# offline installer kit; downloading it never changes a user's Codex setup.
+
+name: lumi-manual-installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Installer kit target to build
+        required: true
+        default: linux-x86_64
+        type: choice
+        options:
+          - linux-x86_64
+          - linux-arm64
+          - macos-arm64
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CODEX_ZSH_RELEASE_TAG: codex-zsh-v0.1.0
+
+jobs:
+  gate:
+    name: Resolve manual build matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Require current main
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE}" == branch && "${GITHUB_REF_NAME}" == main ]] \
+            || { echo "Manual installer builds must be dispatched from main" >&2; exit 1; }
+          main_sha="$(git rev-parse --verify origin/main)"
+          [[ "$(git rev-parse HEAD)" == "$main_sha" ]] \
+            || { echo "Workflow checkout is not current origin/main" >&2; exit 1; }
+
+      - name: Select only requested targets
+        id: matrix
+        shell: bash
+        env:
+          REQUESTED_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          linux_x86='{"target":"x86_64-unknown-linux-musl","runner":"ubuntu-24.04"}'
+          linux_arm='{"target":"aarch64-unknown-linux-musl","runner":"ubuntu-24.04-arm"}'
+          macos_arm='{"target":"aarch64-apple-darwin","runner":"macos-15"}'
+          case "$REQUESTED_TARGET" in
+            linux-x86_64) include="$linux_x86" ;;
+            linux-arm64) include="$linux_arm" ;;
+            macos-arm64) include="$macos_arm" ;;
+            all) include="$linux_x86,$linux_arm,$macos_arm" ;;
+            *) echo "Unsupported target selection: $REQUESTED_TARGET" >&2; exit 1 ;;
+          esac
+          printf 'matrix={"include":[%s]}\n' "$include" >>"$GITHUB_OUTPUT"
+
+  build:
+    name: Build installer kit - ${{ matrix.target }}
+    needs: gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.gate.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils pkg-config libcap-dev
+
+      - name: Use hermetic Cargo home (musl)
+        if: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo_home="${GITHUB_WORKSPACE}/.cargo-home"
+          mkdir -p "${cargo_home}/bin"
+          echo "CARGO_HOME=${cargo_home}" >>"$GITHUB_ENV"
+          echo "${cargo_home}/bin" >>"$GITHUB_PATH"
+          : >"${cargo_home}/config.toml"
+
+      - name: Install Zig
+        if: ${{ contains(matrix.target, 'linux') }}
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+          use-cache: false
+
+      - name: Install musl build tools
+        if: ${{ contains(matrix.target, 'linux') }}
+        env:
+          TARGET: ${{ matrix.target }}
+        run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
+
+      - name: Disable aws-lc jitter entropy (musl)
+        if: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AWS_LC_SYS_NO_JITTER_ENTROPY=1" >>"$GITHUB_ENV"
+          target_no_jitter="AWS_LC_SYS_NO_JITTER_ENTROPY_${{ matrix.target }}"
+          target_no_jitter="${target_no_jitter//-/_}"
+          echo "${target_no_jitter}=1" >>"$GITHUB_ENV"
+
+      - name: Configure rusty_v8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Build Linux bwrap and export digest
+        if: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          cargo build --target "$target" --release --timings --bin bwrap
+          bwrap_path="target/${target}/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=${digest}" >>"$GITHUB_ENV"
+
+      - name: Build Lumi Codex binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          cargo build --target "$target" --release --timings \
+            --bin codex --bin codex-code-mode-host
+
+      - name: Strip Linux binaries
+        if: ${{ contains(matrix.target, 'linux') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          for binary in codex codex-code-mode-host; do
+            strip --strip-debug --strip-unneeded "target/${target}/release/${binary}"
+          done
+
+      - name: Download immutable zsh manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --connect-timeout 10 --max-time 120 \
+            "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
+            -o "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Build canonical package archive
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          bash "${GITHUB_WORKSPACE}/.github/scripts/build-codex-package-archive.sh" \
+            --target "$TARGET" \
+            --bundle primary \
+            --entrypoint-dir "target/${TARGET}/release" \
+            --archive-dir "dist/${TARGET}" \
+            --zsh-manifest "${RUNNER_TEMP}/codex-zsh"
+
+      - name: Validate package structure, architecture, and native execution
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/codex-rs/Cargo.toml" | head -1)"
+          [[ -n "$version" ]] || { echo "Could not read workspace version" >&2; exit 1; }
+          python3 "${GITHUB_WORKSPACE}/scripts/release/lumi_shadow_validate_package.py" \
+            --archive "dist/${TARGET}/codex-package-${TARGET}.tar.gz" \
+            --target "$TARGET" \
+            --expected-version "$version" \
+            --run
+
+      - name: Assemble offline interactive installer kit
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          archive="${GITHUB_WORKSPACE}/codex-rs/dist/${TARGET}/codex-package-${TARGET}.tar.gz"
+          kit="${RUNNER_TEMP}/lumi-codex-installer-${TARGET}"
+          rm -rf "$kit"
+          mkdir -p "$kit"
+          cp "$archive" "$kit/"
+          cp "${GITHUB_WORKSPACE}/scripts/install/install.sh" "$kit/install.sh"
+          cp "${GITHUB_WORKSPACE}/scripts/install/install-kit.sh" "$kit/install-lumi.sh"
+          cp "${GITHUB_WORKSPACE}/scripts/install/takeover.sh" "$kit/takeover.sh"
+          chmod 0755 "$kit/install.sh" "$kit/install-lumi.sh" "$kit/takeover.sh"
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "${GITHUB_WORKSPACE}/codex-rs/Cargo.toml" | head -1)"
+          [[ -n "$version" ]] || { echo "Could not read workspace version" >&2; exit 1; }
+          printf '%s\n' "$version" >"$kit/VERSION"
+          printf '%s\n' "$TARGET" >"$kit/TARGET"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$kit" && sha256sum "codex-package-${TARGET}.tar.gz" >codex-package_SHA256SUMS)
+          else
+            digest="$(shasum -a 256 "$archive" | awk '{print $1}')"
+            printf '%s  %s\n' "$digest" "codex-package-${TARGET}.tar.gz" >"$kit/codex-package_SHA256SUMS"
+          fi
+          cat >"$kit/README.txt" <<EOF
+          Lumi Codex manual installer kit
+
+          Run: sh install-lumi.sh
+
+          The verified package is installed side-by-side first. In an interactive
+          terminal the installer then offers reversible CLI takeover and, on macOS,
+          Codex Desktop backend takeover through CODEX_CLI_PATH. It never modifies
+          Codex Desktop itself, CODEX_HOME, auth, history, or shell profiles.
+          EOF
+          sh -n "$kit/install.sh"
+          sh -n "$kit/install-lumi.sh"
+          sh -n "$kit/takeover.sh"
+          "$kit/install-lumi.sh" --help >/dev/null
+
+      - name: Upload short-lived installer kit
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: lumi-codex-installer-${{ matrix.target }}
+          path: ${{ runner.temp }}/lumi-codex-installer-${{ matrix.target }}/
+          if-no-files-found: error
+          retention-days: 3
+          # The dominant member is already a .tar.gz. Avoid spending runner
+          # time recompressing it inside the Actions artifact envelope.
+          compression-level: 0
