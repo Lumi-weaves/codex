@@ -30,7 +30,7 @@ fn exec_command_tool_matches_expected_spec() {
             .to_string()
     };
     description.push_str(
-        " A returned session ID means the process is still running and remains owned by the task. When you need its result now, call write_stdin with a realistic bounded wait; otherwise completion can wake a continuation. Use tty:true only for commands that may require interaction, and note that new unread TTY output may request attention.",
+        " A returned session ID means the process is still running and remains owned by the task. When you need its result now, call write_stdin with a realistic bounded wait; when automatic continuation is enabled, completion can wake a continuation later. Use tty:true only for commands that may require interaction, and note that new unread TTY output may request attention.",
     );
     let yield_time_ms_description = if cfg!(windows) {
         "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."

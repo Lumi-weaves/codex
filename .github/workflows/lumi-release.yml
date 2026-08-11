@@ -1,5 +1,5 @@
-# Lumi Codex canary release workflow (aarch64 Apple Darwin,
-# aarch64/x86_64 Linux musl, and aarch64/x86_64 Windows MSVC), modeled
+# Lumi Codex canary release workflow (aarch64 Apple Darwin and
+# aarch64/x86_64 Linux musl), modeled
 # directly on the canonical openai/codex rust-release flow: same tag gate,
 # same canonical package builder
 # (.github/scripts/build-codex-package-archive.sh -> scripts/build_codex_package.py),
@@ -11,27 +11,23 @@
 # point). The upstream rust-release workflow excludes these tags so they never
 # start the official release graph.
 #
-# Runners are standard GitHub-hosted only (macos-15 for the Apple Darwin
-# targets, architecture-matched ubuntu-24.04 runners with the canonical
-# Zig/musl toolchain for the Linux musl targets, and windows-2025 with the
-# canonical setup-msvc-env MSVC environment for the Windows MSVC targets;
-# aarch64-pc-windows-msvc is cross-compiled on the hosted x64 runner exactly
-# as in the upstream release flow). OpenAI's private self-hosted runners,
-# billable GitHub larger runners, signing environments,
-# credentials, and secrets are never used, and no macOS, Windows, or Linux
+# Runners are standard GitHub-hosted only (macos-15 for Apple Silicon and
+# architecture-matched ubuntu-24.04 runners with the canonical Zig/musl
+# toolchain for Linux). OpenAI's private self-hosted runners, billable GitHub
+# larger runners, signing environments, credentials, and secrets are never
+# used, and no macOS or Linux
 # signing is claimed anywhere: every artifact below is an UNSIGNED canary.
 # The fork publishes only to its own GitHub Release for this tag (fork-scoped
 # GITHUB_TOKEN, no environments); the codex-zsh manifest is read from the
 # immutable public openai/codex release because the fork has no zsh release
-# of its own. Windows packages intentionally contain no zsh resource (the
-# upstream manifest has no Windows platforms), matching the canonical layout.
+# of its own.
 #
 # Honest UX boundary: GitHub's /releases/latest endpoint excludes prereleases,
 # so this canary is never what a no-argument installer resolves. The versioned
 # one-command bootstrap for this canary is documented separately by the primary
-# maintainer; this workflow must not claim otherwise. The staged install.sh /
-# install.ps1 assets are narrow fork-aware adaptations of the canonical
-# upstream installers; pin with --release / -Release or LUMI_RELEASE.
+# maintainer; this workflow must not claim otherwise. The staged install.sh
+# asset is a narrow fork-aware adaptation of the canonical upstream installer;
+# pin with --release or LUMI_RELEASE.
 
 name: lumi-release
 
@@ -125,18 +121,6 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
             binaries: "codex codex-code-mode-host"
-          # Windows MSVC: GitHub-hosted windows-2025 only. x86_64 builds
-          # natively; aarch64-pc-windows-msvc is cross-compiled on the hosted
-          # x64 runner through the canonical setup-msvc-env action (the
-          # windows-2025 image ships both VC.Tools.x86.x64 and
-          # VC.Tools.ARM64). The primary bundle also builds the two sandbox
-          # helper executables the canonical Windows package layout requires.
-          - target: x86_64-pc-windows-msvc
-            runner: windows-2025
-            binaries: "codex codex-code-mode-host codex-command-runner codex-windows-sandbox-setup"
-          - target: aarch64-pc-windows-msvc
-            runner: windows-2025
-            binaries: "codex codex-code-mode-host codex-command-runner codex-windows-sandbox-setup"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -189,37 +173,8 @@ jobs:
           target_no_jitter="${target_no_jitter//-/_}"
           echo "${target_no_jitter}=1" >> "$GITHUB_ENV"
 
-      - name: Ensure python3 is available (Windows)
-        if: ${{ contains(matrix.target, 'pc-windows-msvc') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          # setup-rusty-v8 invokes `python3` from Git Bash. The GitHub-hosted
-          # Windows image ships Python on PATH as `python`; when the image does
-          # not already provide a `python3` alias, stage one in RUNNER_TEMP
-          # before setup-rusty-v8 runs. Do not mutate the hosted tool cache.
-          if command -v python3 >/dev/null 2>&1; then
-            echo "python3 already available: $(command -v python3)"
-            exit 0
-          fi
-          python_bin="$(command -v python)"
-          [[ -n "${python_bin}" ]] || { echo "python not found on PATH" >&2; exit 1; }
-          alias_dir="${RUNNER_TEMP}/lumi-python3"
-          mkdir -p "${alias_dir}"
-          cp "${python_bin}" "${alias_dir}/python3.exe"
-          export PATH="${alias_dir}:${PATH}"
-          echo "${alias_dir}" >> "$GITHUB_PATH"
-          command -v python3 >/dev/null 2>&1 \
-            || { echo "python3 still not resolvable after alias" >&2; exit 1; }
-
       - name: Configure rusty_v8 artifact overrides and verify checksums
         uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-
-      - name: Configure MSVC environment
-        if: ${{ contains(matrix.target, 'pc-windows-msvc') }}
-        uses: ./.github/actions/setup-msvc-env
         with:
           target: ${{ matrix.target }}
 
@@ -250,9 +205,6 @@ jobs:
         run: |
           set -euo pipefail
           target="${{ matrix.target }}"
-          if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
-            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
-          fi
           build_args=()
           for binary in ${{ matrix.binaries }}; do
             build_args+=(--bin "$binary")
@@ -282,10 +234,8 @@ jobs:
           # only: the fork has no codex-zsh release of its own, and this
           # workflow never publishes to that upstream. The manifest covers the
           # four upstream Unix platforms (macos-aarch64, macos-x86_64,
-          # linux-aarch64, linux-x86_64); it has no Windows platforms, so the
-          # canonical builder omits zsh from Windows packages. Lumi consumes
-          # only the macos-aarch64 and two Linux entries: it publishes no
-          # x86_64 (Intel) macOS package.
+          # linux-aarch64, linux-x86_64). Lumi consumes only macos-aarch64 and
+          # the two Linux entries: it publishes no Intel macOS package.
           curl -fsSL \
             "https://github.com/openai/codex/releases/download/${CODEX_ZSH_RELEASE_TAG}/codex-zsh" \
             -o "${RUNNER_TEMP}/codex-zsh"
@@ -315,7 +265,7 @@ jobs:
   release:
     needs: [tag-check, build]
     # Release fan-in: every matrix target must have succeeded. A matrix job
-    # result is only "success" when all five target builds succeeded.
+    # result is only "success" when all three target builds succeeded.
     if: >-
       ${{
         always() &&
@@ -327,7 +277,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       # Only fork-scoped GITHUB_TOKEN write: required to create the release
-      # and upload its eight assets. actions: read is required to download
+      # and upload its five assets. actions: read is required to download
       # the build artifacts. No secrets, environments, or id-token.
       contents: write
       actions: read
@@ -361,8 +311,6 @@ jobs:
             aarch64-apple-darwin
             aarch64-unknown-linux-musl
             x86_64-unknown-linux-musl
-            aarch64-pc-windows-msvc
-            x86_64-pc-windows-msvc
           )
 
           # 1. Every target archive must be present exactly once.
@@ -386,33 +334,17 @@ jobs:
             || { echo "Checksum manifest must contain exactly ${#targets[@]} lines"; exit 1; }
           (cd staging && sha256sum -c codex-package_SHA256SUMS)
 
-          # 3. Installer assets: exact canonical repository copies staged as
-          #    install.sh / install.ps1, with a POSIX syntax check for
-          #    install.sh and a PowerShell parse check for install.ps1 when
-          #    pwsh is available.
+          # 3. Installer asset: exact canonical repository copy, with a POSIX
+          #    syntax check before publication.
           cp scripts/install/install.sh staging/install.sh
           sh -n staging/install.sh
-          cp scripts/install/install.ps1 staging/install.ps1
-          if command -v pwsh >/dev/null 2>&1; then
-            pwsh -NoProfile -Command '
-              $tokens = $null
-              $errors = $null
-              [void][System.Management.Automation.Language.Parser]::ParseFile(
-                "staging/install.ps1", [ref]$tokens, [ref]$errors)
-              if ($errors.Count -gt 0) {
-                $errors | ForEach-Object { Write-Error $_.Message }
-                exit 1
-              }
-            '
-          fi
 
           # 4. Validate every archive before release: safe member names and
           #    types, exact canonical eight-field metadata, required regular
           #    executables, correct binary architecture, and the exact tag
           #    version embedded in the entrypoint. Cross-built binaries are
-          #    validated statically here (PE binaries are never executed on
-          #    this runner); the one natively executable archive additionally
-          #    gets an execution check below.
+          #    validated statically here; the one natively executable archive
+          #    additionally gets an execution check below.
           extract_root="${RUNNER_TEMP}/lumi-canary-packages"
           rm -rf "$extract_root"
           mkdir -p "$extract_root"
@@ -431,14 +363,9 @@ jobs:
 
           MACH_O_MAGIC_64 = b"\xcf\xfa\xed\xfe"
           ELF_MAGIC = b"\x7fELF"
-          PE_SIGNATURE = b"PE\x00\x00"
-          CPU_TYPE_X86_64 = 0x01000007
           CPU_TYPE_ARM64 = 0x0100000C
           EM_X86_64 = 62
           EM_AARCH64 = 183
-          PE_MACHINE_X86_64 = 0x8664
-          PE_MACHINE_ARM64 = 0xAA64
-          PE32_PLUS_MAGIC = 0x20B
 
 
           def check_archive_members(archive: pathlib.Path) -> None:
@@ -471,32 +398,9 @@ jobs:
                   if data[:4] != MACH_O_MAGIC_64:
                       raise SystemExit(f"{path} is not a 64-bit Mach-O binary")
                   cputype = struct.unpack("<I", data[4:8])[0]
-                  expected = (
-                      CPU_TYPE_ARM64 if target.startswith("aarch64") else CPU_TYPE_X86_64
-                  )
+                  expected = CPU_TYPE_ARM64
                   if cputype != expected:
                       raise SystemExit(f"{path} has wrong Mach-O cputype {cputype:#x}")
-              elif target.endswith("pc-windows-msvc"):
-                  # PE32+ (64-bit PE): MZ header, e_lfanew -> "PE\0\0" signature,
-                  # COFF Machine at +4, Optional header magic at +24.
-                  if data[:2] != b"MZ":
-                      raise SystemExit(f"{path} is not a PE binary (no MZ header)")
-                  e_lfanew = struct.unpack_from("<I", data, 0x3C)[0]
-                  if e_lfanew + 26 > len(data):
-                      raise SystemExit(f"{path} has an invalid PE header offset")
-                  if data[e_lfanew : e_lfanew + 4] != PE_SIGNATURE:
-                      raise SystemExit(f"{path} has no PE signature")
-                  optional_magic = struct.unpack_from("<H", data, e_lfanew + 24)[0]
-                  if optional_magic != PE32_PLUS_MAGIC:
-                      raise SystemExit(f"{path} is not a PE32+ binary")
-                  machine = struct.unpack_from("<H", data, e_lfanew + 4)[0]
-                  expected = (
-                      PE_MACHINE_ARM64
-                      if target.startswith("aarch64")
-                      else PE_MACHINE_X86_64
-                  )
-                  if machine != expected:
-                      raise SystemExit(f"{path} has wrong PE machine {machine:#x}")
               else:
                   if data[:4] != ELF_MAGIC or data[4] != 2:
                       raise SystemExit(f"{path} is not a 64-bit ELF binary")
@@ -523,18 +427,13 @@ jobs:
                       f"Missing package metadata in {target}: codex-package.json"
                   )
               metadata = json.loads(pkgjson.read_text(encoding="utf-8"))
-              entrypoint = (
-                  "bin/codex.exe"
-                  if target.endswith("pc-windows-msvc")
-                  else "bin/codex"
-              )
               expected = {
                   "layoutVersion": 1,
                   "distribution": "lumi",
                   "version": version,
                   "target": target,
                   "variant": "codex",
-                  "entrypoint": entrypoint,
+                  "entrypoint": "bin/codex",
                   "resourcesDir": "codex-resources",
                   "pathDir": "codex-path",
               }
@@ -544,54 +443,26 @@ jobs:
                       f"eight-field schema {expected!r}, got {metadata!r}"
                   )
 
-              if target.endswith("pc-windows-msvc"):
-                  # Required Windows members: regular files, not symlinks.
-                  # Windows executables carry no Unix exec bit, so only file
-                  # presence is checked (canonical builder semantics).
-                  for relative in (
-                      "bin/codex.exe",
-                      "bin/codex-code-mode-host.exe",
-                      "codex-path/rg.exe",
-                      "codex-resources/codex-command-runner.exe",
-                      "codex-resources/codex-windows-sandbox-setup.exe",
-                  ):
-                      path = extract_dir / relative
-                      if not path.is_file() or path.is_symlink():
-                          raise SystemExit(f"Missing or invalid package file: {relative}")
+              # Required regular executables: regular files, not symlinks.
+              require_regular_executable(extract_dir, "bin/codex")
+              require_regular_executable(extract_dir, "bin/codex-code-mode-host")
+              require_regular_executable(extract_dir, "codex-path/rg")
+              require_regular_executable(extract_dir, "codex-resources/zsh/bin/zsh")
+              if target.endswith("unknown-linux-musl"):
+                  require_regular_executable(extract_dir, "codex-resources/bwrap")
 
-                  # PE architecture must match the package target.
-                  check_arch(extract_dir / "bin/codex.exe", target)
-                  check_arch(extract_dir / "bin/codex-code-mode-host.exe", target)
+              # Binary architecture must match the package target.
+              check_arch(extract_dir / "bin/codex", target)
+              check_arch(extract_dir / "bin/codex-code-mode-host", target)
 
-                  # The exact tag version must be embedded in the entrypoint
-                  # (fixed byte search; PE binaries are never executed here).
-                  if version.encode("utf-8") not in (
-                      extract_dir / "bin/codex.exe"
-                  ).read_bytes():
-                      raise SystemExit(
-                          f"bin/codex.exe in {target} does not embed version {version}"
-                      )
-              else:
-                  # Required regular executables: regular files, not symlinks.
-                  require_regular_executable(extract_dir, "bin/codex")
-                  require_regular_executable(extract_dir, "bin/codex-code-mode-host")
-                  require_regular_executable(extract_dir, "codex-path/rg")
-                  require_regular_executable(extract_dir, "codex-resources/zsh/bin/zsh")
-                  if target.endswith("unknown-linux-musl"):
-                      require_regular_executable(extract_dir, "codex-resources/bwrap")
-
-                  # Binary architecture must match the package target.
-                  check_arch(extract_dir / "bin/codex", target)
-                  check_arch(extract_dir / "bin/codex-code-mode-host", target)
-
-                  # The exact tag version must be embedded in the entrypoint
-                  # (fixed byte search; cross-built binaries are not executed).
-                  if version.encode("utf-8") not in (
-                      extract_dir / "bin/codex"
-                  ).read_bytes():
-                      raise SystemExit(
-                          f"bin/codex in {target} does not embed version {version}"
-                      )
+              # The exact tag version must be embedded in the entrypoint
+              # (fixed byte search; cross-built binaries are not executed).
+              if version.encode("utf-8") not in (
+                  extract_dir / "bin/codex"
+              ).read_bytes():
+                  raise SystemExit(
+                      f"bin/codex in {target} does not embed version {version}"
+                  )
 
               print(f"✅  Validated canonical package for {target} ({version})")
           PY
@@ -611,25 +482,22 @@ jobs:
             || { echo "Binary version ${binary_version} ≠ tag version ${version}"; exit 1; }
           echo "✅  Native binary version agrees (${version})"
 
-          # 6. Staging must contain exactly the eight intended release files.
+          # 6. Staging must contain exactly the five intended release files.
           count="$(find staging -maxdepth 1 -type f | wc -l)"
-          [[ "$count" -eq 8 ]] \
-            || { echo "Expected exactly 8 files in staging, found ${count}"; exit 1; }
+          [[ "$count" -eq 5 ]] \
+            || { echo "Expected exactly 5 files in staging, found ${count}"; exit 1; }
           for name in \
             "codex-package-aarch64-apple-darwin.tar.gz" \
             "codex-package-aarch64-unknown-linux-musl.tar.gz" \
             "codex-package-x86_64-unknown-linux-musl.tar.gz" \
-            "codex-package-aarch64-pc-windows-msvc.tar.gz" \
-            "codex-package-x86_64-pc-windows-msvc.tar.gz" \
             "codex-package_SHA256SUMS" \
-            "install.sh" \
-            "install.ps1"
+            "install.sh"
           do
             [[ -f "staging/${name}" && ! -L "staging/${name}" ]] \
               || { echo "Missing staged release file: ${name}"; exit 1; }
           done
 
-          echo "✅  Staged exactly eight assets for ${GITHUB_REF_NAME}"
+          echo "✅  Staged exactly five assets for ${GITHUB_REF_NAME}"
           echo "::endgroup::"
 
       - name: Fail if the release already exists
@@ -656,22 +524,16 @@ jobs:
             - `codex-package-aarch64-apple-darwin.tar.gz` — canonical Codex package for aarch64-apple-darwin
             - `codex-package-aarch64-unknown-linux-musl.tar.gz` — canonical Codex package for aarch64-unknown-linux-musl
             - `codex-package-x86_64-unknown-linux-musl.tar.gz` — canonical Codex package for x86_64-unknown-linux-musl
-            - `codex-package-aarch64-pc-windows-msvc.tar.gz` — canonical Codex package for aarch64-pc-windows-msvc
-            - `codex-package-x86_64-pc-windows-msvc.tar.gz` — canonical Codex package for x86_64-pc-windows-msvc
             - `codex-package_SHA256SUMS` — SHA-256 manifest for the package archives
             - `install.sh` — fork-aware canonical Codex Unix installer (pin with `--release` or `LUMI_RELEASE`)
-            - `install.ps1` — fork-aware canonical Codex PowerShell installer (pin with `-Release` or `LUMI_RELEASE`)
 
-            Note: this is a prerelease, so GitHub's `/releases/latest` never resolves to it. All artifacts are unsigned canaries: no macOS code signing/notarization, no Windows Authenticode signing, and no Linux signature claims.
+            Note: this is a prerelease, so GitHub's `/releases/latest` never resolves to it. All artifacts are unsigned canaries: no macOS code signing/notarization and no Linux signature claims.
           files: |
             staging/codex-package-aarch64-apple-darwin.tar.gz
             staging/codex-package-aarch64-unknown-linux-musl.tar.gz
             staging/codex-package-x86_64-unknown-linux-musl.tar.gz
-            staging/codex-package-aarch64-pc-windows-msvc.tar.gz
-            staging/codex-package-x86_64-pc-windows-msvc.tar.gz
             staging/codex-package_SHA256SUMS
             staging/install.sh
-            staging/install.ps1
           fail_on_unmatched_files: true
           # Never clobber assets on an existing release; the pre-check above
           # already fails when the release exists.

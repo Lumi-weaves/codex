@@ -13,7 +13,6 @@ import unittest
 
 
 INSTALL_SCRIPT = Path(__file__).with_name("install.sh")
-POWERSHELL_SCRIPT = Path(__file__).with_name("install.ps1")
 VERSION = "0.142.5"
 MISMATCH_VERSION = "0.145.0"
 LUMI_VERSION = "0.147.0-lumi.4"
@@ -25,21 +24,14 @@ TARGETS = (
 
 
 class InstallShTest(unittest.TestCase):
-    def test_installer_scripts_never_reference_openai_download_paths(self) -> None:
-        for script in (INSTALL_SCRIPT, POWERSHELL_SCRIPT):
-            with self.subTest(script=script.name):
-                contents = script.read_text(encoding="utf-8")
-                self.assertNotIn("releases.openai.com", contents)
-                self.assertNotIn("openai/codex", contents)
-                self.assertIn("Lumi-weaves/codex", contents)
+    def test_installer_never_references_openai_download_paths(self) -> None:
+        contents = INSTALL_SCRIPT.read_text(encoding="utf-8")
+        self.assertNotIn("releases.openai.com", contents)
+        self.assertNotIn("openai/codex", contents)
+        self.assertIn("Lumi-weaves/codex", contents)
 
     def test_install_sh_is_valid_shell(self) -> None:
         syntax_check(INSTALL_SCRIPT)
-
-    def test_powershell_launcher_rejects_cmd_expansion_characters(self) -> None:
-        contents = POWERSHELL_SCRIPT.read_text(encoding="utf-8")
-        self.assertIn('$Path.Contains("%")', contents)
-        self.assertIn('$Path.Contains("!")', contents)
 
     def test_latest_failure_explains_that_prereleases_are_excluded(self) -> None:
         result, requests = run_installer("latest", metadata_failure=True)

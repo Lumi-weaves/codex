@@ -1,0 +1,403 @@
+name: Lumi CI
+
+on:
+  workflow_call:
+    inputs:
+      full_nextest:
+        description: Run the currently diagnostic full workspace nextest suite
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      full_nextest:
+        description: Run the currently diagnostic full workspace nextest suite
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Classify changed paths
+    runs-on: ubuntu-24.04
+    outputs:
+      base: ${{ steps.detect.outputs.base }}
+      head: ${{ steps.detect.outputs.head }}
+      distribution: ${{ steps.detect.outputs.distribution }}
+      rust: ${{ steps.detect.outputs.rust }}
+      sdk: ${{ steps.detect.outputs.sdk }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify changed paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          head='${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}'
+          if [[ '${{ github.event_name }}' == 'pull_request' ]]; then
+            base='${{ github.event.pull_request.base.sha }}'
+          elif [[ '${{ github.event_name }}' == 'push' ]]; then
+            base='${{ github.event.before }}'
+            if [[ "${base}" =~ ^0+$ ]]; then
+              base="$(git rev-list --max-parents=0 "${head}" | tail -n 1)"
+            fi
+          else
+            base="$(git rev-parse "${head}^")"
+          fi
+
+          {
+            echo "base=${base}"
+            echo "head=${head}"
+            classifier_args=(--base "${base}" --head "${head}")
+            if [[ '${{ github.event_name }}' == 'workflow_dispatch' ]]; then
+              classifier_args+=(--force)
+            fi
+            python3 .github/scripts/lumi_ci_changes.py "${classifier_args[@]}"
+          } >> "${GITHUB_OUTPUT}"
+
+          cat "${GITHUB_OUTPUT}"
+          git diff --name-only --no-renames "${base}...${head}"
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  policy:
+    name: Repository policy
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Annotate spelling errors
+        uses: codespell-project/codespell-problem-matcher@b80729f885d32f78a716c2f107b4db1025001c42 # v1.1.0
+
+      - name: Check spelling
+        uses: codespell-project/actions-codespell@8f01853be192eb0f849a5c7d721450e7a467c579 # v2.2
+        with:
+          ignore_words_file: .codespellignore
+
+      - name: Check changed blob sizes
+        env:
+          BASE_SHA: ${{ needs.changes.outputs.base }}
+          HEAD_SHA: ${{ needs.changes.outputs.head }}
+        run: |
+          python3 scripts/check_blob_size.py \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}" \
+            --max-bytes 512000 \
+            --allowlist .github/blob-size-allowlist.txt
+
+      - name: Verify repository policies
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/verify_cargo_workspace_manifests.py
+          python3 .github/scripts/verify_tui_core_boundary.py
+          python3 .github/scripts/verify_bazel_clippy_lints.py
+          python3 .github/scripts/test_lumi_ci_changes.py
+          python3 .github/scripts/test_lumi_ci_workflows.py
+          python3 .github/scripts/test_v8_canary_changes.py
+          ./scripts/asciicheck.py README.md
+          python3 scripts/readme_toc.py README.md
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+  rust-hygiene:
+    name: Rust hygiene
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - name: No relevant Rust changes
+        if: ${{ needs.changes.outputs.rust != 'true' }}
+        working-directory: .
+        run: echo 'No Rust, build-system, or workflow changes.'
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        with:
+          components: rustfmt
+
+      - name: Check formatting and benchmark harness
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        run: |
+          cargo fmt -- --config imports_granularity=Item --check
+          just bench-smoke
+
+      - name: Install cargo-shear
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: cargo-shear@1.11.2
+
+      - name: Check unused dependencies
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        run: cargo shear --deny-warnings
+
+      - name: Check dependency policy
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        uses: EmbarkStudios/cargo-deny-action@82eb9f621fbc699dd0918f3ea06864c14cc84246 # v2
+        with:
+          rust-version: 1.95.0
+          manifest-path: ./codex-rs/Cargo.toml
+
+      - name: Check for a clean worktree
+        if: ${{ always() && !cancelled() && needs.changes.outputs.rust == 'true' }}
+        uses: ./.github/actions/check-clean-worktree
+
+  rust-linux:
+    name: Linux x86_64 clippy and core tests
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "8388608"
+    steps:
+      - name: No relevant Rust changes
+        if: ${{ needs.changes.outputs.rust != 'true' }}
+        working-directory: .
+        run: echo 'No Rust, build-system, or workflow changes.'
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+
+      - name: Install Linux build dependencies
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        with:
+          components: clippy
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Configure rusty_v8 artifact overrides
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Install nextest
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+
+      - name: Enable unprivileged user namespaces
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        run: |
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Clippy
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        run: cargo clippy --target x86_64-unknown-linux-gnu --tests --timings -- -D warnings
+
+      - name: Core library tests
+        if: ${{ needs.changes.outputs.rust == 'true' }}
+        env:
+          RUST_BACKTRACE: "1"
+          NEXTEST_STATUS_LEVEL: leak
+        run: cargo nextest run --target x86_64-unknown-linux-gnu -p codex-core --lib --no-fail-fast
+
+      - name: Full workspace tests (manual diagnostic)
+        if: ${{ needs.changes.outputs.rust == 'true' && inputs.full_nextest == true }}
+        env:
+          RUST_BACKTRACE: "1"
+          NEXTEST_STATUS_LEVEL: leak
+        run: cargo nextest run --target x86_64-unknown-linux-gnu --no-fail-fast
+
+      - name: Check for a clean worktree
+        if: ${{ always() && !cancelled() && needs.changes.outputs.rust == 'true' }}
+        uses: ./.github/actions/check-clean-worktree
+
+  sdk:
+    name: SDKs on hosted Linux
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: No relevant SDK changes
+        if: ${{ needs.changes.outputs.sdk != 'true' }}
+        run: echo 'No SDK or workflow changes.'
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          persist-credentials: false
+
+      - name: Test Python SDK
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp/codex-python-sdk-home \
+            -e UV_LINK_MODE=copy \
+            -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+            -w "${GITHUB_WORKSPACE}/sdk/python" \
+            python:3.12-slim \
+            sh -euxc '
+              python -m venv /tmp/uv
+              /tmp/uv/bin/python -m pip install uv==0.11.3
+              /tmp/uv/bin/uv sync --group dev --frozen
+              /tmp/uv/bin/uv run --frozen --no-sync ruff check --output-format=github .
+              /tmp/uv/bin/uv run --frozen --no-sync ruff format --check .
+              /tmp/uv/bin/uv run --frozen --no-sync pytest
+            '
+
+      - uses: ./.github/actions/setup-ci
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+
+      - name: Install Linux build dependencies
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        run: |
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+
+      - name: Configure rusty_v8 artifact overrides
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - name: Build Codex for TypeScript SDK tests
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        working-directory: codex-rs
+        run: |
+          # The CLI discovers code-mode-host beside its own executable. Build
+          # the pair so SDK tests exercise the installed product shape rather
+          # than emitting an extra fail-closed error item.
+          cargo build \
+            -p codex-cli \
+            -p codex-code-mode-host \
+            --bin codex \
+            --bin codex-code-mode-host
+          echo "CODEX_EXEC_PATH=${CARGO_TARGET_DIR}/debug/codex" >> "${GITHUB_ENV}"
+
+      - name: Setup pnpm
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build, lint, and test TypeScript SDKs
+        if: ${{ needs.changes.outputs.sdk == 'true' }}
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm -r --filter ./sdk/typescript run build
+          pnpm -r --filter ./sdk/typescript run lint
+          pnpm -r --filter ./sdk/typescript run test
+
+      - name: Check for a clean worktree
+        if: ${{ always() && !cancelled() && needs.changes.outputs.sdk == 'true' }}
+        uses: ./.github/actions/check-clean-worktree
+
+  distribution:
+    name: Distribution contract
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: No relevant distribution changes
+        if: ${{ needs.changes.outputs.distribution != 'true' }}
+        run: echo 'No distribution or workflow changes.'
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.changes.outputs.distribution == 'true' }}
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Test package builders and installers
+        if: ${{ needs.changes.outputs.distribution == 'true' }}
+        run: |
+          python3 -m unittest discover -s scripts/codex_package -p 'test_*.py'
+          python3 -m unittest discover -s scripts/install -p 'test_*.py'
+
+      - name: Test Lumi shadow helpers
+        if: ${{ needs.changes.outputs.distribution == 'true' }}
+        run: |
+          python3 -m unittest discover -s scripts/release -p '*_test.py'
+          for test_script in scripts/release/*_test.sh; do
+            bash "${test_script}"
+          done
+
+      - name: Check for a clean worktree
+        if: ${{ always() && !cancelled() && needs.changes.outputs.distribution == 'true' }}
+        uses: ./.github/actions/check-clean-worktree
+
+  results:
+    name: Lumi CI results
+    needs:
+      - changes
+      - distribution
+      - policy
+      - rust-hygiene
+      - rust-linux
+      - sdk
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Require successful dependencies
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py

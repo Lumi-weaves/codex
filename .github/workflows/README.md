@@ -1,34 +1,40 @@
 # Workflow Strategy
 
-The workflows in this directory are split so that pull requests get fast, review-friendly signal while `main` still gets the full cross-platform verification pass.
+Lumi Codex owns a small CI and delivery contract rather than running OpenAI's
+private-runner matrix. The rationale, supported targets, and rollout invariants
+are recorded in [LUMI_CI_CONTRACT.md](LUMI_CI_CONTRACT.md).
 
-## Pull Requests
+## Required change checks
 
-- `bazel.yml` is the main pre-merge verification path for Rust code.
-  It runs Bazel `test` and Bazel `clippy` on the supported Bazel targets,
-  including the generated Rust test binaries needed to lint inline `#[cfg(test)]`
-  code.
-- `rust-ci.yml` keeps the Cargo-native PR checks intentionally small:
-  - `cargo fmt --check`
-  - `cargo shear`
-  - `argument-comment-lint` on Linux, macOS, and Windows
-  - `tools/argument-comment-lint` package tests when the lint or its workflow wiring changes
+`blocking-ci.yml` is the only automatic entrypoint for pull requests and pushes
+to `main`. Its terminal `CI required` job is the eventual branch-protection
+surface. It calls:
 
-## Post-Merge On `main`
+- `lumi-ci.yml`, which classifies changed paths and runs repository policy,
+  Cargo-native Linux x86_64 clippy and core library tests, SDK, and
+  distribution checks only when relevant.
 
-- `bazel.yml` also runs on pushes to `main`.
-  This re-verifies the merged Bazel path and helps keep the BuildBuddy caches warm.
-- `rust-ci-full.yml` is the full Cargo-native verification workflow.
-  It keeps the heavier checks off the PR path while still validating them after merge:
-  - the full Cargo `clippy` matrix
-  - the full Cargo `nextest` matrix via per-platform archive-backed shards
-  - Windows ARM64 nextest archives cross-compiled on Windows x64, then replayed on native Windows ARM64 shards
-  - release-profile Cargo builds
-  - cross-platform `argument-comment-lint`
-  - Linux remote-env tests
+A documentation-only change runs policy checks but no compiler. Workflow
+changes exercise every fork-owned automatic CI surface.
 
-## Rule Of Thumb
+## Diagnostics
 
-- If a build/test/clippy check can be expressed in Bazel, prefer putting the PR-time version in `bazel.yml`.
-- Keep `rust-ci.yml` fast enough that it usually does not dominate PR latency.
-- Reserve `rust-ci-full.yml` for heavyweight Cargo-native coverage that Bazel does not replace yet.
+The inherited OpenAI workflows remain available as source and, where they have
+a manual trigger, as diagnostics. They are not part of Lumi's automatic or
+required contract. In particular, Lumi does not depend on OpenAI's
+`codex-runners` groups, BuildBuddy topology, cross-platform Cargo nextest
+shards, Intel macOS, or Windows CI.
+
+`lumi-ci.yml` exposes `full_nextest` as an explicit manual diagnostic; the
+current full-suite baseline is not silently presented as a green required
+check. `v8-canary.yml` is likewise manual after a live fork run showed that its
+two cold Linux builds still had not finished after 75 minutes.
+
+## Delivery
+
+- `lumi-release.yml` publishes unsigned, checksum-validated packages for Apple
+  Silicon macOS and x86_64/arm64 Linux musl from exact Lumi tags.
+- `lumi-release-shadow-worker.yml` is an exact-source, non-publishing manual
+  build on our one-shot JIT infrastructure.
+- Windows and Intel macOS remain in inherited source where useful for upstream
+  merges, but they are not Lumi CI or release targets.

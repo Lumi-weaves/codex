@@ -7,7 +7,6 @@ from v8_canary_changes import changed_files
 from v8_canary_changes import canary_required
 from v8_canary_changes import merge_base
 from v8_canary_changes import resolved_v8_version
-from v8_canary_changes import windows_source_required
 
 
 class V8CanaryChangesTest(unittest.TestCase):
@@ -24,50 +23,26 @@ version = "149.2.0"
 
         self.assertEqual(resolved_v8_version(cargo_lock), "149.2.0")
 
-    def test_unrelated_cargo_manifest_change_does_not_require_source_build(
-        self,
-    ) -> None:
+    def test_unrelated_change_does_not_require_canary(self) -> None:
         self.assertFalse(
-            windows_source_required(
-                {"codex-rs/Cargo.toml"},
-                "149.2.0",
-                "149.2.0",
-            )
+            canary_required({"docs/example.md"}, "149.2.0", "149.2.0")
         )
 
-    def test_v8_version_change_requires_source_build(self) -> None:
-        self.assertTrue(windows_source_required(set(), "149.2.0", "150.0.0"))
+    def test_v8_version_change_requires_canary(self) -> None:
+        self.assertTrue(canary_required(set(), "149.2.0", "150.0.0"))
 
-    def test_module_helper_change_requires_source_build(self) -> None:
+    def test_manual_dispatch_requires_canary(self) -> None:
         self.assertTrue(
-            windows_source_required(
-                {".github/scripts/rusty_v8_module_bazel.py"},
-                "149.2.0",
-                "149.2.0",
-            )
+            canary_required(set(), "149.2.0", "149.2.0", force=True)
         )
 
-    def test_shared_ci_setup_changes_require_canary_and_source_build(self) -> None:
+    def test_shared_ci_setup_changes_require_canary(self) -> None:
         for path in (
             ".github/actions/setup-ci/action.yml",
-            ".github/scripts/setup-dev-drive.ps1",
         ):
             with self.subTest(path=path):
                 changed_files = {path}
                 self.assertTrue(canary_required(changed_files, "149.2.0", "149.2.0"))
-                self.assertTrue(
-                    windows_source_required(changed_files, "149.2.0", "149.2.0")
-                )
-
-    def test_manual_dispatch_requires_source_build(self) -> None:
-        self.assertTrue(
-            windows_source_required(
-                set(),
-                "149.2.0",
-                "149.2.0",
-                force=True,
-            )
-        )
 
     def test_changed_files_excludes_changes_made_only_on_base_branch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

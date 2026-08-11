@@ -855,7 +855,7 @@ esac
 
 if [ -z "$target" ]; then
   if [ -z "$os" ]; then
-    echo "install.sh supports macOS and Linux. Use install.ps1 on Windows." >&2
+    echo "Lumi Codex packages support macOS and Linux only." >&2
     exit 1
   fi
 
