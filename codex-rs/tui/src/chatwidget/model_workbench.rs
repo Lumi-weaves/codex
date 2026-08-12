@@ -1,6 +1,7 @@
 use super::*;
 use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::chatwidget::model_popups::ALL_MODELS_POPUP_VIEW_ID;
+use codex_app_server_protocol::ModelWorkbenchPublication;
 use codex_app_server_protocol::ModelWorkbenchPublicationStatus;
 use codex_app_server_protocol::ModelWorkbenchRetireResponse;
 use codex_app_server_protocol::ModelWorkbenchUpsertResponse;
@@ -132,7 +133,7 @@ impl ChatWidget {
                 },
                 &response.entry.display_name,
                 &response.entry.model_tag,
-                response.publication.status,
+                response.publication,
             ),
             Err(error) => self.add_error_message(format!("Could not save model entry: {error}")),
         }
@@ -151,7 +152,7 @@ impl ChatWidget {
                 },
                 &response.entry.display_name,
                 &response.entry.model_tag,
-                response.publication.status,
+                response.publication,
             ),
             Err(error) => self.add_error_message(format!("Could not retire model entry: {error}")),
         }
@@ -162,15 +163,22 @@ impl ChatWidget {
         action: &str,
         display_name: &str,
         model_tag: &str,
-        publication: ModelWorkbenchPublicationStatus,
+        publication: ModelWorkbenchPublication,
     ) {
-        let publication = match publication {
+        let publication_status = match publication.status {
             ModelWorkbenchPublicationStatus::Synchronized => "catalog synchronized",
             ModelWorkbenchPublicationStatus::Pending => "saved; catalog publication pending",
             ModelWorkbenchPublicationStatus::Failed => "saved; catalog publication failed",
         };
+        let catalog_revision = publication.catalog_revision.map_or_else(
+            || "catalog revision pending".to_string(),
+            |revision| format!("catalog r{revision}"),
+        );
         self.add_info_message(
-            format!("{action}: {display_name} (tag: {model_tag}) · {publication}"),
+            format!(
+                "{action}: {display_name} (tag: {model_tag}) · registry r{} · {catalog_revision} · {publication_status}",
+                publication.registry_revision
+            ),
             /*hint*/ None,
         );
     }

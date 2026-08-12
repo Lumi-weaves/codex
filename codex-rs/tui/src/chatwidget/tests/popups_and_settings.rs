@@ -6,6 +6,10 @@ use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::MarketplaceLoadErrorInfo;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
+use codex_app_server_protocol::ModelWorkbenchPublication;
+use codex_app_server_protocol::ModelWorkbenchPublicationStatus;
+use codex_app_server_protocol::ModelWorkbenchStoredEntry;
+use codex_app_server_protocol::ModelWorkbenchUpsertResponse;
 use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
@@ -3258,6 +3262,33 @@ async fn model_picker_d_requires_non_cascading_retirement_confirmation() {
         rx.try_recv(),
         Ok(AppEvent::FetchModelWorkbenchRetire { model_tag }) if model_tag == "research-max"
     );
+}
+
+#[tokio::test]
+async fn model_workbench_receipt_names_registry_and_catalog_revisions() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    chat.on_model_workbench_upsert_loaded(Ok(ModelWorkbenchUpsertResponse {
+        revision: 7,
+        changed: true,
+        entry: ModelWorkbenchStoredEntry {
+            model_tag: "research-max".to_string(),
+            display_name: "Research Max".to_string(),
+            retired: false,
+        },
+        publication: ModelWorkbenchPublication {
+            registry_revision: 7,
+            catalog_revision: Some(7),
+            models_cache_revision: Some(7),
+            synchronized: true,
+            status: ModelWorkbenchPublicationStatus::Synchronized,
+        },
+    }));
+
+    let cells = drain_insert_history(&mut rx);
+    let receipt = lines_to_single_string(&cells[0]);
+    assert!(receipt.contains("registry r7"), "receipt: {receipt}");
+    assert!(receipt.contains("catalog r7"), "receipt: {receipt}");
+    assert_chatwidget_snapshot!("model_workbench_mutation_receipt", receipt);
 }
 
 #[tokio::test]
