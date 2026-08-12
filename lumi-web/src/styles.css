@@ -8,12 +8,10 @@
   --text-dim: #8ba0b4;
   --accent: #4cc2ff;
   --accent-soft: rgba(76, 194, 255, 0.12);
-  --status-queued: #93a4b8;
   --status-running: #4cc2ff;
   --status-waiting: #e2b93b;
-  --status-succeeded: #46c98c;
   --status-failed: #e5695e;
-  --status-cancelled: #7d8896;
+  --status-idle: #7d8896;
   --grid-dot: #22303e;
   --font:
     ui-sans-serif, system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial,
@@ -448,10 +446,6 @@ body {
   flex: none;
 }
 
-.operation-node__dot--queued {
-  background: var(--status-queued);
-}
-
 .operation-node__dot--running {
   background: var(--status-running);
   animation: lumi-pulse 1.6s ease-in-out infinite;
@@ -461,16 +455,12 @@ body {
   background: var(--status-waiting);
 }
 
-.operation-node__dot--succeeded {
-  background: var(--status-succeeded);
-}
-
 .operation-node__dot--failed {
   background: var(--status-failed);
 }
 
-.operation-node__dot--cancelled {
-  background: var(--status-cancelled);
+.operation-node__dot--idle {
+  background: var(--status-idle);
 }
 
 .status-badge {
@@ -478,10 +468,6 @@ body {
   padding: 1px 8px;
   border-radius: 999px;
   border: 1px solid currentColor;
-}
-
-.status-badge--queued {
-  color: var(--status-queued);
 }
 
 .status-badge--running {
@@ -492,16 +478,12 @@ body {
   color: var(--status-waiting);
 }
 
-.status-badge--succeeded {
-  color: var(--status-succeeded);
-}
-
 .status-badge--failed {
   color: var(--status-failed);
 }
 
-.status-badge--cancelled {
-  color: var(--status-cancelled);
+.status-badge--idle {
+  color: var(--status-idle);
 }
 
 @keyframes lumi-pulse {

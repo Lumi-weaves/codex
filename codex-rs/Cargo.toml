@@ -95,6 +95,7 @@ members = [
     "tui",
     "tools",
     "v8-poc",
+    "web-bff",
     "websocket-client",
     "workload-identity",
     "utils/absolute-path",

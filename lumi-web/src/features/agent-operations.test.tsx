@@ -21,14 +21,7 @@ describe("agent operations fixture contract", () => {
     expect(isAgentOperationsSnapshot(snapshot)).toBe(true);
     expect(snapshot.nodes.some((node) => node.role === "root")).toBe(true);
     const statuses = new Set(snapshot.nodes.map((node) => node.status));
-    for (const status of [
-      "queued",
-      "running",
-      "waiting",
-      "succeeded",
-      "failed",
-      "cancelled",
-    ]) {
+    for (const status of ["running", "waiting", "failed", "idle"]) {
       expect(statuses.has(status as never)).toBe(true);
     }
   });
@@ -119,6 +112,56 @@ describe("Agent Operations page", () => {
 
     await screen.findByText("No agent operations are running right now.");
     expect(screen.queryByLabelText("Agent operations graph")).toBeNull();
+  });
+
+  it("labels bounded or incomplete live snapshots honestly", async () => {
+    const limited = {
+      ...fixtureAgentOperationsSnapshot(),
+      isPartial: true,
+      isTruncated: true,
+    };
+    render(
+      <AgentOperationsPage
+        loader={async () => ({ snapshot: limited, source: "bff" })}
+        fitView={false}
+      />,
+    );
+
+    await screen.findByText("Partial snapshot · loaded-thread limit reached");
+    expect(screen.getByText("Live BFF")).not.toBeNull();
+
+    const workerLabel = await screen.findByText("Repo beta patch");
+    const worker = workerLabel.closest("button");
+    expect(worker).not.toBeNull();
+    if (worker === null) throw new Error("operation label is not in a button");
+    fireEvent.click(worker);
+    expect(
+      screen.getByText("Partial snapshot · loaded-thread limit reached"),
+    ).not.toBeNull();
+  });
+
+  it("does not call an empty partial snapshot complete", async () => {
+    const emptyPartial = {
+      ...fixtureAgentOperationsSnapshot(),
+      nodes: [],
+      isPartial: true,
+    };
+    render(
+      <AgentOperationsPage
+        loader={async () => ({ snapshot: emptyPartial, source: "bff" })}
+        fitView={false}
+      />,
+    );
+
+    await screen.findByText("No loaded agent operations were observable.");
+    expect(
+      screen.getByText(
+        "Partial snapshot · some thread metadata was unavailable",
+      ),
+    ).not.toBeNull();
+    expect(
+      screen.queryByText("No agent operations are running right now."),
+    ).toBeNull();
   });
 
   it("shows an error state and recovers on retry", async () => {

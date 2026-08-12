@@ -4675,6 +4675,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-web-bff"
+version = "0.148.0-alpha.7-lumi.1"
+dependencies = [
+ "chrono",
+ "codex-app-server-client",
+ "codex-app-server-protocol",
+ "futures",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "codex-web-search-extension"
 version = "0.148.0-alpha.7-lumi.1"
 dependencies = [

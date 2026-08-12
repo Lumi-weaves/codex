@@ -107,7 +107,18 @@ export function AgentOperationsPage({
   } else if (operations.length === 0) {
     body = (
       <div className="state-panel">
-        No agent operations are running right now.
+        {state.result.snapshot.isPartial ||
+        state.result.snapshot.isTruncated ? (
+          <>
+            No loaded agent operations were observable.
+            <SnapshotLimitation
+              isPartial={state.result.snapshot.isPartial}
+              isTruncated={state.result.snapshot.isTruncated}
+            />
+          </>
+        ) : (
+          "No agent operations are running right now."
+        )}
       </div>
     );
   } else {
@@ -148,6 +159,8 @@ export function AgentOperationsPage({
           selected={selected}
           operations={operations}
           capturedAt={state.result.snapshot.capturedAt}
+          isPartial={state.result.snapshot.isPartial}
+          isTruncated={state.result.snapshot.isTruncated}
           source={state.result.source}
         />
       </div>
@@ -190,6 +203,8 @@ interface OperationDetailPanelProps {
   selected: AgentOperationNode | null;
   operations: AgentOperationNode[];
   capturedAt: string;
+  isPartial: boolean;
+  isTruncated: boolean;
   source: AgentOperationsResult["source"];
 }
 
@@ -197,6 +212,8 @@ function OperationDetailPanel({
   selected,
   operations,
   capturedAt,
+  isPartial,
+  isTruncated,
   source,
 }: OperationDetailPanelProps) {
   const counts = useMemo(() => {
@@ -243,6 +260,7 @@ function OperationDetailPanel({
             </div>
           </dl>
           <p className="detail-panel__activity">{selected.activity}</p>
+          <SnapshotLimitation isPartial={isPartial} isTruncated={isTruncated} />
         </>
       ) : (
         <>
@@ -268,8 +286,28 @@ function OperationDetailPanel({
             Captured {new Date(capturedAt).toLocaleString()} ·{" "}
             {source === "fixture" ? "fixture" : "live"} source
           </p>
+          <SnapshotLimitation isPartial={isPartial} isTruncated={isTruncated} />
         </>
       )}
     </aside>
+  );
+}
+
+function SnapshotLimitation({
+  isPartial,
+  isTruncated,
+}: {
+  isPartial: boolean;
+  isTruncated: boolean;
+}) {
+  if (!isPartial && !isTruncated) return null;
+  return (
+    <p className="detail-panel__hint" role="status">
+      {isPartial && isTruncated
+        ? "Partial snapshot · loaded-thread limit reached"
+        : isPartial
+          ? "Partial snapshot · some thread metadata was unavailable"
+          : "Loaded-thread limit reached"}
+    </p>
   );
 }
