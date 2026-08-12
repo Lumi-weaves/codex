@@ -10,12 +10,10 @@ import { AGENT_OPERATIONS_ENDPOINT } from "./paths";
 export const AGENT_OPERATIONS_SCHEMA_VERSION = 1;
 
 export const AGENT_OPERATION_STATUSES = [
-  "queued",
   "running",
   "waiting",
-  "succeeded",
   "failed",
-  "cancelled",
+  "idle",
 ] as const;
 
 export type AgentOperationStatus = (typeof AGENT_OPERATION_STATUSES)[number];
@@ -39,6 +37,10 @@ export interface AgentOperationNode {
 export interface AgentOperationsSnapshot {
   schemaVersion: typeof AGENT_OPERATIONS_SCHEMA_VERSION;
   capturedAt: string;
+  /** Some loaded thread metadata could not be observed. */
+  isPartial: boolean;
+  /** More loaded threads exist than the bounded snapshot can display. */
+  isTruncated: boolean;
   nodes: AgentOperationNode[];
 }
 
@@ -76,6 +78,8 @@ export function fixtureAgentOperationsSnapshot(): AgentOperationsSnapshot {
   return {
     schemaVersion: AGENT_OPERATIONS_SCHEMA_VERSION,
     capturedAt,
+    isPartial: false,
+    isTruncated: false,
     nodes: [
       node(
         "op-root",
@@ -92,8 +96,8 @@ export function fixtureAgentOperationsSnapshot(): AgentOperationsSnapshot {
         "op-root",
         "worker",
         "Plan survey",
-        "succeeded",
-        "Survey finished, plan accepted",
+        "idle",
+        "Thread idle",
         "lumi-core",
         "2026-08-11T15:31:20.000Z",
       ),
@@ -132,8 +136,8 @@ export function fixtureAgentOperationsSnapshot(): AgentOperationsSnapshot {
         "op-root",
         "worker",
         "Metrics digest",
-        "queued",
-        "Waiting for a free worker slot",
+        "idle",
+        "Thread idle",
         null,
         null,
       ),
@@ -142,8 +146,8 @@ export function fixtureAgentOperationsSnapshot(): AgentOperationsSnapshot {
         "op-root",
         "worker",
         "Archive old runs",
-        "cancelled",
-        "Cancelled by operator",
+        "idle",
+        "Thread idle",
         "lumi-mini",
         "2026-08-11T15:36:55.000Z",
       ),
@@ -211,6 +215,8 @@ export function parseAgentOperationsSnapshot(
     !isRecord(value) ||
     value.schemaVersion !== AGENT_OPERATIONS_SCHEMA_VERSION ||
     parseTimestamp(value.capturedAt) === null ||
+    typeof value.isPartial !== "boolean" ||
+    typeof value.isTruncated !== "boolean" ||
     !Array.isArray(value.nodes)
   ) {
     return null;
@@ -245,6 +251,8 @@ export function parseAgentOperationsSnapshot(
   return {
     schemaVersion: AGENT_OPERATIONS_SCHEMA_VERSION,
     capturedAt: value.capturedAt as string,
+    isPartial: value.isPartial,
+    isTruncated: value.isTruncated,
     nodes,
   };
 }
