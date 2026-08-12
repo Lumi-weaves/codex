@@ -480,6 +480,8 @@ impl ExternalAgentSessionImporter {
                     },
                 )),
             },
+            prompt_compiler_revision: "responses_request_lowering_v1".to_string(),
+            prompt_context_origin: "external_agent_import".to_string(),
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: Some(MultiAgentVersion::V1),

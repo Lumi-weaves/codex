@@ -251,6 +251,9 @@ enum DebugSubcommand {
     /// Render the versioned model invocation and prompt contribution census as JSON.
     PromptCensus,
 
+    /// Render the versioned root/shadow prompt inheritance contract as JSON.
+    PromptInheritance,
+
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
@@ -1677,6 +1680,17 @@ async fn cli_main(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&codex_core::prompt_context_census())?
+                );
+            }
+            DebugSubcommand::PromptInheritance => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-inheritance",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::prompt_inheritance_matrix())?
                 );
             }
             DebugSubcommand::TraceReduce(cmd) => {
@@ -3364,6 +3378,19 @@ mod tests {
             cli.subcommand,
             Some(Subcommand::Debug(DebugCommand {
                 subcommand: DebugSubcommand::PromptCensus,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_prompt_inheritance_parses_without_runtime_configuration() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "debug", "prompt-inheritance"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::PromptInheritance,
             }))
         ));
     }

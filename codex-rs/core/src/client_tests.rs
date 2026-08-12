@@ -375,12 +375,26 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
             client.provider_info(),
             use_responses_lite,
             request,
+            crate::prompt_inheritance::PromptRuntimeContext::resolve(
+                &codex_history::InitialHistory::New,
+                &codex_protocol::protocol::SessionSource::Exec,
+                None,
+            )
+            .provenance(),
         )?;
 
         let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
         assert_eq!(
             metadata["provider"]["clientNormalization"],
             "non_open_ai_sanitized"
+        );
+        assert_eq!(
+            metadata["contextInheritance"]["lifecycleOrigin"],
+            "root_fresh"
+        );
+        assert_eq!(
+            metadata["contextInheritance"]["contextInheritanceGrantsAuthority"],
+            false
         );
         assert!(metadata.get("request").is_none());
 

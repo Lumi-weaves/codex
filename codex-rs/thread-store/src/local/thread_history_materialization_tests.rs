@@ -2256,6 +2256,8 @@ async fn create_paginated_subagent_thread(
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
+            prompt_compiler_revision: "test_compiler_v1".to_string(),
+            prompt_context_origin: "root_fresh".to_string(),
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
