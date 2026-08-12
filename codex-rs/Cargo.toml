@@ -95,6 +95,7 @@ members = [
     "tui",
     "tools",
     "v8-poc",
+    "web-bff",
     "websocket-client",
     "workload-identity",
     "utils/absolute-path",
@@ -178,6 +179,7 @@ codex-code-mode-runtime = { path = "code-mode-runtime" }
 codex-home = { path = "codex-home" }
 codex-http-client = { path = "http-client" }
 codex-websocket-client = { path = "websocket-client" }
+codex-web-bff = { path = "web-bff" }
 codex-config = { path = "config" }
 codex-connectors = { path = "connectors" }
 codex-agent-extension = { path = "ext/agent" }
