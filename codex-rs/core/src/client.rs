@@ -1054,6 +1054,34 @@ impl ModelClient {
         Ok(request)
     }
 
+    /// Builds the full logical Responses request for local prompt diagnostics.
+    ///
+    /// This intentionally reuses the same provider setup, request lowering, and item preparation
+    /// as the inference path. It does not perform network I/O and does not model a later
+    /// WebSocket incremental delta, which is a transport optimization over this logical request.
+    pub(crate) async fn build_responses_request_for_debug(
+        &self,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+    ) -> Result<ResponsesApiRequest> {
+        let client_setup = self.current_client_setup().await?;
+        let mut request = self.build_responses_request(
+            &client_setup.api_provider,
+            prompt,
+            model_info,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+        )?;
+        self.prepare_response_items_for_request(&mut request.input);
+        Ok(request)
+    }
+
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
             if item.id().is_some_and(|id| !id.is_prefixed()) {

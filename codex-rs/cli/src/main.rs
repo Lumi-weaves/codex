@@ -245,6 +245,9 @@ enum DebugSubcommand {
     /// Render the model-visible prompt input list as JSON.
     PromptInput(DebugPromptInputCommand),
 
+    /// Render the effective client-owned model request as JSON.
+    PromptReceipt(DebugPromptInputCommand),
+
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
@@ -1613,11 +1616,27 @@ async fn cli_main(
                     root_remote_auth_token_env.as_deref(),
                     "debug prompt-input",
                 )?;
-                run_debug_prompt_input_command(
+                run_debug_prompt_command(
                     cmd,
                     root_config_overrides,
                     interactive,
                     arg0_paths.clone(),
+                    DebugPromptOutput::Input,
+                )
+                .await?;
+            }
+            DebugSubcommand::PromptReceipt(cmd) => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-receipt",
+                )?;
+                run_debug_prompt_command(
+                    cmd,
+                    root_config_overrides,
+                    interactive,
+                    arg0_paths.clone(),
+                    DebugPromptOutput::Receipt,
                 )
                 .await?;
             }
@@ -1770,9 +1789,12 @@ fn profile_v2_for_subcommand<'a>(
         | Subcommand::Sandbox(_)
         | Subcommand::Debug(DebugCommand {
             subcommand: DebugSubcommand::PromptInput(_),
+        })
+        | Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::PromptReceipt(_),
         }) => Ok(Some(profile_v2)),
         _ => anyhow::bail!(
-            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, and `codex debug prompt-input`."
+            "--profile only applies to runtime commands and `codex mcp`: `codex`, `codex exec`, `codex review`, `codex resume`, `codex archive`, `codex delete`, `codex unarchive`, `codex fork`, `codex mcp`, `codex sandbox`, `codex debug prompt-input`, and `codex debug prompt-receipt`."
         ),
     }
 }
@@ -2065,11 +2087,18 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
     Ok(())
 }
 
-async fn run_debug_prompt_input_command(
+#[derive(Clone, Copy)]
+enum DebugPromptOutput {
+    Input,
+    Receipt,
+}
+
+async fn run_debug_prompt_command(
     cmd: DebugPromptInputCommand,
     root_config_overrides: CliConfigOverrides,
     interactive: TuiCli,
     arg0_paths: Arg0DispatchPaths,
+    output: DebugPromptOutput,
 ) -> anyhow::Result<()> {
     let loader_overrides = loader_overrides_for_profile(interactive.config_profile_v2.as_ref())?;
     let shared = interactive.shared.into_inner();
@@ -2149,15 +2178,30 @@ async fn run_debug_prompt_input_command(
                 .enabled(codex_features::Feature::SkillSearch),
         }
     });
-    let prompt_input = codex_core::build_prompt_input(
-        config,
-        input,
-        /*state_db*/ None,
-        Arc::new(extensions.build()),
-        user_instructions_provider,
-    )
-    .await?;
-    println!("{}", serde_json::to_string_pretty(&prompt_input)?);
+    let extensions = Arc::new(extensions.build());
+    let rendered = match output {
+        DebugPromptOutput::Input => serde_json::to_string_pretty(
+            &codex_core::build_prompt_input(
+                config,
+                input,
+                /*state_db*/ None,
+                extensions,
+                user_instructions_provider,
+            )
+            .await?,
+        )?,
+        DebugPromptOutput::Receipt => serde_json::to_string_pretty(
+            &codex_core::build_prompt_request_receipt(
+                config,
+                input,
+                /*state_db*/ None,
+                extensions,
+                user_instructions_provider,
+            )
+            .await?,
+        )?,
+    };
+    println!("{rendered}");
 
     Ok(())
 }
@@ -2944,6 +2988,12 @@ mod tests {
             Some("work")
         );
         assert_eq!(
+            profile_v2_for_args(&["codex", "--profile", "work", "debug", "prompt-receipt"])
+                .expect("debug prompt-receipt supports profile-v2")
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
             profile_v2_for_args(&["codex", "--profile", "work", "mcp", "list"])
                 .expect("mcp supports profile-v2")
                 .as_deref(),
@@ -3219,6 +3269,32 @@ mod tests {
         })) = cli.subcommand
         else {
             panic!("expected debug prompt-input subcommand");
+        };
+
+        assert_eq!(cmd.prompt.as_deref(), Some("hello"));
+        assert_eq!(
+            cmd.images,
+            vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
+        );
+    }
+
+    #[test]
+    fn debug_prompt_receipt_parses_prompt_and_images() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "debug",
+            "prompt-receipt",
+            "hello",
+            "--image",
+            "/tmp/a.png,/tmp/b.png",
+        ])
+        .expect("parse");
+
+        let Some(Subcommand::Debug(DebugCommand {
+            subcommand: DebugSubcommand::PromptReceipt(cmd),
+        })) = cli.subcommand
+        else {
+            panic!("expected debug prompt-receipt subcommand");
         };
 
         assert_eq!(cmd.prompt.as_deref(), Some("hello"));
