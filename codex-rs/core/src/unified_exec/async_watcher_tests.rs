@@ -351,6 +351,9 @@ async fn exit_watcher_sends_completion_event_once_for_background_exit() -> anyho
         /*network_denial_monitor*/ None,
     );
 
+    stdout_tx
+        .send(b"STORED-TERMINAL-OUTPUT".to_vec())
+        .expect("send output");
     exit_tx.send(0).expect("send exit");
     drop(stdout_tx);
 
@@ -361,8 +364,16 @@ async fn exit_watcher_sends_completion_event_once_for_background_exit() -> anyho
     let rendered = completion_fragment_text(&event);
     assert!(rendered.contains("4242"));
     assert!(rendered.contains("exit code 0"));
-    assert!(rendered.contains("write_stdin"));
-    assert!(rendered.len() <= 16 * 1024, "fragment must stay bounded");
+    assert!(rendered.contains("read_terminal_result"));
+    assert!(!rendered.contains("\"output\":"));
+    assert!(rendered.len() <= 4 * 1024, "fragment must stay bounded");
+    let retained = session
+        .services
+        .unified_exec_manager
+        .read_terminal_result("terminal-result:4242:1", 0, 4096)
+        .await
+        .expect("stored result should be readable before wake admission");
+    assert_eq!(retained.output.as_deref(), Some("STORED-TERMINAL-OUTPUT"));
 
     // Exactly-once: a second watcher claim must not produce a second event.
     expect_no_internal_completion(&mut internal_rx).await;

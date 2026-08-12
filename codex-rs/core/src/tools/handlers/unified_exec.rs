@@ -19,11 +19,13 @@ use crate::tools::handlers::parse_arguments;
 
 mod exec_command;
 mod list_background_terminals;
+mod terminal_result;
 mod write_stdin;
 
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
 pub use list_background_terminals::ListBackgroundTerminalsHandler;
+pub use terminal_result::ReadTerminalResultHandler;
 pub use write_stdin::WriteStdinHandler;
 
 #[derive(Debug, Deserialize)]

@@ -23,6 +23,7 @@ use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
+use crate::tools::handlers::ReadTerminalResultHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputHandler;
@@ -912,6 +913,9 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
                 /*include_lifecycle_guidance*/ true,
             ));
             registry.add(ListBackgroundTerminalsHandler);
+            if features.enabled(Feature::UnifiedExecCompletionWake) {
+                registry.add(ReadTerminalResultHandler);
+            }
 
             if supports_shell_command {
                 // Keep the legacy shell tool registered while unified exec is

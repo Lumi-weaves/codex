@@ -50,6 +50,7 @@ mod head_tail_buffer;
 mod process;
 mod process_manager;
 mod process_state;
+mod terminal_result_store;
 
 pub(crate) fn set_deterministic_process_ids_for_tests(enabled: bool) {
     process_manager::set_deterministic_process_ids_for_tests(enabled);
@@ -61,6 +62,8 @@ pub(crate) use process::NoopSpawnLifecycle;
 pub(crate) use process::SpawnLifecycle;
 pub(crate) use process::SpawnLifecycleHandle;
 pub(crate) use process::UnifiedExecProcess;
+pub(crate) use terminal_result_store::TerminalResultInput;
+pub(crate) use terminal_result_store::TerminalResultMetadata;
 
 pub(crate) const MIN_YIELD_TIME_MS: u64 = 250;
 pub(crate) const WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS: u64 = 10_000;
@@ -154,6 +157,7 @@ impl ProcessStore {
 
 pub(crate) struct UnifiedExecProcessManager {
     process_store: Mutex<ProcessStore>,
+    terminal_result_store: Mutex<terminal_result_store::TerminalResultStore>,
     max_write_stdin_yield_time_ms: u64,
 }
 
@@ -161,6 +165,7 @@ impl UnifiedExecProcessManager {
     pub(crate) fn new(max_write_stdin_yield_time_ms: u64) -> Self {
         Self {
             process_store: Mutex::new(ProcessStore::default()),
+            terminal_result_store: Mutex::new(terminal_result_store::TerminalResultStore::default()),
             max_write_stdin_yield_time_ms: max_write_stdin_yield_time_ms
                 .max(MIN_EMPTY_YIELD_TIME_MS),
         }

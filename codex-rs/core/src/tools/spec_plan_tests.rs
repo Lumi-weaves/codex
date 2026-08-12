@@ -688,8 +688,13 @@ async fn list_background_terminals_registers_only_with_unified_exec_tools() {
     })
     .await;
 
-    enabled.assert_visible_contains(&["exec_command", "write_stdin", "list_background_terminals"]);
-    enabled.assert_registered_contains(&["list_background_terminals"]);
+    enabled.assert_visible_contains(&[
+        "exec_command",
+        "write_stdin",
+        "list_background_terminals",
+        "read_terminal_result",
+    ]);
+    enabled.assert_registered_contains(&["list_background_terminals", "read_terminal_result"]);
     let exec_command_description = match enabled.visible_spec("exec_command") {
         ToolSpec::Function(tool) => tool.description.as_str(),
         other => panic!("expected function tool spec, got {other:?}"),
@@ -698,11 +703,17 @@ async fn list_background_terminals_registers_only_with_unified_exec_tools() {
 
     let wake_disabled = probe(|turn| {
         set_features(turn, &[Feature::ShellTool, Feature::UnifiedExec]);
+        set_feature(
+            turn,
+            Feature::UnifiedExecCompletionWake,
+            /*enabled*/ false,
+        );
         set_feature(turn, Feature::ShellZshFork, /*enabled*/ false);
         turn.model_info.shell_type = ConfigShellToolType::ShellCommand;
     })
     .await;
     wake_disabled.assert_visible_contains(&["list_background_terminals"]);
+    wake_disabled.assert_visible_lacks(&["read_terminal_result"]);
     let ToolSpec::Function(exec_command) = wake_disabled.visible_spec("exec_command") else {
         panic!("expected function tool spec");
     };
@@ -716,8 +727,8 @@ async fn list_background_terminals_registers_only_with_unified_exec_tools() {
         set_feature(turn, Feature::ShellTool, /*enabled*/ false);
     })
     .await;
-    disabled.assert_visible_lacks(&["list_background_terminals"]);
-    disabled.assert_registered_lacks(&["list_background_terminals"]);
+    disabled.assert_visible_lacks(&["list_background_terminals", "read_terminal_result"]);
+    disabled.assert_registered_lacks(&["list_background_terminals", "read_terminal_result"]);
 }
 
 #[tokio::test]

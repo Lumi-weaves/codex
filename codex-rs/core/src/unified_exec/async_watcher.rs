@@ -11,8 +11,11 @@ use tokio::time::Sleep;
 use super::UnifiedExecContext;
 use super::process::OutputHandles;
 use super::process::UnifiedExecProcess;
-use crate::context::UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES;
+use crate::context::UNIFIED_EXEC_COMPLETION_COMMAND_MAX_BYTES;
+use crate::context::UNIFIED_EXEC_COMPLETION_FAILURE_MAX_BYTES;
+use crate::context::UNIFIED_EXEC_RESULT_CWD_MAX_BYTES;
 use crate::context::UnifiedExecCompletionEvent;
+use crate::context::bound_fragment_text;
 use crate::context::decode_lossy_one_for_one;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::SessionIngress;
@@ -22,6 +25,7 @@ use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
 use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
+use crate::unified_exec::TerminalResultInput;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_features::Feature;
@@ -200,9 +204,9 @@ pub(crate) fn spawn_exit_watcher(
             emit_failed_exec_end_for_unified_exec(
                 Arc::clone(&session_ref),
                 turn_ref,
-                call_id,
+                call_id.clone(),
                 command.clone(),
-                cwd,
+                cwd.clone(),
                 Some(process_id.to_string()),
                 plugin_attribution,
                 Arc::clone(&transcript),
@@ -215,7 +219,9 @@ pub(crate) fn spawn_exit_watcher(
                 enqueue_background_completion(
                     &session_ref,
                     &transcript,
+                    &call_id,
                     &command,
+                    &cwd,
                     process_id,
                     /*exit_code*/ None,
                     Some(message),
@@ -228,9 +234,9 @@ pub(crate) fn spawn_exit_watcher(
             emit_exec_end_for_unified_exec(
                 Arc::clone(&session_ref),
                 turn_ref,
-                call_id,
+                call_id.clone(),
                 command.clone(),
-                cwd,
+                cwd.clone(),
                 Some(process_id.to_string()),
                 plugin_attribution,
                 Arc::clone(&transcript),
@@ -243,7 +249,9 @@ pub(crate) fn spawn_exit_watcher(
                 enqueue_background_completion(
                     &session_ref,
                     &transcript,
+                    &call_id,
                     &command,
+                    &cwd,
                     process_id,
                     Some(exit_code),
                     /*failure_message*/ None,
@@ -258,44 +266,57 @@ pub(crate) fn spawn_exit_watcher(
 /// Build and send the Core-private internal completion event for a background
 /// process exit that was not observed synchronously.
 ///
-/// The event carries a bounded head/tail excerpt plus total/omitted size
-/// metadata; the retained terminal remains pollable by `process_id`. The
-/// session submission loop admits it queue-first, serialized with external
-/// submissions. This is the single construction point for completion events
-/// (see the SEAM NOTE on `UnifiedExecCompletionEvent` about swapping in the
-/// bounded result pool).
+/// The bounded transcript is retained before the compact completion event is
+/// sent to session ingress. The session submission loop then admits only the
+/// event queue-first, serialized with external submissions.
+#[allow(clippy::too_many_arguments)]
 async fn enqueue_background_completion(
     session_ref: &Arc<Session>,
     transcript: &Arc<Mutex<HeadTailBuffer>>,
+    call_id: &str,
     command: &[String],
+    cwd: &PathUri,
     process_id: i32,
     exit_code: Option<i32>,
     failure_message: Option<String>,
     duration: Duration,
 ) {
-    let (total_output_bytes, excerpt, total_omitted_bytes) = {
+    let (total_output_bytes, retained_output_bytes, total_omitted_bytes, retained_output) = {
         let transcript = transcript.lock().await;
         let total_output_bytes = transcript.total_bytes();
-        let (excerpt_bytes, total_omitted_bytes) =
-            transcript.bounded_excerpt(UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES);
         (
             total_output_bytes,
-            // One-for-one malformed-byte replacement keeps the excerpt byte
-            // length (and therefore the omission accounting) exact.
-            decode_lossy_one_for_one(&excerpt_bytes),
-            total_omitted_bytes,
+            transcript.retained_bytes(),
+            transcript.omitted_bytes(),
+            decode_lossy_one_for_one(&transcript.to_bytes_with_omission_marker()),
         )
     };
-    let completion = UnifiedExecCompletionEvent::new(
-        process_id,
-        command.join(" "),
-        exit_code,
-        failure_message,
-        duration,
-        total_output_bytes,
-        total_omitted_bytes,
-        excerpt,
-    );
+    let result = session_ref
+        .services
+        .unified_exec_manager
+        .retain_terminal_result(TerminalResultInput {
+            process_id,
+            item_id: bound_fragment_text(call_id, UNIFIED_EXEC_COMPLETION_COMMAND_MAX_BYTES),
+            command: bound_fragment_text(
+                &command.join(" "),
+                UNIFIED_EXEC_COMPLETION_COMMAND_MAX_BYTES,
+            ),
+            cwd: bound_fragment_text(
+                &cwd.inferred_native_path_string(),
+                UNIFIED_EXEC_RESULT_CWD_MAX_BYTES,
+            ),
+            exit_code,
+            failure_message: failure_message.map(|message| {
+                bound_fragment_text(&message, UNIFIED_EXEC_COMPLETION_FAILURE_MAX_BYTES)
+            }),
+            duration_ms: u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+            output_bytes_total: total_output_bytes,
+            output_bytes_retained: retained_output_bytes,
+            output_bytes_omitted: total_omitted_bytes,
+            retained_output,
+        })
+        .await;
+    let completion = UnifiedExecCompletionEvent::from_result(&result);
     // The session holds only a weak sender, so an upgrade failure means the
     // submission channel is gone (session torn down): the watcher must never
     // break process/event cleanup because a wake could not be admitted.

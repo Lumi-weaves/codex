@@ -2,55 +2,42 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crate::unified_exec::TerminalResultMetadata;
+
 use super::ContextualUserFragment;
 
 /// Maximum size of the inline output excerpt carried by a background
 /// completion fragment (bytes of the *lossy* UTF-8 string, so invalid input
 /// bytes cannot expand past this cap).
-pub(crate) const UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES: usize = 2048;
+#[cfg(test)]
+const UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES: usize = 2048;
 /// Maximum size of the rendered command line (lossy UTF-8 bytes).
 pub(crate) const UNIFIED_EXEC_COMPLETION_COMMAND_MAX_BYTES: usize = 256;
 /// Maximum size of the rendered failure message (lossy UTF-8 bytes).
 pub(crate) const UNIFIED_EXEC_COMPLETION_FAILURE_MAX_BYTES: usize = 256;
+/// Maximum size of a cwd retained in terminal-result metadata.
+pub(crate) const UNIFIED_EXEC_RESULT_CWD_MAX_BYTES: usize = 1024;
 
 /// Total bound of the rendered fragment.
 ///
-/// Each embedded field is truncated to its cap on the lossy UTF-8 string, and
-/// untrusted characters are sanitized (C0 controls replaced by spaces) before
-/// JSON escaping. JSON escaping plus the angle-bracket escape expands a
-/// character to at most 6 bytes (`\u003c`), so the rendered body is bounded by
-/// `6 * (EXCERPT + COMMAND + FAILURE) + fixed overhead` ≈ 16 KiB (≈4K tokens),
-/// comfortably below the 10K-token context cap. Typical fragments render in
-/// well under 2 KiB.
-const RENDERED_FRAGMENT_MAX_BYTES: usize = 16 * 1024;
+/// The completion carries no transcript. Its only untrusted inline text is a
+/// bounded failure message; JSON escaping plus fixed metadata stays below the
+/// cap.
+const RENDERED_FRAGMENT_MAX_BYTES: usize = 4 * 1024;
 
 /// A bounded, model-visible notification that a background unified-exec
 /// terminal process finished without a synchronous observation of its exit.
 ///
 /// This is the single model-visible artifact for async completion. It carries
-/// stable process identity (for later `write_stdin` polling), exit/failure
-/// status, duration, and total/omitted output size metadata, plus a small
-/// head/tail excerpt of the transcript. All untrusted text is truncated to a
-/// hard cap (after one-for-one lossy decoding) and JSON-escaped inside the
-/// markers, so untrusted command/output/failure text cannot forge the closing
-/// markers.
-///
-/// SEAM NOTE (bounded terminal-result pool): the retained output today comes
-/// from the process-owned `HeadTailBuffer` transcript snapshot at event
-/// construction time. The intended next stage keeps full logs in
-/// session/task-owned immutable terminal-result entries with explicit release
-/// and capacity-bounded LRU eviction; that pool replaces this struct's
-/// `output_excerpt`/size fields with a `(process_id, result_ref)` into the
-/// pool. Keep all construction inside `unified_exec::async_watcher` and all
-/// consumption inside the session internal-event ingress so that swap stays
-/// local.
+/// stable process identity, exit/failure status, duration, output coverage,
+/// and a stable reference into the owning session's immutable terminal-result
+/// store. The transcript enters model context only through an explicit read.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct UnifiedExecCompletionEvent {
-    /// Stable unified-exec process id; the retained background terminal can be
-    /// polled with `write_stdin` using this id.
     pub(crate) process_id: i32,
-    /// Command line that was executed, bounded and sanitized.
+    #[cfg(test)]
     pub(crate) command: String,
+    pub(crate) result_ref: String,
     /// Exit code when the process exited normally.
     pub(crate) exit_code: Option<i32>,
     /// Failure message when the process failed instead of exiting, bounded and
@@ -60,10 +47,10 @@ pub(crate) struct UnifiedExecCompletionEvent {
     pub(crate) duration: Duration,
     /// Total output bytes observed by the transcript (including omitted bytes).
     pub(crate) total_output_bytes: usize,
-    /// Total output bytes omitted from the inline excerpt (transcript middle
-    /// drops plus excerpt trimming).
+    pub(crate) retained_output_bytes: usize,
+    /// Total output bytes omitted from the bounded source transcript.
     pub(crate) omitted_output_bytes: usize,
-    /// Bounded head/tail excerpt of the retained output (lossy, sanitized).
+    #[cfg(test)]
     pub(crate) output_excerpt: String,
 }
 
@@ -72,8 +59,6 @@ impl ContextualUserFragment for UnifiedExecCompletionEvent {
         "user"
     }
 
-    /// A completion is a discrete event: never merge it into a batch of
-    /// ambient context fragments.
     fn requires_separate_message(&self) -> bool {
         true
     }
@@ -95,20 +80,14 @@ impl ContextualUserFragment for UnifiedExecCompletionEvent {
         let payload = json!({
             "status": status,
             "process_id": self.process_id,
-            "command": self.command,
-            "duration_seconds": self.duration.as_secs_f64(),
+            "result_ref": self.result_ref,
+            "duration_ms": u64::try_from(self.duration.as_millis()).unwrap_or(u64::MAX),
             "output_bytes_total": self.total_output_bytes,
+            "output_bytes_retained": self.retained_output_bytes,
             "output_bytes_omitted": self.omitted_output_bytes,
-            "output": self.output_excerpt,
-            "poll_hint": format!(
-                "The retained background terminal can be polled with the write_stdin \
-                 tool using session_id {} for output beyond the excerpt.",
-                self.process_id
-            ),
+            "retention": "owning_session",
+            "read_hint": "Call read_terminal_result with result_ref to inspect retained output.",
         });
-        // JSON escaping neutralizes quotes/backslashes/control characters in
-        // untrusted text; additionally escape `<`/`>` so untrusted content can
-        // never spell the fragment's markers.
         let escaped = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
         let escaped = escaped.replace('<', "\\u003c").replace('>', "\\u003e");
         let body = format!("\n{escaped}\n");
@@ -121,6 +100,23 @@ impl ContextualUserFragment for UnifiedExecCompletionEvent {
 }
 
 impl UnifiedExecCompletionEvent {
+    pub(crate) fn from_result(result: &TerminalResultMetadata) -> Self {
+        Self {
+            process_id: result.process_id,
+            #[cfg(test)]
+            command: result.command.clone(),
+            result_ref: result.result_ref.clone(),
+            exit_code: result.exit_code,
+            failure_message: result.failure_message.clone(),
+            duration: Duration::from_millis(result.duration_ms),
+            total_output_bytes: result.output_bytes_total,
+            retained_output_bytes: result.output_bytes_retained,
+            omitted_output_bytes: result.output_bytes_omitted,
+            #[cfg(test)]
+            output_excerpt: String::new(),
+        }
+    }
+
     /// Build a completion event, hard-bounding and sanitizing all untrusted
     /// text. `output_excerpt` must already be bounded (see
     /// `UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES`) but is re-bounded
@@ -129,6 +125,7 @@ impl UnifiedExecCompletionEvent {
         clippy::too_many_arguments,
         reason = "completion envelope fields are explicit at one runtime seam"
     )]
+    #[cfg(test)]
     pub(crate) fn new(
         process_id: i32,
         command: impl Into<String>,
@@ -145,12 +142,14 @@ impl UnifiedExecCompletionEvent {
                 &command.into(),
                 UNIFIED_EXEC_COMPLETION_COMMAND_MAX_BYTES,
             ),
+            result_ref: format!("terminal-result:{process_id}:test"),
             exit_code,
             failure_message: failure_message.map(|message| {
                 bound_fragment_text(&message, UNIFIED_EXEC_COMPLETION_FAILURE_MAX_BYTES)
             }),
             duration,
             total_output_bytes,
+            retained_output_bytes: total_output_bytes.saturating_sub(omitted_output_bytes),
             omitted_output_bytes,
             output_excerpt: bound_fragment_text(
                 &output_excerpt.into(),
@@ -240,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn fragment_is_bounded_and_identifies_poll_handle() {
+    fn fragment_is_bounded_and_identifies_result_handle() {
         let event = event("sleep 5", None, "tail output");
         let rendered = event.render();
         assert!(rendered.starts_with("<unified_exec_completion>"));
@@ -249,8 +248,10 @@ mod tests {
         assert!(rendered.contains("exit code 0"));
         assert!(rendered.contains("\"output_bytes_total\":1000000"));
         assert!(rendered.contains("\"output_bytes_omitted\":500000"));
-        assert!(rendered.contains("tail output"));
-        assert!(rendered.contains("write_stdin"));
+        assert!(rendered.contains("terminal-result:1001:test"));
+        assert!(rendered.contains("read_terminal_result"));
+        assert!(!rendered.contains("tail output"));
+        assert!(!rendered.contains("\"output\":"));
         assert!(UnifiedExecCompletionEvent::matches_text(&rendered));
         assert!(event.requires_separate_message());
     }
@@ -259,7 +260,7 @@ mod tests {
     fn fragment_renders_failure_status() {
         let rendered = event("false", Some("command failed"), "").render();
         assert!(rendered.contains("Failed: command failed"));
-        assert!(rendered.contains("\"output\":\"\""));
+        assert!(!rendered.contains("\"output\":"));
     }
 
     #[test]

@@ -103,6 +103,20 @@ fn request_contains_marker(body: &Value, marker: &str) -> bool {
     text.contains(marker)
 }
 
+fn completion_fragment_text(body: &Value) -> String {
+    let mut text = String::new();
+    collect_text(body, &mut text);
+    let start = text
+        .rfind(COMPLETION_MARKER)
+        .expect("completion marker should be present");
+    let after_start = &text[start..];
+    let end = after_start
+        .find("</unified_exec_completion>")
+        .expect("completion closing marker should be present")
+        + "</unified_exec_completion>".len();
+    after_start[..end].to_string()
+}
+
 fn collect_text(value: &Value, out: &mut String) {
     match value {
         Value::String(text) => out.push_str(text),
@@ -227,11 +241,87 @@ async fn background_completion_wakes_idle_turn_by_default() -> Result<()> {
         request_contains_completion_marker(&third),
         "the auto-woken turn must sample the completion fragment"
     );
-    let third_text = serde_json::to_string(&third)?;
+    let third_text = completion_fragment_text(&third);
     assert!(
-        third_text.contains(&format!("process_id\\\":{process_id}")),
+        third_text.contains(&format!("process_id\":{process_id}")),
         "completion fragment should carry the stable process id; expected process_id {process_id}"
     );
+    assert!(
+        third_text.contains("terminal-result:"),
+        "completion fragment should carry a retained result reference"
+    );
+    assert!(
+        !third_text.contains("IDLE-DONE"),
+        "terminal output must remain behind the result reference"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn background_completion_output_is_read_only_on_request() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(completion_feature_config);
+    let test = builder.build_with_auto_env(&server).await?;
+
+    let call_id = "uexec-async-completion-read-result";
+    let read_call_id = "uexec-read-terminal-result";
+    let args = json!({
+        "cmd": "sleep 1.5; printf 'READABLE-DONE'",
+        "yield_time_ms": 250,
+    });
+    let read_args = json!({
+        "result_ref": "terminal-result:1000:1",
+    });
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(call_id, "exec_command", &serde_json::to_string(&args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-2"),
+            ev_assistant_message("msg-1", "I will wait for the retained result."),
+            ev_completed("resp-2"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_function_call(
+                read_call_id,
+                "read_terminal_result",
+                &serde_json::to_string(&read_args)?,
+            ),
+            ev_completed("resp-3"),
+        ]),
+        sse(vec![
+            ev_response_created("resp-4"),
+            ev_assistant_message("msg-2", "I read the retained result."),
+            ev_completed("resp-4"),
+        ]),
+    ];
+    let response_mock = mount_sse_sequence(&server, responses).await;
+    submit_turn(&test, "start the command and read its result when notified").await?;
+
+    wait_for_exec_command_begin(&test, call_id).await;
+    wait_for_turn_complete(&test).await;
+    wait_for_exec_command_end(&test, call_id).await;
+    wait_for_turn_complete(&test).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 4, "one explicit result read");
+    let completion_request = requests[2].body_json();
+    assert!(request_contains_completion_marker(&completion_request));
+    assert!(
+        !completion_fragment_text(&completion_request).contains("READABLE-DONE"),
+        "completion wake must not inline terminal output"
+    );
+    let read_output = requests[3].function_call_output(read_call_id);
+    let read_output_text = serde_json::to_string(&read_output)?;
+    assert!(read_output_text.contains("READABLE-DONE"));
+    assert!(read_output_text.contains("available"));
     Ok(())
 }
 

@@ -183,6 +183,64 @@ pub fn create_list_background_terminals_tool() -> ToolSpec {
     })
 }
 
+pub fn create_read_terminal_result_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "result_ref".to_string(),
+            JsonSchema::string(Some(
+                "Stable result reference from a unified-exec completion event.".to_string(),
+            )),
+        ),
+        (
+            "offset".to_string(),
+            JsonSchema::number(Some(
+                "UTF-8 byte offset into the retained output representation. Defaults to 0; continue with next_offset from the previous page."
+                    .to_string(),
+            )),
+        ),
+        (
+            "max_bytes".to_string(),
+            JsonSchema::number(Some(
+                "Target retained-output byte budget. Defaults to 4096 and is capped at 6000; one UTF-8 scalar may cross the target so every page advances."
+                    .to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "read_terminal_result".to_string(),
+        description: "Reads a retained background-terminal result without writing to the process. Returns objective availability state, completion metadata, one bounded output page, and next_offset when more retained output is available. References live for the owning session and may be capacity-evicted."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["result_ref".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(terminal_result_read_output_schema()),
+    })
+}
+
+fn terminal_result_read_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "state": {
+                "type": "string",
+                "enum": ["available", "evicted", "unavailable"]
+            },
+            "result_ref": { "type": "string" },
+            "metadata": { "type": "object" },
+            "output_offset": { "type": "number" },
+            "output": { "type": "string" },
+            "next_offset": { "type": "number" }
+        },
+        "required": ["state", "result_ref"],
+        "additionalProperties": false
+    })
+}
+
 fn list_background_terminals_output_schema() -> Value {
     json!({
         "type": "object",
