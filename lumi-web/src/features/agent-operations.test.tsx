@@ -2,138 +2,192 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import {
-  fixtureAgentOperationsSnapshot,
-  isAgentOperationsSnapshot,
-  parseAgentOperationsSnapshot,
-} from "../api/agent-operations";
-import type { AgentOperationsResult } from "../api/agent-operations";
+  deriveRuntimeTraceStats,
+  fixtureRuntimeTrace,
+  parseRuntimeTrace,
+} from "../api/runtime-trace";
+import type { RuntimeTrace, RuntimeTraceResult } from "../api/runtime-trace";
 import { AgentOperationsPage } from "./AgentOperationsPage";
 
-function fixtureResult(
-  snapshot = fixtureAgentOperationsSnapshot(),
-): AgentOperationsResult {
-  return { snapshot, source: "fixture" };
+function fixtureResult(trace = fixtureRuntimeTrace()): RuntimeTraceResult {
+  return { trace, source: "fixture" };
 }
 
-describe("agent operations fixture contract", () => {
-  it("produces a valid v1 snapshot with a root and several worker states", () => {
-    const snapshot = fixtureAgentOperationsSnapshot();
-    expect(isAgentOperationsSnapshot(snapshot)).toBe(true);
-    expect(snapshot.nodes.some((node) => node.role === "root")).toBe(true);
-    const statuses = new Set(snapshot.nodes.map((node) => node.status));
-    for (const status of [
-      "queued",
-      "running",
-      "waiting",
-      "succeeded",
-      "failed",
-      "cancelled",
-    ]) {
-      expect(statuses.has(status as never)).toBe(true);
-    }
-  });
-
-  it("closes the DTO and rejects invalid graph identity, time, and topology", () => {
-    const fixture = fixtureAgentOperationsSnapshot();
-    const withPrivateExtra = {
+describe("runtime trace contract", () => {
+  it("closes the DTO and preserves a valid causal trace", () => {
+    const fixture = fixtureRuntimeTrace();
+    const withPrivateContent = {
       ...fixture,
       prompt: "must not cross the browser contract",
-      nodes: fixture.nodes.map((node) => ({ ...node, cwd: "/private/path" })),
+      generations: fixture.generations.map((generation) => ({
+        ...generation,
+        output: "also private",
+      })),
     };
-    expect(parseAgentOperationsSnapshot(withPrivateExtra)).toEqual(fixture);
 
-    const duplicate = {
-      ...fixture,
-      nodes: [...fixture.nodes, fixture.nodes[0]],
-    };
-    expect(parseAgentOperationsSnapshot(duplicate)).toBeNull();
+    expect(parseRuntimeTrace(withPrivateContent)).toEqual(fixture);
+  });
 
-    const badTime = {
-      ...fixture,
-      nodes: fixture.nodes.map((node, index) =>
-        index === 0 ? { ...node, updatedAt: "not-a-time" } : node,
-      ),
-    };
-    expect(parseAgentOperationsSnapshot(badTime)).toBeNull();
-
-    const cycle = {
-      ...fixture,
-      nodes: fixture.nodes.map((node) => {
-        if (node.id === "op-root") return { ...node, parentId: "op-plan" };
-        return node;
+  it("rejects duplicate identity, invalid ordering, and broken joins", () => {
+    const fixture = fixtureRuntimeTrace();
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        events: [...fixture.events, fixture.events[0]],
       }),
-    };
-    expect(parseAgentOperationsSnapshot(cycle)).toBeNull();
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        generations: fixture.generations.map((generation, index) =>
+          index === 0
+            ? { ...generation, firstTokenAt: "2026-08-12T09:40:00Z" }
+            : generation,
+        ),
+      }),
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        events: fixture.events.map((event) =>
+          event.id === "event-terminal-complete"
+            ? { ...event, consumedByGenerationId: "missing-generation" }
+            : event,
+        ),
+      }),
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        operations: fixture.operations.map((operation) => ({
+          ...operation,
+          completionEventId: "event-user-input",
+        })),
+      }),
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        events: fixture.events.map((event) =>
+          event.id === "event-terminal-complete"
+            ? { ...event, sourceOperationId: null }
+            : event,
+        ),
+      }),
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        events: fixture.events.map((event) =>
+          event.id === "event-vera-return"
+            ? {
+                ...event,
+                occurredAt: "2026-08-12T09:41:11.000Z",
+                enqueuedAt: "2026-08-12T09:41:11.000Z",
+              }
+            : event,
+        ),
+      }),
+    ).toBeNull();
+
+    expect(
+      parseRuntimeTrace({
+        ...fixture,
+        generations: fixture.generations.map((generation) =>
+          generation.id === "main-g4"
+            ? {
+                ...generation,
+                completedAt: "2026-08-12T09:41:29.000Z",
+              }
+            : generation,
+        ),
+      }),
+    ).toBeNull();
+  });
+
+  it("derives deterministic workflow statistics from timestamps", () => {
+    expect(deriveRuntimeTraceStats(fixtureRuntimeTrace())).toMatchObject({
+      wallTimeMs: 28_000,
+      mainGenerations: 4,
+      totalGenerations: 8,
+      asyncBranches: 3,
+      agentMessages: 5,
+      maxConcurrency: 3,
+      asyncOverlapRatio: 0.775,
+      medianQueueDelayMs: 1_950,
+      maxQueueDelayMs: 5_450,
+    });
   });
 });
 
-describe("Agent Operations page", () => {
-  it("renders every fixture operation and labels fixture data honestly", async () => {
-    render(
-      <AgentOperationsPage
-        loader={async () => fixtureResult()}
-        fitView={false}
-      />,
-    );
+describe("Agent Operations causal timeline", () => {
+  it("renders agent lanes, generations, terminal, events, and statistics", async () => {
+    render(<AgentOperationsPage loader={async () => fixtureResult()} />);
 
-    for (const node of fixtureAgentOperationsSnapshot().nodes) {
-      expect(await screen.findByText(node.label)).not.toBeNull();
-    }
-    expect(screen.getByText("Fixture data")).not.toBeNull();
-    expect(screen.getByText("Snapshot summary")).not.toBeNull();
-  });
-
-  it("selects an operation and shows its details", async () => {
-    render(
-      <AgentOperationsPage
-        loader={async () => fixtureResult()}
-        fitView={false}
-      />,
-    );
-
-    expect(await screen.findByText("Snapshot summary")).not.toBeNull();
-    const workerLabel = await screen.findByText("Repo beta patch");
-    const worker = workerLabel.closest("button");
-    expect(worker).not.toBeNull();
-    if (worker === null) throw new Error("operation label is not in a button");
-    fireEvent.click(worker);
-
-    expect(worker.getAttribute("aria-pressed")).toBe("true");
-    expect(screen.queryByText("Snapshot summary")).toBeNull();
+    expect(await screen.findByText("Main agent")).not.toBeNull();
+    expect(screen.getByText("Subagents")).not.toBeNull();
+    expect(screen.getByText("2 resources · pooled")).not.toBeNull();
+    expect(screen.getByText("terminal · session 183")).not.toBeNull();
+    expect(screen.getByText("main-g1")).not.toBeNull();
+    expect(screen.getByText("luna-g3")).not.toBeNull();
+    expect(screen.getByText("vera-g1")).not.toBeNull();
     expect(
-      await screen.findByText("Awaiting maintainer approval"),
+      screen.getByRole("button", { name: "agent-message: checkpoint" }),
     ).not.toBeNull();
-    expect(
-      screen.getByRole("heading", { name: "Repo beta patch" }),
-    ).not.toBeNull();
+    expect(screen.getByText("28s")).not.toBeNull();
+    expect(screen.getByText("78%")).not.toBeNull();
+    expect(screen.getByText("Fixture trace")).not.toBeNull();
   });
 
-  it("shows an empty state when the snapshot has no operations", async () => {
-    const empty = { ...fixtureAgentOperationsSnapshot(), nodes: [] };
-    render(
-      <AgentOperationsPage
-        loader={async () => fixtureResult(empty)}
-        fitView={false}
-      />,
+  it("inspects generation joins and completion queue delay", async () => {
+    render(<AgentOperationsPage loader={async () => fixtureResult()} />);
+    const generation = await screen.findByRole("button", { name: /main-g3/ });
+    fireEvent.click(generation);
+    expect(screen.getByText("event-terminal-complete")).not.toBeNull();
+    expect(screen.getByText("event-luna-checkpoint")).not.toBeNull();
+    expect(screen.getByText("Events joined")).not.toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "operation-completion: exit 0",
+      }),
     );
-
-    await screen.findByText("No agent operations are running right now.");
-    expect(screen.queryByLabelText("Agent operations graph")).toBeNull();
+    expect(screen.getByRole("heading", { name: "exit 0" })).not.toBeNull();
+    expect(screen.getAllByText("1.95s").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("main-g3").length).toBeGreaterThan(0);
   });
 
-  it("shows an error state and recovers on retry", async () => {
-    let calls = 0;
-    const loader = async () => {
-      calls += 1;
-      if (calls === 1) throw new Error("bff unreachable");
-      return fixtureResult();
+  it("shows an empty trace and recovers after a load error", async () => {
+    const empty: RuntimeTrace = {
+      ...fixtureRuntimeTrace(),
+      generations: [],
+      operations: [],
+      events: [],
     };
+    const { unmount } = render(
+      <AgentOperationsPage loader={async () => fixtureResult(empty)} />,
+    );
+    await screen.findByText("This trace contains no generations.");
+    unmount();
 
-    render(<AgentOperationsPage loader={loader} fitView={false} />);
-
-    await screen.findByText(/Could not load agent operations: bff unreachable/);
+    let calls = 0;
+    render(
+      <AgentOperationsPage
+        loader={async () => {
+          calls += 1;
+          if (calls === 1) throw new Error("trace unavailable");
+          return fixtureResult();
+        }}
+      />,
+    );
+    await screen.findByText(/Could not load runtime trace: trace unavailable/);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await screen.findByText("Snapshot summary");
+    await screen.findByText("Main agent");
     expect(calls).toBe(2);
   });
 });

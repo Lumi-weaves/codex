@@ -13,17 +13,11 @@ pnpm install --frozen-lockfile
 pnpm --filter @lumi/codex-web dev
 ```
 
-Without a backend, the development server uses a deterministic, privacy-safe
-Agent Operations fixture. To exercise the narrow BFF contract instead:
-
-```sh
-LUMI_WEB_BFF_ORIGIN=http://127.0.0.1:PORT \
-  pnpm --filter @lumi/codex-web dev
-```
-
-Vite keeps the browser same-origin and proxies `/api` to that BFF. The browser
-never connects to app-server directly and this package does not expose generic
-JSON-RPC.
+Agent Operations currently uses a deterministic, privacy-safe causal runtime
+trace fixture. This branch deliberately does not define or proxy a BFF: the
+prototype first tests whether generations, async spans, event queues, joins,
+and pooled subagent lanes form a useful product contract. Prompt text, model
+output, terminal output, and filesystem paths are absent from the fixture.
 
 ## Checks and build
 

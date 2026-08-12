@@ -19,7 +19,7 @@ export const SHELL_NAV_SECTIONS: ShellNavSection[] = [
       {
         label: "Agent Operations",
         to: "/agent-operations",
-        description: "Read-only view of current agent runs",
+        description: "Causal timeline of generations, async work, and joins",
       },
     ],
   },

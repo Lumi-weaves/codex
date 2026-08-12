@@ -20,9 +20,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@dagrejs/dagre": "^1.1.4",
     "@tanstack/react-router": "^1.132.0",
-    "@xyflow/react": "^12.6.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
