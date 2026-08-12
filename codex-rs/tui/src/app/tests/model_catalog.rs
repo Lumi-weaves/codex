@@ -1,5 +1,8 @@
 use super::*;
 use assert_matches::assert_matches;
+use codex_app_server_client::AppServerEvent;
+use codex_app_server_protocol::ModelListUpdatedNotification;
+use codex_app_server_protocol::ServerNotification;
 use codex_config::types::ModelAvailabilityNuxConfig;
 use codex_protocol::openai_models::ModelAvailabilityNux;
 use pretty_assertions::assert_eq;
@@ -25,6 +28,37 @@ fn model_presets_with_test_upgrades() -> Vec<ModelPreset> {
         });
     }
     presets
+}
+
+#[tokio::test]
+async fn model_list_updated_refetches_the_shared_catalog() {
+    let mut app = Box::pin(crate::app::test_support::make_test_app()).await;
+    let mut stale = all_model_presets()[0].clone();
+    stale.id = "stale-model".to_string();
+    stale.model = "stale-model".to_string();
+    stale.display_name = "Stale Model".to_string();
+    app.model_catalog.replace_models(vec![stale]);
+    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+
+    app.handle_app_server_event(
+        &app_server,
+        AppServerEvent::ServerNotification(Box::new(ServerNotification::ModelListUpdated(
+            ModelListUpdatedNotification {
+                revision: "new-revision".to_string(),
+            },
+        ))),
+    )
+    .await;
+
+    let models = app.model_catalog.try_list_models().unwrap();
+    assert!(!models.is_empty());
+    assert!(models.iter().all(|model| model.model != "stale-model"));
+    assert_eq!(
+        models,
+        app.chat_widget.model_catalog().try_list_models().unwrap()
+    );
 }
 
 fn model_availability_nux_config(shown_count: &[(&str, u32)]) -> ModelAvailabilityNuxConfig {

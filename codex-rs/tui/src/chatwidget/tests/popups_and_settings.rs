@@ -3177,6 +3177,51 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 #[tokio::test]
+async fn model_picker_shows_display_name_and_stable_tag() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.id = "research-max".to_string();
+    preset.model = "research-max".to_string();
+    preset.display_name = "Research Max".to_string();
+    preset.description = "Routed by OpenCodex".to_string();
+    preset.show_in_picker = true;
+
+    chat.open_model_popup_with_presets(vec![preset]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_picker_display_name_and_tag", popup);
+}
+
+#[tokio::test]
+async fn open_model_picker_refreshes_when_catalog_changes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("old-tag")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut old = get_available_model(&chat, "gpt-5.4");
+    old.id = "old-tag".to_string();
+    old.model = "old-tag".to_string();
+    old.display_name = "Old Model".to_string();
+    old.show_in_picker = true;
+    chat.open_model_popup_with_presets(vec![old]);
+
+    let mut new = get_available_model(&chat, "gpt-5.4");
+    new.id = "new-tag".to_string();
+    new.model = "new-tag".to_string();
+    new.display_name = "New Model".to_string();
+    new.show_in_picker = true;
+    chat.refresh_model_picker_if_open(vec![new]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("New Model"), "refreshed picker:\n{popup}");
+    assert!(popup.contains("tag: new-tag"), "refreshed picker:\n{popup}");
+    assert!(!popup.contains("Old Model"), "refreshed picker:\n{popup}");
+    assert!(
+        !popup.contains("(current)"),
+        "a vanished current tag must not silently select a replacement:\n{popup}"
+    );
+}
+
+#[tokio::test]
 async fn server_overloaded_error_does_not_switch_models() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.2")).await;
     chat.set_model("gpt-5.2");
