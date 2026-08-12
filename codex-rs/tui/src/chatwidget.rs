@@ -383,6 +383,7 @@ use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
+mod model_workbench;
 mod notifications;
 use self::notifications::Notification;
 mod permission_popups;

@@ -3194,17 +3194,84 @@ async fn model_picker_shows_display_name_and_stable_tag() {
 }
 
 #[tokio::test]
+async fn model_picker_i_collects_display_name_then_exact_tag() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.id = "research-max".to_string();
+    preset.model = "research-max".to_string();
+    preset.display_name = "Research Max".to_string();
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('i')));
+    let display_prompt = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(display_prompt.contains("Model display name"));
+    assert!(display_prompt.contains("Stable tag: research-max"));
+    assert_chatwidget_snapshot!("model_workbench_display_name_prompt", display_prompt);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    let AppEvent::OpenModelWorkbenchTagPrompt {
+        display_name,
+        initial_model_tag,
+    } = rx.try_recv().expect("tag prompt event")
+    else {
+        panic!("expected tag prompt event");
+    };
+    assert_eq!(display_name, "Research Max");
+    assert_eq!(initial_model_tag, "research-max");
+    chat.open_model_workbench_tag_prompt(display_name, initial_model_tag);
+    let tag_prompt = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_workbench_tag_prompt", tag_prompt);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::FetchModelWorkbenchUpsert {
+            display_name,
+            model_tag,
+        }) if display_name == "Research Max" && model_tag == "research-max"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_d_requires_non_cascading_retirement_confirmation() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.id = "research-max".to_string();
+    preset.model = "research-max".to_string();
+    preset.display_name = "Research Max".to_string();
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('d')));
+    let confirmation = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(confirmation.contains("Retire Research Max?"));
+    assert!(confirmation.contains("credentials"));
+    assert!(confirmation.contains("Retire display entry"));
+    assert_chatwidget_snapshot!("model_workbench_retire_confirmation", confirmation);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::FetchModelWorkbenchRetire { model_tag }) if model_tag == "research-max"
+    );
+}
+
+#[tokio::test]
 async fn open_model_picker_refreshes_when_catalog_changes() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("old-tag")).await;
     chat.thread_id = Some(ThreadId::new());
     let mut old = get_available_model(&chat, "gpt-5.4");
+    let mut new = old.clone();
     old.id = "old-tag".to_string();
     old.model = "old-tag".to_string();
     old.display_name = "Old Model".to_string();
     old.show_in_picker = true;
     chat.open_model_popup_with_presets(vec![old]);
 
-    let mut new = get_available_model(&chat, "gpt-5.4");
     new.id = "new-tag".to_string();
     new.model = "new-tag".to_string();
     new.display_name = "New Model".to_string();
@@ -3219,6 +3286,32 @@ async fn open_model_picker_refreshes_when_catalog_changes() {
         !popup.contains("(current)"),
         "a vanished current tag must not silently select a replacement:\n{popup}"
     );
+}
+
+#[tokio::test]
+async fn model_workbench_prompt_preserves_catalog_refresh_underneath() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("old-tag")).await;
+    let mut old = get_available_model(&chat, "gpt-5.4");
+    let mut new = old.clone();
+    old.id = "old-tag".to_string();
+    old.model = "old-tag".to_string();
+    old.display_name = "Old Model".to_string();
+    old.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![old.clone()]);
+    chat.open_all_models_popup(vec![old]);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('i')));
+
+    new.id = "new-tag".to_string();
+    new.model = "new-tag".to_string();
+    new.display_name = "New Model".to_string();
+    new.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![new.clone()]);
+    chat.refresh_model_picker_if_open(vec![new]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("New Model"), "refreshed picker:\n{popup}");
+    assert!(!popup.contains("Old Model"), "refreshed picker:\n{popup}");
 }
 
 #[tokio::test]

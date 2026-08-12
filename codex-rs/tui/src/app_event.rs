@@ -23,6 +23,8 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::ModelWorkbenchRetireResponse;
+use codex_app_server_protocol::ModelWorkbenchUpsertResponse;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
@@ -195,6 +197,24 @@ pub(crate) enum TranscriptExportDestination {
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+
+    OpenModelWorkbenchTagPrompt {
+        display_name: String,
+        initial_model_tag: String,
+    },
+    FetchModelWorkbenchUpsert {
+        display_name: String,
+        model_tag: String,
+    },
+    ModelWorkbenchUpsertLoaded {
+        result: Result<ModelWorkbenchUpsertResponse, String>,
+    },
+    FetchModelWorkbenchRetire {
+        model_tag: String,
+    },
+    ModelWorkbenchRetireLoaded {
+        result: Result<ModelWorkbenchRetireResponse, String>,
+    },
     /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
     AgentPickerThreadsLoaded {
         primary_thread_id: ThreadId,

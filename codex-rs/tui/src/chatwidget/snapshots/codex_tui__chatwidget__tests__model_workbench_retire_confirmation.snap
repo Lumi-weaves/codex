@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3253
+expression: confirmation
+---
+  Retire Research Max?
+  Hide tag research-max from future pickers. Routes, accounts, credentials, and running tasks are
+
+  1. Retire display entry
+› 2. Keep entry
+
+  Press enter to confirm or esc to go back

@@ -7,7 +7,7 @@ use super::*;
 
 const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
 const MODEL_POPUP_VIEW_ID: &str = "model-popup";
-const ALL_MODELS_POPUP_VIEW_ID: &str = "all-models-popup";
+pub(super) const ALL_MODELS_POPUP_VIEW_ID: &str = "all-models-popup";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -175,7 +175,7 @@ impl ChatWidget {
         });
     }
 
-    fn is_auto_model(model: &str) -> bool {
+    pub(super) fn is_auto_model(model: &str) -> bool {
         model.starts_with("codex-auto-")
     }
 
@@ -197,6 +197,15 @@ impl ChatWidget {
             return;
         }
 
+        let params = self.all_models_popup_params(presets, /*initial_selected_idx*/ None);
+        self.bottom_pane.show_selection_view(params);
+    }
+
+    fn all_models_popup_params(
+        &self,
+        presets: Vec<ModelPreset>,
+        initial_selected_idx: Option<usize>,
+    ) -> SelectionViewParams {
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
             let (name, description) = Self::model_picker_label(&preset);
@@ -225,13 +234,16 @@ impl ChatWidget {
             "Select Model and Effort",
             "Display names map to stable model tags; routing stays behind the tag.",
         );
-        self.bottom_pane.show_selection_view(SelectionViewParams {
+        SelectionViewParams {
             view_id: Some(ALL_MODELS_POPUP_VIEW_ID),
-            footer_hint: Some(self.bottom_pane.standard_popup_hint_line()),
+            footer_hint: Some(Line::from(
+                "Enter select · i add/edit · d retire · Esc close",
+            )),
             items,
             header,
+            initial_selected_idx,
             ..Default::default()
-        });
+        }
     }
 
     fn model_picker_label(preset: &ModelPreset) -> (String, Option<String>) {
@@ -255,19 +267,18 @@ impl ChatWidget {
                     .dismiss_active_view_if_id(MODEL_POPUP_VIEW_ID);
                 self.open_model_popup_with_presets(presets);
             }
-            Some(ALL_MODELS_POPUP_VIEW_ID) => {
+            _ => {
+                let selected = self
+                    .bottom_pane
+                    .selected_index_for_present_view(ALL_MODELS_POPUP_VIEW_ID);
+                let models = presets
+                    .into_iter()
+                    .filter(|preset| preset.show_in_picker && !Self::is_auto_model(&preset.model))
+                    .collect::<Vec<_>>();
+                let params = self.all_models_popup_params(models, selected);
                 self.bottom_pane
-                    .dismiss_active_view_if_id(ALL_MODELS_POPUP_VIEW_ID);
-                self.open_all_models_popup(
-                    presets
-                        .into_iter()
-                        .filter(|preset| {
-                            preset.show_in_picker && !Self::is_auto_model(&preset.model)
-                        })
-                        .collect(),
-                );
+                    .replace_selection_view_if_present(ALL_MODELS_POPUP_VIEW_ID, params);
             }
-            _ => {}
         }
     }
 

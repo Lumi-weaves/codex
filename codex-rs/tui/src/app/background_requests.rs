@@ -19,6 +19,12 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use codex_app_server_protocol::ModelWorkbenchReadParams;
+use codex_app_server_protocol::ModelWorkbenchReadResponse;
+use codex_app_server_protocol::ModelWorkbenchRetireParams;
+use codex_app_server_protocol::ModelWorkbenchRetireResponse;
+use codex_app_server_protocol::ModelWorkbenchUpsertParams;
+use codex_app_server_protocol::ModelWorkbenchUpsertResponse;
 
 use codex_app_server_protocol::RequestId;
 
@@ -35,6 +41,90 @@ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
 impl App {
+    pub(super) fn fetch_model_workbench_upsert(
+        &mut self,
+        app_server: &AppServerSession,
+        display_name: String,
+        model_tag: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let state = request_handle
+                    .request_typed::<ModelWorkbenchReadResponse>(
+                        codex_app_server_protocol::ClientRequest::ModelWorkbenchRead {
+                            request_id: RequestId::String(format!(
+                                "model-workbench-read-{}",
+                                uuid::Uuid::new_v4()
+                            )),
+                            params: ModelWorkbenchReadParams::default(),
+                        },
+                    )
+                    .await?;
+                request_handle
+                    .request_typed::<ModelWorkbenchUpsertResponse>(
+                        codex_app_server_protocol::ClientRequest::ModelWorkbenchUpsert {
+                            request_id: RequestId::String(format!(
+                                "model-workbench-upsert-{}",
+                                uuid::Uuid::new_v4()
+                            )),
+                            params: ModelWorkbenchUpsertParams {
+                                model_tag,
+                                display_name,
+                                expected_revision: Some(state.revision),
+                            },
+                        },
+                    )
+                    .await
+            }
+            .await
+            .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ModelWorkbenchUpsertLoaded { result });
+        });
+    }
+
+    pub(super) fn fetch_model_workbench_retire(
+        &mut self,
+        app_server: &AppServerSession,
+        model_tag: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = async {
+                let state = request_handle
+                    .request_typed::<ModelWorkbenchReadResponse>(
+                        codex_app_server_protocol::ClientRequest::ModelWorkbenchRead {
+                            request_id: RequestId::String(format!(
+                                "model-workbench-read-{}",
+                                uuid::Uuid::new_v4()
+                            )),
+                            params: ModelWorkbenchReadParams::default(),
+                        },
+                    )
+                    .await?;
+                request_handle
+                    .request_typed::<ModelWorkbenchRetireResponse>(
+                        codex_app_server_protocol::ClientRequest::ModelWorkbenchRetire {
+                            request_id: RequestId::String(format!(
+                                "model-workbench-retire-{}",
+                                uuid::Uuid::new_v4()
+                            )),
+                            params: ModelWorkbenchRetireParams {
+                                model_tag,
+                                expected_revision: Some(state.revision),
+                            },
+                        },
+                    )
+                    .await
+            }
+            .await
+            .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ModelWorkbenchRetireLoaded { result });
+        });
+    }
+
     pub(super) fn fetch_mcp_inventory(
         &mut self,
         app_server: &AppServerSession,

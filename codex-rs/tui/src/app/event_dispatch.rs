@@ -674,6 +674,28 @@ impl App {
                         elicitation_target: None,
                     });
             }
+            AppEvent::OpenModelWorkbenchTagPrompt {
+                display_name,
+                initial_model_tag,
+            } => {
+                self.chat_widget
+                    .open_model_workbench_tag_prompt(display_name, initial_model_tag);
+            }
+            AppEvent::FetchModelWorkbenchUpsert {
+                display_name,
+                model_tag,
+            } => {
+                self.fetch_model_workbench_upsert(app_server, display_name, model_tag);
+            }
+            AppEvent::ModelWorkbenchUpsertLoaded { result } => {
+                self.chat_widget.on_model_workbench_upsert_loaded(result);
+            }
+            AppEvent::FetchModelWorkbenchRetire { model_tag } => {
+                self.fetch_model_workbench_retire(app_server, model_tag);
+            }
+            AppEvent::ModelWorkbenchRetireLoaded { result } => {
+                self.chat_widget.on_model_workbench_retire_loaded(result);
+            }
             AppEvent::OpenUrlInBrowser { url } => {
                 self.open_url_in_browser(url);
             }

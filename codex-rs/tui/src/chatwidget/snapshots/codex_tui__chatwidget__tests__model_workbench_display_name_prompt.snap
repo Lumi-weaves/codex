@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3211
+expression: display_prompt
+---
+▌ Model display name
+▌ Stable tag: research-max
+▌
+▌ Research Max
+
+Press enter to confirm or esc to go back

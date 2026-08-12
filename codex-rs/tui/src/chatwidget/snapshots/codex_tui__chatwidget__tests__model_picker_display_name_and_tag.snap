@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3193
 expression: popup
 ---
   Select Model and Effort
@@ -7,4 +8,4 @@ expression: popup
 
 › 1. Research Max (current)  tag: research-max · Routed by OpenCodex
 
-  Press enter to confirm or esc to go back
+  Enter select · i add/edit · d retire · Esc close
