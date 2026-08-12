@@ -2,6 +2,8 @@ use super::residency::is_v2_resident_session_source;
 use super::*;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
 use crate::config::PermissionProfileSnapshot;
+use crate::context::CockpitOperatingContract;
+use crate::context::ContextualUserFragment;
 use codex_extension_api::ExtensionDataInit;
 
 const AGENT_NAMES: &str = include_str!("../agent_names.txt");
@@ -94,6 +96,19 @@ fn is_multi_agent_v2_usage_hint_message(item: &ResponseItem, usage_hint_texts: &
     usage_hint_texts
         .iter()
         .any(|usage_hint_text| usage_hint_text == text)
+}
+
+fn is_cockpit_operating_contract_message(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return false;
+    };
+    if role != "developer" {
+        return false;
+    }
+    let [ContentItem::InputText { text }] = content.as_slice() else {
+        return false;
+    };
+    CockpitOperatingContract::matches_text(text)
 }
 
 async fn load_agent_model_context(
@@ -733,7 +748,8 @@ impl AgentControl {
             if is_multi_agent_v2_usage_hint_message(
                 response_item,
                 &multi_agent_v2_usage_hint_texts_to_filter,
-            ) {
+            ) || is_cockpit_operating_contract_message(response_item)
+            {
                 return false;
             }
 

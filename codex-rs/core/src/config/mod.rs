@@ -215,11 +215,10 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 const DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT: &str = r#"You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
 
 At the start of your turn, you are the active agent.
-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
+You can spawn sub-agents to handle subtasks. You retain their lifecycle unless you explicitly grant supervisory ownership.
 All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
 
 You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent without triggering a turn.
-Child agents can also spawn their own sub-agents.
 You can decide how much context you want to propagate to your sub-agents with the `fork_turns` parameter.
 
 You will receive messages in the analysis channel in the form:
@@ -234,10 +233,9 @@ They may be addressed as to=/root
 "#;
 const DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT: &str = r#"You are an agent in a team of agents collaborating to complete a task.
 
-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+Root owns your lifecycle. Do not spawn or manage peers or children unless root explicitly grants you supervisory ownership. All agents in the team are equally intelligent and capable, and have access to the same set of tools.
 
-You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task and trigger a turn, and `send_message` to pass a message to a running agent.
-Child agents can also spawn their own sub-agents.
+When supervisory ownership is explicitly granted, you can use `spawn_agent` to create a child, `followup_task` to give an existing child a new task and trigger a turn, and `send_message` to pass a message to a running child.
 
 When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
 Before responding in final, await background terminals whose results are part of your assignment; a returned terminal session ID means the process is still running, not that the work is complete.

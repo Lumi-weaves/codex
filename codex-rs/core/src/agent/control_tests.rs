@@ -1,5 +1,6 @@
 use super::*;
 use crate::CodexThread;
+use crate::PromptReceiptView;
 use crate::StateDbHandle;
 use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
@@ -273,6 +274,24 @@ async fn persisted_originator(thread: &CodexThread) -> String {
         .expect("session metadata should be persisted")
 }
 
+async fn assert_cockpit_contract_receipt(
+    session: &Arc<crate::session::session::Session>,
+    role: &str,
+) {
+    let receipt = crate::prompt_debug::build_prompt_request_receipt_from_session(
+        session,
+        text_input("cockpit contract conformance probe"),
+    )
+    .await
+    .expect("cockpit contract request should conform");
+    let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))
+        .expect("serialize cockpit receipt");
+    assert_eq!(metadata["cockpitContract"]["status"], "included");
+    assert_eq!(metadata["cockpitContract"]["expectedCopyCount"], 1);
+    assert_eq!(metadata["cockpitContract"]["effectiveCopyCount"], 1);
+    assert_eq!(metadata["cockpitContract"]["descriptor"]["role"], role);
+}
+
 fn has_subagent_notification(history_items: &[ResponseItem]) -> bool {
     history_items.iter().any(|item| {
         let ResponseItem::Message { role, content, .. } = item else {
@@ -328,6 +347,46 @@ fn history_contains_assistant_inter_agent_communication(
             | ContentItem::InputAudio { .. } => false,
         })
     })
+}
+
+#[tokio::test]
+async fn cockpit_contract_receipts_cover_root_and_fresh_role_shadow() {
+    let harness = AgentControlHarness::new().await;
+    let mut config = harness.config.clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let root = harness
+        .manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start cockpit root");
+    assert_cockpit_contract_receipt(&root.thread.session, "root").await;
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            config,
+            text_input("fresh role task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("spawn fresh role shadow")
+        .thread_id;
+    let child = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("fresh role shadow registered");
+    assert_cockpit_contract_receipt(&child.session, "shadow").await;
+
+    let _ = harness.control.shutdown_live_agent(child_thread_id).await;
+    let _ = root.thread.submit(Op::Shutdown {}).await;
 }
 
 async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> bool {
@@ -1389,6 +1448,17 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 ResponseItem::Message {
                     id: None,
                     role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: crate::cockpit_operating_contract::rendered_contract(
+                            crate::CockpitContractRole::Root,
+                        ),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
                     content: vec![
                         ContentItem::InputText {
                             text: "Developer context before.\nParent developer instructions.\nDeveloper context after."
@@ -1503,6 +1573,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         strip_response_item_ids(&expected_history),
         "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
     );
+    assert_cockpit_contract_receipt(&child_thread.session, "shadow").await;
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
             .expect("serialize child reference context item"),
@@ -2436,6 +2507,17 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
                 ResponseItem::Message {
                     id: None,
                     role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: crate::cockpit_operating_contract::rendered_contract(
+                            crate::CockpitContractRole::Root,
+                        ),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
                     content: vec![
                         ContentItem::InputText {
                             text: "Parent developer instructions.".to_string(),
@@ -2505,6 +2587,7 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
         !history_contains_text(history.raw_items(), "Child developer instructions."),
         "bounded fork should not inject child instructions before its canonical context rebuild"
     );
+    assert_cockpit_contract_receipt(&child_thread.session, "shadow").await;
     assert!(
         history_contains_text(history.raw_items(), "Preserved bounded developer context."),
         "bounded fork should preserve unrelated developer fragments"

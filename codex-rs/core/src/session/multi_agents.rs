@@ -1,3 +1,4 @@
+use crate::cockpit_operating_contract::CockpitContractRole;
 use crate::config::MultiAgentV2Config;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::config_types::MultiAgentMode;
@@ -16,6 +17,14 @@ pub(super) fn usage_hint_text<'a>(
 
     let multi_agent_v2 = &turn_context.config.multi_agent_v2;
     configured_usage_hint_text_for_source(multi_agent_v2, session_source)
+}
+
+pub(super) fn cockpit_contract_role(turn_context: &TurnContext) -> Option<CockpitContractRole> {
+    (turn_context.multi_agent_version == MultiAgentVersion::V2)
+        .then(|| {
+            crate::cockpit_operating_contract::role_for_session_source(&turn_context.session_source)
+        })
+        .flatten()
 }
 
 fn configured_usage_hint_text_for_source<'a>(

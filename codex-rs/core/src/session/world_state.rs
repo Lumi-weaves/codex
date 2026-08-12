@@ -7,6 +7,7 @@ use crate::context::ApprovalPromptContext;
 use crate::context::TokenBudgetContext;
 use crate::context::world_state::AgentsMdState;
 use crate::context::world_state::AppsInstructionsState;
+use crate::context::world_state::CockpitOperatingContractState;
 use crate::context::world_state::CollaborationModeState;
 use crate::context::world_state::CompactPermissionsState;
 use crate::context::world_state::ContextWindowGuidanceState;
@@ -286,6 +287,9 @@ impl Session {
         let mut multi_agent_mode = MultiAgentModeState::new(
             super::multi_agents::effective_multi_agent_mode(turn_context),
         );
+        if let Some(role) = super::multi_agents::cockpit_contract_role(turn_context) {
+            world_state.add_section(CockpitOperatingContractState::new(role));
+        }
         if let Some(usage_hint_text) =
             super::multi_agents::usage_hint_text(turn_context, &turn_context.session_source)
         {
