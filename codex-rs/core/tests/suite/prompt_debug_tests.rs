@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use codex_core::PromptReceiptView;
 use codex_core::build_prompt_input;
 use codex_core::build_prompt_request_receipt;
 use codex_core::config::ConfigBuilder;
@@ -122,12 +123,50 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         )
         .await?;
 
-        let receipt_json = serde_json::to_value(receipt)?;
-        assert_eq!(receipt_json["schemaVersion"], 1);
-        assert_eq!(receipt_json["invocationKind"], "turn");
-        assert_eq!(receipt_json["requestForm"], "logical_full");
-        assert_eq!(receipt_json["provider"]["wireApi"], "responses");
-        let request = &receipt_json["request"];
+        let metadata_json = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
+        assert_eq!(metadata_json["schemaVersion"], 2);
+        assert_eq!(
+            metadata_json["compilerRevision"],
+            "responses_request_lowering_v1"
+        );
+        assert_eq!(metadata_json["invocationKind"], "turn");
+        assert_eq!(metadata_json["requestForm"], "logical_full");
+        assert_eq!(metadata_json["provider"]["wireApi"], "responses");
+        assert_eq!(metadata_json["redaction"]["view"], "metadata_only");
+        assert_eq!(metadata_json["redaction"]["contentIncluded"], false);
+        assert!(metadata_json.get("request").is_none());
+        assert!(!metadata_json.to_string().contains(TEST_INSTRUCTIONS));
+        assert!(
+            !metadata_json
+                .to_string()
+                .contains("hello from effective request")
+        );
+        assert_eq!(metadata_json["provenance"]["censusSchemaVersion"], 1);
+        assert!(
+            metadata_json["provenance"]["contributionRefs"]
+                .as_array()
+                .is_some_and(|refs| refs.iter().any(|value| value == "base_instructions"))
+        );
+        assert_eq!(
+            metadata_json["summary"]["canonicalRequestSha256"]
+                .as_str()
+                .map(str::len),
+            Some(64)
+        );
+        assert!(
+            metadata_json["summary"]["estimatedModelVisibleTokens"]
+                .as_u64()
+                .is_some_and(|tokens| tokens > 0)
+        );
+
+        let full_json = serde_json::to_value(receipt.render(PromptReceiptView::FullLocal))?;
+        assert_eq!(full_json["redaction"]["view"], "full_local");
+        assert_eq!(full_json["redaction"]["contentIncluded"], true);
+        assert_eq!(
+            metadata_json["summary"]["canonicalRequestSha256"],
+            full_json["summary"]["canonicalRequestSha256"]
+        );
+        let request = &full_json["request"];
         assert!(request["input"].as_array().is_some_and(|input| {
             input.iter().any(|item| {
                 item["content"].as_array().is_some_and(|content| {
@@ -140,7 +179,7 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         assert!(request.to_string().contains(TEST_INSTRUCTIONS));
 
         if use_responses_lite {
-            assert_eq!(receipt_json["provider"]["lowering"], "responses_lite");
+            assert_eq!(full_json["provider"]["lowering"], "responses_lite");
             assert!(request.get("instructions").is_none());
             assert!(request.get("tools").is_none());
             let input = request["input"]
@@ -151,7 +190,7 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
             assert_eq!(input[1]["role"], "developer");
             assert_eq!(input[1]["content"][0]["text"], BASE_INSTRUCTIONS);
         } else {
-            assert_eq!(receipt_json["provider"]["lowering"], "responses");
+            assert_eq!(full_json["provider"]["lowering"], "responses");
             assert_eq!(request["instructions"], BASE_INSTRUCTIONS);
             assert!(request.get("tools").is_some());
         }

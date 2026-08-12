@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::guardian::is_guardian_reviewer_source;
 
-const PROMPT_CENSUS_SCHEMA_VERSION: u32 = 1;
+pub(crate) const PROMPT_CENSUS_SCHEMA_VERSION: u32 = 1;
 
 /// Stable identity for every client-owned model invocation family known to the prompt plane.
 ///
@@ -72,6 +72,18 @@ impl PromptInvocationKind {
                 Self::MemoryConsolidation
             }
             _ => Self::Turn,
+        }
+    }
+
+    pub(crate) const fn contributions(self) -> &'static [PromptContributionKind] {
+        match self {
+            Self::Turn | Self::Review | Self::Guardian => TURN_CONTRIBUTIONS,
+            Self::StartupPrewarm => PREWARM_CONTRIBUTIONS,
+            Self::LocalCompaction | Self::RemoteCompaction => COMPACTION_CONTRIBUTIONS,
+            Self::Realtime => REALTIME_CONTRIBUTIONS,
+            Self::MemoryExtraction => MEMORY_EXTRACTION_CONTRIBUTIONS,
+            Self::MemoryTraceSummarization => MEMORY_TRACE_CONTRIBUTIONS,
+            Self::MemoryConsolidation => MEMORY_CONSOLIDATION_CONTRIBUTIONS,
         }
     }
 }
@@ -284,7 +296,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "turn ToolRouter model-visible specifications",
             output_control_source: "turn final_output_json_schema and strictness policy",
             lifecycle: "root or shadow session; inherited history is selected before prompt assembly",
-            contributions: TURN_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
         PromptInvocationKind::StartupPrewarm => PromptInvocationDefinition {
@@ -297,7 +309,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "startup turn ToolRouter model-visible specifications",
             output_control_source: "none",
             lifecycle: "one opportunistic prewarm before the first submitted turn",
-            contributions: PREWARM_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Static,
         },
         PromptInvocationKind::Review => PromptInvocationDefinition {
@@ -310,7 +322,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "review session ToolRouter model-visible specifications",
             output_control_source: "review task JSON output schema",
             lifecycle: "dedicated review subagent session",
-            contributions: TURN_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
         PromptInvocationKind::Guardian => PromptInvocationDefinition {
@@ -323,7 +335,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "Guardian session ToolRouter; normally policy-restricted",
             output_control_source: "Guardian assessment schema with non-strict compatibility lowering",
             lifecycle: "new or reused dedicated Guardian review session",
-            contributions: TURN_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
         PromptInvocationKind::LocalCompaction => PromptInvocationDefinition {
@@ -336,7 +348,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "none",
             output_control_source: "none",
             lifecycle: "in-session compaction task with retry-local client session",
-            contributions: COMPACTION_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Static,
         },
         PromptInvocationKind::RemoteCompaction => PromptInvocationDefinition {
@@ -349,7 +361,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "current turn ToolRouter model-visible specifications",
             output_control_source: "none",
             lifecycle: "in-session unary compact endpoint or streamed v2 compaction attempt",
-            contributions: COMPACTION_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Static,
         },
         PromptInvocationKind::Realtime => PromptInvocationDefinition {
@@ -362,7 +374,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "realtime session configuration and handoff contract",
             output_control_source: "realtime event parser and session configuration",
             lifecycle: "long-lived realtime call with a sideband or direct WebSocket",
-            contributions: REALTIME_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
         PromptInvocationKind::MemoryExtraction => PromptInvocationDefinition {
@@ -375,7 +387,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "none",
             output_control_source: "strict stage-one memory JSON schema",
             lifecycle: "detached unary-like streamed request per selected rollout",
-            contributions: MEMORY_EXTRACTION_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Static,
         },
         PromptInvocationKind::MemoryTraceSummarization => PromptInvocationDefinition {
@@ -388,7 +400,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "none",
             output_control_source: "typed memory summarize endpoint response",
             lifecycle: "unary stage-one memory job",
-            contributions: MEMORY_TRACE_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
         PromptInvocationKind::MemoryConsolidation => PromptInvocationDefinition {
@@ -401,7 +413,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             tool_source: "consolidation agent ToolRouter model-visible specifications",
             output_control_source: "none; artifacts are validated after the agent turn",
             lifecycle: "dedicated internal agent session with workspace resources",
-            contributions: MEMORY_CONSOLIDATION_CONTRIBUTIONS,
+            contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
         },
     }
