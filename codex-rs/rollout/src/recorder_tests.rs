@@ -202,6 +202,8 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             history_base: None,
             subagent_history_start_ordinal: None,
             multi_agent_version: None,
+            prompt_compiler_revision: None,
+            prompt_context_origin: None,
             context_window: None,
         },
         git: None,
