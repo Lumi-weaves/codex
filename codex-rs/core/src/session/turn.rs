@@ -2225,6 +2225,7 @@ async fn try_run_sampling_request(
         && turn_context.provider.info().is_openai();
     let mut stream = client_session
         .stream(
+            crate::PromptInvocationKind::for_session_turn(&turn_context.session_source),
             prompt,
             &turn_context.model_info,
             &turn_context.session_telemetry,

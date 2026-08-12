@@ -197,3 +197,7 @@ pub use installation_id::resolve_installation_id;
 pub mod compact;
 mod memory_usage;
 pub mod otel_init;
+mod prompt_census;
+pub use prompt_census::PromptContextCensus;
+pub use prompt_census::PromptInvocationKind;
+pub use prompt_census::prompt_context_census;
