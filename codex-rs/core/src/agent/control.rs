@@ -565,6 +565,20 @@ impl AgentControl {
         turn_id: &str,
         attention_ref: String,
     ) -> CodexResult<()> {
+        let inbox = self
+            .list_agent_attention(current_thread_id, /*include_read*/ true)
+            .await?;
+        let Some(item) = inbox
+            .iter()
+            .find(|item| item.attention_ref == attention_ref)
+        else {
+            return Err(CodexErr::InvalidRequest(format!(
+                "attention ref `{attention_ref}` is not in this agent's inbox"
+            )));
+        };
+        if item.state == AgentAttentionState::Read {
+            return Ok(());
+        }
         let agent_path = current_session_source
             .get_agent_path()
             .unwrap_or_else(AgentPath::root);

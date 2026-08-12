@@ -54,21 +54,6 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     )
                     .await
                     .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-                if checkpoint.state == crate::agent::control::AgentCheckpointReadState::Available
-                    && checkpoint.next_offset.is_none()
-                {
-                    session
-                        .services
-                        .agent_control
-                        .acknowledge_agent_attention(
-                            session.thread_id,
-                            &turn.session_source,
-                            &turn.sub_id,
-                            checkpoint_ref,
-                        )
-                        .await
-                        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-                }
                 checkpoints.push(checkpoint);
             }
             Ok(boxed_tool_output(ReadAgentCheckpointsResult {

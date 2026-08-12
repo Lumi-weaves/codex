@@ -30,6 +30,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 
+pub(crate) use ack_agent_attention::Handler as AckAgentAttentionHandler;
 pub(crate) use followup_task::Handler as FollowupTaskHandler;
 pub(crate) use interrupt_agent::Handler as InterruptAgentHandler;
 pub(crate) use list_agent_attention::Handler as ListAgentAttentionHandler;
@@ -40,6 +41,7 @@ pub(crate) use send_message::Handler as SendMessageHandler;
 pub(crate) use spawn::Handler as SpawnAgentHandler;
 pub(crate) use wait::Handler as WaitAgentHandler;
 
+mod ack_agent_attention;
 mod followup_task;
 mod interrupt_agent;
 mod list_agent_attention;

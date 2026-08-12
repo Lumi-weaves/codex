@@ -2174,6 +2174,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     .await;
     v1.assert_visible_contains(&[MULTI_AGENT_V1_NAMESPACE]);
     v1.assert_visible_lacks(&[
+        "ack_agent_attention",
         "spawn_agent",
         "send_input",
         "resume_agent",
@@ -2233,6 +2234,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     .await;
     v2.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
     v2.assert_visible_lacks(&[
+        "ack_agent_attention",
         "spawn_agent",
         "send_message",
         "followup_task",
@@ -2248,6 +2250,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "close_agent",
     ]);
     for tool_name in [
+        "ack_agent_attention",
         "spawn_agent",
         "send_message",
         "followup_task",
@@ -2400,6 +2403,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
     assert_eq!(
         plan.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
         &[
+            "ack_agent_attention".to_string(),
             "followup_task".to_string(),
             "interrupt_agent".to_string(),
             "list_agent_attention".to_string(),
@@ -2446,6 +2450,7 @@ async fn v1_multi_agent_tools_defer_when_tool_search_available() {
         "interrupt_agent",
     ]);
     for tool_name in [
+        "ack_agent_attention",
         "spawn_agent",
         "send_input",
         "resume_agent",
@@ -2498,6 +2503,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "expected assign_task to be absent from agents namespace"
     );
     for tool_name in [
+        "ack_agent_attention",
         "spawn_agent",
         "send_message",
         "followup_task",

@@ -349,7 +349,7 @@ pub fn create_read_agent_checkpoints_tool() -> ToolSpec {
     ]);
     ToolSpec::Function(ResponsesApiTool {
         name: "read_agent_checkpoints".to_string(),
-        description: "Read one or more selected direct-child completion checkpoints. Payloads stay in the child thread's durable rollout; reading a final page acknowledges its attention item but does not retire, resume, or expose child-owned runtime resources."
+        description: "Read one or more selected direct-child completion checkpoints. Payloads stay in the child thread's durable rollout; reading does not acknowledge, retire, resume, or expose child-owned runtime resources."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -380,6 +380,29 @@ pub fn create_list_agent_attention_tool() -> ToolSpec {
     })
 }
 
+pub fn create_ack_agent_attention_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "attention_refs".to_string(),
+        JsonSchema::array(
+            JsonSchema::string(/*description*/ None),
+            Some("One to eight refs from the durable attention inbox.".to_string()),
+        ),
+    )]);
+    ToolSpec::Function(ResponsesApiTool {
+        name: "ack_agent_attention".to_string(),
+        description: "Acknowledge one or more selected attention items without reading payloads, following up, or changing shadow lifecycle state."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["attention_refs".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(ack_agent_attention_output_schema()),
+    })
+}
+
 pub fn create_read_agent_messages_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -405,7 +428,7 @@ pub fn create_read_agent_messages_tool() -> ToolSpec {
     ]);
     ToolSpec::Function(ResponsesApiTool {
         name: "read_agent_messages".to_string(),
-        description: "Read one or more selected direct-child messages. Payloads stay in the child thread's durable rollout; reading a final page acknowledges its attention item but does not retire, resume, or expose child-owned runtime resources."
+        description: "Read one or more selected direct-child messages. Payloads stay in the child thread's durable rollout; reading does not acknowledge, retire, resume, or expose child-owned runtime resources."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -632,6 +655,20 @@ fn list_agent_attention_output_schema() -> Value {
             }
         },
         "required": ["items"],
+        "additionalProperties": false
+    })
+}
+
+fn ack_agent_attention_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "acknowledged_refs": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["acknowledged_refs"],
         "additionalProperties": false
     })
 }

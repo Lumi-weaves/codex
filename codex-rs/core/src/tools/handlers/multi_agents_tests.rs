@@ -14,6 +14,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_checkpoint_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::AckAgentAttentionHandler;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentAttentionHandler;
@@ -1494,9 +1495,32 @@ async fn multi_agent_v2_plaintext_child_message_uses_durable_selective_read() {
             function_payload(json!({})),
         ))
         .await
-        .expect("acknowledged message should leave the unread inbox");
+        .expect("reading should leave acknowledgement explicit");
     let (unread_text, _) = expect_text_output(unread);
-    assert_eq!(unread_text, r#"{"items":[]}"#);
+    assert!(unread_text.contains(&message_ref));
+    assert!(unread_text.contains(r#""state":"unread""#));
+
+    AckAgentAttentionHandler
+        .handle(plaintext_invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "ack_agent_attention",
+            function_payload(json!({"attention_refs": [message_ref.clone()]})),
+        ))
+        .await
+        .expect("selected attention should acknowledge explicitly");
+
+    let cleared = ListAgentAttentionHandler
+        .handle(plaintext_invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "list_agent_attention",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("acknowledged message should leave the unread inbox");
+    let (cleared_text, _) = expect_text_output(cleared);
+    assert_eq!(cleared_text, r#"{"items":[]}"#);
 
     let all = ListAgentAttentionHandler
         .handle(plaintext_invocation(

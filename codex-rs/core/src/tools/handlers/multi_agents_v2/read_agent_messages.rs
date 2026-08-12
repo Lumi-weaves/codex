@@ -49,21 +49,6 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     .read_agent_message(&turn.session_source, &message_ref, args.offset, max_bytes)
                     .await
                     .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-                if message.state == crate::agent::control::AgentMessageReadState::Available
-                    && message.next_offset.is_none()
-                {
-                    session
-                        .services
-                        .agent_control
-                        .acknowledge_agent_attention(
-                            session.thread_id,
-                            &turn.session_source,
-                            &turn.sub_id,
-                            message_ref,
-                        )
-                        .await
-                        .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
-                }
                 messages.push(message);
             }
             Ok(boxed_tool_output(ReadAgentMessagesResult { messages }))
