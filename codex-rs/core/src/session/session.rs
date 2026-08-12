@@ -5,6 +5,7 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::prompt_inheritance::PromptRuntimeContext;
 use crate::session::awaited_terminals::AwaitedTerminals;
 use crate::session::turn_context::TurnEnvironmentConfig;
 use crate::shell_snapshot::ShellSnapshot;
@@ -36,6 +37,7 @@ use tokio::sync::Semaphore;
 pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
     pub(crate) installation_id: String,
+    pub(crate) prompt_context: PromptRuntimeContext,
     pub(super) tx_event: Sender<Event>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
     pub(super) state: Mutex<SessionState>,
@@ -606,6 +608,7 @@ impl Session {
         agent_status: watch::Sender<AgentStatus>,
         internal_session_event_tx: async_channel::WeakSender<super::SessionIngress>,
         mut initial_history: InitialHistory,
+        prompt_context_seed: Option<crate::prompt_inheritance::PromptContextSeed>,
         fork_persistence: ForkPersistence,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
@@ -661,6 +664,11 @@ impl Session {
             .parent_thread_id
             .or_else(|| initial_history.get_resumed_parent_thread_id());
         session_configuration.parent_thread_id = parent_thread_id;
+        let prompt_context = PromptRuntimeContext::resolve(
+            &initial_history,
+            &session_configuration.session_source,
+            prompt_context_seed,
+        );
         let is_paginated_subagent = matches!(
             session_configuration.history_mode,
             ThreadHistoryMode::Paginated
@@ -769,6 +777,10 @@ impl Session {
                                 text: session_configuration.base_instructions.clone(),
                                 provenance: base_instructions_provenance.clone(),
                             },
+                            prompt_compiler_revision: prompt_context
+                                .compiler_revision()
+                                .to_string(),
+                            prompt_context_origin: prompt_context.persisted_origin(),
                             dynamic_tools: session_configuration.dynamic_tools.clone(),
                             selected_capability_roots: selected_capability_roots.clone(),
                             multi_agent_version: initial_multi_agent_version,
@@ -1321,6 +1333,7 @@ impl Session {
             let sess = Arc::new(Session {
                 thread_id,
                 installation_id,
+                prompt_context,
                 tx_event: tx_event.clone(),
                 agent_status,
                 state: Mutex::new(state),

@@ -24,6 +24,7 @@ use crate::config::Config;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
+use crate::prompt_inheritance::PromptInheritanceProvenance;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::session::Session;
@@ -33,8 +34,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 2;
-const PROMPT_RECEIPT_COMPILER_REVISION: &str = "responses_request_lowering_v1";
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 3;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -43,11 +43,12 @@ const PROMPT_RECEIPT_COMPILER_REVISION: &str = "responses_request_lowering_v1";
 #[derive(Debug)]
 pub struct PromptRequestReceipt {
     schema_version: u32,
-    compiler_revision: &'static str,
+    compiler_revision: String,
     invocation_kind: PromptInvocationKind,
     request_form: PromptRequestForm,
     provider: PromptRequestProvider,
     provenance: PromptReceiptProvenance,
+    context_inheritance: PromptInheritanceProvenance,
     summary: PromptReceiptSummary,
     bounds: PromptReceiptBounds,
     request: ResponsesApiRequest,
@@ -69,11 +70,12 @@ pub enum PromptReceiptView {
 #[serde(rename_all = "camelCase")]
 pub struct RenderedPromptRequestReceipt<'a> {
     schema_version: u32,
-    compiler_revision: &'static str,
+    compiler_revision: &'a str,
     invocation_kind: PromptInvocationKind,
     request_form: &'a PromptRequestForm,
     provider: &'a PromptRequestProvider,
     provenance: &'a PromptReceiptProvenance,
+    context_inheritance: &'a PromptInheritanceProvenance,
     summary: &'a PromptReceiptSummary,
     bounds: &'a PromptReceiptBounds,
     redaction: PromptReceiptRedaction,
@@ -88,6 +90,7 @@ impl PromptRequestReceipt {
         provider_info: &codex_model_provider_info::ModelProviderInfo,
         use_responses_lite: bool,
         request: ResponsesApiRequest,
+        context_inheritance: PromptInheritanceProvenance,
     ) -> CodexResult<Self> {
         let lowering = if use_responses_lite {
             PromptRequestLowering::ResponsesLite
@@ -103,7 +106,7 @@ impl PromptRequestReceipt {
 
         Ok(Self {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
-            compiler_revision: PROMPT_RECEIPT_COMPILER_REVISION,
+            compiler_revision: context_inheritance.compiler_revision.clone(),
             invocation_kind,
             request_form: PromptRequestForm::LogicalFull,
             provider: PromptRequestProvider {
@@ -119,6 +122,7 @@ impl PromptRequestReceipt {
                 contribution_refs: invocation_kind.contributions(),
                 provider_processing: "provider_owned_unknown",
             },
+            context_inheritance,
             summary,
             bounds: PromptReceiptBounds {
                 receipt_content_truncated: false,
@@ -133,11 +137,12 @@ impl PromptRequestReceipt {
     pub fn render(&self, view: PromptReceiptView) -> RenderedPromptRequestReceipt<'_> {
         RenderedPromptRequestReceipt {
             schema_version: self.schema_version,
-            compiler_revision: self.compiler_revision,
+            compiler_revision: &self.compiler_revision,
             invocation_kind: self.invocation_kind,
             request_form: &self.request_form,
             provider: &self.provider,
             provenance: &self.provenance,
+            context_inheritance: &self.context_inheritance,
             summary: &self.summary,
             bounds: &self.bounds,
             redaction: PromptReceiptRedaction {
@@ -437,6 +442,7 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
         turn_context.provider.info(),
         turn_context.model_info.use_responses_lite,
         request,
+        sess.prompt_context.provenance(),
     )
 }
 

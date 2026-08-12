@@ -135,6 +135,8 @@ mod tests {
                     thread_source: None,
                     originator: "test_originator".to_string(),
                     base_instructions: BaseInstructions::default(),
+                    prompt_compiler_revision: "test_compiler_v1".to_string(),
+                    prompt_context_origin: "root_fresh".to_string(),
                     dynamic_tools: Vec::new(),
                     selected_capability_roots: Vec::new(),
                     multi_agent_version: None,
@@ -383,6 +385,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_persists_prompt_context_revision_and_origin() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::new();
+        let mut params = create_thread_params(thread_id, ThreadHistoryMode::Legacy);
+        params.prompt_compiler_revision = "compiler_parent_v7".to_string();
+        params.prompt_context_origin = "last_n_turn_fork".to_string();
+
+        store.create_thread(params).await.expect("create thread");
+
+        let state = store.state.lock().await;
+        let Some(RolloutItem::SessionMeta(meta)) = state
+            .histories
+            .get(&thread_id)
+            .and_then(|history| history.first())
+        else {
+            panic!("session metadata should be persisted");
+        };
+        assert_eq!(
+            meta.meta.prompt_compiler_revision.as_deref(),
+            Some("compiler_parent_v7")
+        );
+        assert_eq!(
+            meta.meta.prompt_context_origin.as_deref(),
+            Some("last_n_turn_fork")
+        );
+    }
+
     fn create_thread_params(
         thread_id: ThreadId,
         history_mode: ThreadHistoryMode,
@@ -397,6 +427,8 @@ mod tests {
             thread_source: None,
             originator: "test_originator".to_string(),
             base_instructions: BaseInstructions::default(),
+            prompt_compiler_revision: "test_compiler_v1".to_string(),
+            prompt_context_origin: "root_fresh".to_string(),
             dynamic_tools: Vec::new(),
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
@@ -517,6 +549,8 @@ impl InMemoryThreadStore {
             thread_source: params.thread_source.clone(),
             model_provider: Some(params.metadata.model_provider.clone()),
             base_instructions: Some(params.base_instructions.clone()),
+            prompt_compiler_revision: Some(params.prompt_compiler_revision.clone()),
+            prompt_context_origin: Some(params.prompt_context_origin.clone()),
             dynamic_tools: (!params.dynamic_tools.is_empty()).then(|| params.dynamic_tools.clone()),
             selected_capability_roots: params.selected_capability_roots.clone(),
             memory_mode: matches!(params.metadata.memory_mode, ThreadMemoryMode::Disabled)

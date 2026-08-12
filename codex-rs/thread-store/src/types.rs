@@ -87,6 +87,10 @@ pub struct CreateThreadParams {
     pub originator: String,
     /// Base instructions persisted in session metadata.
     pub base_instructions: BaseInstructions,
+    /// Prompt compiler revision pinned for the lifetime of the thread.
+    pub prompt_compiler_revision: String,
+    /// Lifecycle origin that established this thread's prompt context.
+    pub prompt_context_origin: String,
     /// Dynamic tools available to the thread at startup.
     pub dynamic_tools: Vec<DynamicToolSpec>,
     /// Environment-qualified capability roots selected for this thread.

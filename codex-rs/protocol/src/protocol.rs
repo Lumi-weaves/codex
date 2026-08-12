@@ -2882,6 +2882,13 @@ pub struct SessionMeta {
     /// but may be missing for older sessions. If not present, fall back to rendering the base_instructions
     /// from ModelsManager.
     pub base_instructions: Option<BaseInstructions>,
+    /// Prompt compiler revision pinned for this session. Older rollouts omit it and are resolved
+    /// against the current compatible compiler when resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_compiler_revision: Option<String>,
+    /// Lifecycle origin that established the persisted prompt context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_context_origin: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::dynamic_tools::deserialize_dynamic_tool_specs",
@@ -2930,6 +2937,8 @@ impl Default for SessionMeta {
             agent_path: None,
             model_provider: None,
             base_instructions: None,
+            prompt_compiler_revision: None,
+            prompt_context_origin: None,
             dynamic_tools: None,
             selected_capability_roots: Vec::new(),
             memory_mode: None,

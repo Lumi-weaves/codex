@@ -618,6 +618,18 @@ impl AgentControl {
 
         let parent_thread_id = *parent_thread_id;
         let parent_thread = state.get_thread(parent_thread_id).await?;
+        let fork_lifecycle = match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                crate::prompt_inheritance::PromptLifecycleShape::FullHistoryFork
+            }
+            SpawnAgentForkMode::LastNTurns(_) => {
+                crate::prompt_inheritance::PromptLifecycleShape::LastNTurnFork
+            }
+        };
+        let prompt_context_seed = parent_thread
+            .session
+            .prompt_context
+            .seed_for_fork(fork_lifecycle);
         let (subagent_developer_instructions, parent_developer_instructions) = match (
             multi_agent_version,
             config
@@ -842,6 +854,7 @@ impl AgentControl {
                 inherited_exec_policy,
                 options.environments.clone(),
                 thread_extension_init,
+                prompt_context_seed,
             )
             .await
     }

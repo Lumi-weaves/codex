@@ -95,6 +95,12 @@ pub(crate) async fn run_codex_thread_interactive(
     let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let conversation_history = initial_history.unwrap_or(InitialHistory::New);
+    let prompt_context_seed =
+        matches!(conversation_history, InitialHistory::Forked(_)).then(|| {
+            parent_session
+                .prompt_context
+                .seed_for_fork(crate::prompt_inheritance::PromptLifecycleShape::FullHistoryFork)
+        });
     let forked_from_thread_id = conversation_history.forked_from_id();
     let user_instructions = LoadedUserInstructions {
         instructions: parent_session.user_instructions().await,
@@ -118,6 +124,7 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions: Arc::clone(&parent_session.services.extensions),
         conversation_history,
+        prompt_context_seed,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(subagent_source.clone()),

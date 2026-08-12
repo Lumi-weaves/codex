@@ -124,7 +124,7 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         .await?;
 
         let metadata_json = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
-        assert_eq!(metadata_json["schemaVersion"], 2);
+        assert_eq!(metadata_json["schemaVersion"], 3);
         assert_eq!(
             metadata_json["compilerRevision"],
             "responses_request_lowering_v1"
@@ -142,6 +142,22 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
                 .contains("hello from effective request")
         );
         assert_eq!(metadata_json["provenance"]["censusSchemaVersion"], 1);
+        assert_eq!(
+            metadata_json["contextInheritance"]["lifecycleOrigin"],
+            "root_fresh"
+        );
+        assert_eq!(
+            metadata_json["contextInheritance"]["revisionPolicy"],
+            "pin_current"
+        );
+        assert_eq!(
+            metadata_json["contextInheritance"]["compilerRevision"],
+            metadata_json["compilerRevision"]
+        );
+        assert_eq!(
+            metadata_json["contextInheritance"]["contextInheritanceGrantsAuthority"],
+            false
+        );
         assert!(
             metadata_json["provenance"]["contributionRefs"]
                 .as_array()

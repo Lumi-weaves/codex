@@ -3322,6 +3322,8 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
         history_base: None,
         subagent_history_start_ordinal: None,
         multi_agent_version: None,
+        prompt_compiler_revision: None,
+        prompt_context_origin: None,
         context_window: None,
     };
     std::fs::write(

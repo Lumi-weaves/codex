@@ -777,6 +777,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         code_mode_session_provider: Arc::new(codex_code_mode::DisabledCodeModeSessionProvider),
         extensions: codex_extension_api::empty_extension_registry(),
         conversation_history: InitialHistory::New,
+        prompt_context_seed: None,
         requested_history_mode: None,
         fork_persistence: ForkPersistence::Copied,
         session_source: SessionSource::SubAgent(SubAgentSource::Other(

@@ -100,6 +100,8 @@ pub enum RolloutRecorderParams {
         thread_source: Option<ThreadSource>,
         originator: String,
         base_instructions: BaseInstructions,
+        prompt_compiler_revision: String,
+        prompt_context_origin: String,
         dynamic_tools: Vec<DynamicToolSpec>,
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         multi_agent_version: Option<MultiAgentVersion>,
@@ -195,6 +197,8 @@ impl RolloutRecorderParams {
             thread_source,
             originator,
             base_instructions,
+            prompt_compiler_revision: String::new(),
+            prompt_context_origin: String::new(),
             dynamic_tools,
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
@@ -208,6 +212,23 @@ impl RolloutRecorderParams {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         if let Self::Create { session_id: id, .. } = &mut self {
             *id = session_id;
+        }
+        self
+    }
+
+    pub fn with_prompt_context(
+        mut self,
+        prompt_compiler_revision: String,
+        prompt_context_origin: String,
+    ) -> Self {
+        if let Self::Create {
+            prompt_compiler_revision: revision,
+            prompt_context_origin: origin,
+            ..
+        } = &mut self
+        {
+            *revision = prompt_compiler_revision;
+            *origin = prompt_context_origin;
         }
         self
     }
@@ -806,6 +827,8 @@ impl RolloutRecorder {
                 thread_source,
                 originator,
                 base_instructions,
+                prompt_compiler_revision,
+                prompt_context_origin,
                 dynamic_tools,
                 selected_capability_roots,
                 multi_agent_version,
@@ -845,6 +868,10 @@ impl RolloutRecorder {
                     thread_source,
                     model_provider: Some(config.model_provider_id().to_string()),
                     base_instructions: Some(base_instructions),
+                    prompt_compiler_revision: (!prompt_compiler_revision.is_empty())
+                        .then_some(prompt_compiler_revision),
+                    prompt_context_origin: (!prompt_context_origin.is_empty())
+                        .then_some(prompt_context_origin),
                     dynamic_tools: if dynamic_tools.is_empty() {
                         None
                     } else {

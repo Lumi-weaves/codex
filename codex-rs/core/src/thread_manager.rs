@@ -271,6 +271,7 @@ struct ThreadSpawnRequest {
     agent_control: AgentControl,
     parent_thread_id: Option<ThreadId>,
     forked_from_thread_id: Option<ThreadId>,
+    prompt_context_seed: Option<crate::prompt_inheritance::PromptContextSeed>,
     fork_persistence: ForkPersistence,
     inherited_environments: Option<TurnEnvironmentSnapshot>,
     inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
@@ -289,6 +290,7 @@ impl ThreadSpawnRequest {
             agent_control,
             parent_thread_id: None,
             forked_from_thread_id: None,
+            prompt_context_seed: None,
             fork_persistence: ForkPersistence::Copied,
             inherited_environments: None,
             inherited_exec_policy: None,
@@ -1255,6 +1257,20 @@ impl ThreadManager {
             initial_history: history,
             persistence: fork_persistence,
         } = fork_history;
+        let fork_lifecycle = match snapshot {
+            ForkSnapshot::Interrupted => {
+                crate::prompt_inheritance::PromptLifecycleShape::FullHistoryFork
+            }
+            ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
+                crate::prompt_inheritance::PromptLifecycleShape::LastNTurnFork
+            }
+        };
+        let prompt_context_seed = crate::prompt_inheritance::PromptRuntimeContext::resolve(
+            &history,
+            &self.state.session_source,
+            None,
+        )
+        .seed_for_fork(fork_lifecycle);
         // `forked_from_id()` describes this history's existing lineage. When
         // forking a resumed thread, the child copies the resumed thread itself.
         let source_thread_id = match &history {
@@ -1286,6 +1302,7 @@ impl ThreadManager {
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
         request.forked_from_thread_id = source_thread_id;
+        request.prompt_context_seed = Some(prompt_context_seed);
         request.fork_persistence = fork_persistence;
         Box::pin(self.state.spawn_thread(request)).await
     }
@@ -1701,6 +1718,7 @@ impl ThreadManagerState {
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
         thread_extension_init: ExtensionDataInit,
+        prompt_context_seed: crate::prompt_inheritance::PromptContextSeed,
     ) -> CodexResult<NewThread> {
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let options = StartThreadOptions {
@@ -1719,6 +1737,7 @@ impl ThreadManagerState {
         request.forked_from_thread_id = forked_from_thread_id;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
+        request.prompt_context_seed = Some(prompt_context_seed);
         Box::pin(self.spawn_thread(request)).await
     }
 
@@ -1743,6 +1762,7 @@ impl ThreadManagerState {
             agent_control,
             parent_thread_id,
             forked_from_thread_id,
+            prompt_context_seed,
             fork_persistence,
             inherited_environments,
             inherited_exec_policy,
@@ -1840,6 +1860,7 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
+            prompt_context_seed,
             requested_history_mode: history_mode,
             fork_persistence,
             session_source,

@@ -82,6 +82,11 @@ pub use prompt_debug::PromptReceiptView;
 pub use prompt_debug::PromptRequestReceipt;
 pub use prompt_debug::build_prompt_input;
 pub use prompt_debug::build_prompt_request_receipt;
+mod prompt_inheritance;
+pub use prompt_inheritance::PromptInheritanceMatrix;
+pub use prompt_inheritance::PromptInheritanceProvenance;
+pub use prompt_inheritance::PromptLifecycleShape;
+pub use prompt_inheritance::prompt_inheritance_matrix;
 pub(crate) mod mentions {
     pub(crate) use crate::plugins::build_connector_slug_counts;
     pub(crate) use crate::plugins::collect_explicit_app_ids;
