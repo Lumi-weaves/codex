@@ -1,5 +1,6 @@
 packages:
   - codex-cli
+  - lumi-web
   - codex-rs/responses-api-proxy/npm
   - sdk/typescript
 

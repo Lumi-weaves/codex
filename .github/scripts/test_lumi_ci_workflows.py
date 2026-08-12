@@ -90,6 +90,18 @@ class LumiCiWorkflowsTest(unittest.TestCase):
         self.assertIn("-p codex-code-mode-host", text)
         self.assertIn("--bin codex-code-mode-host", text)
 
+    def test_web_job_is_lightweight_and_part_of_fan_in(self) -> None:
+        text = (WORKFLOWS / "lumi-ci.yml").read_text(encoding="utf-8")
+
+        self.assertIn("  web:\n", text)
+        self.assertIn(
+            "pnpm --filter @lumi/codex-web... install --frozen-lockfile", text
+        )
+        self.assertIn("pnpm --filter @lumi/codex-web run typecheck", text)
+        self.assertIn("pnpm --filter @lumi/codex-web run test", text)
+        self.assertIn("pnpm --filter @lumi/codex-web run build", text)
+        self.assertRegex(text, r"(?s)results:.*?needs:.*?- web\n")
+
     def test_expensive_diagnostics_are_manual_or_opt_in(self) -> None:
         blocking = (WORKFLOWS / "blocking-ci.yml").read_text(encoding="utf-8")
         lumi = (WORKFLOWS / "lumi-ci.yml").read_text(encoding="utf-8")

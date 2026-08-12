@@ -19,9 +19,23 @@ class LumiCiChangesTest(unittest.TestCase):
                 self.assertEqual(classify({path}), Areas(rust=True))
 
     def test_sdk_inputs_select_sdk(self) -> None:
-        for path in ("sdk/typescript/src/index.ts", "pnpm-lock.yaml"):
+        self.assertEqual(
+            classify({"sdk/typescript/src/index.ts"}), Areas(sdk=True)
+        )
+
+    def test_shared_node_inputs_select_sdk_and_web(self) -> None:
+        for path in ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"):
             with self.subTest(path=path):
-                self.assertEqual(classify({path}), Areas(sdk=True))
+                self.assertEqual(classify({path}), Areas(sdk=True, web=True))
+
+    def test_web_inputs_select_only_web(self) -> None:
+        for path in (
+            "lumi-web/src/main.tsx",
+            "lumi-web/src/styles.css",
+            "lumi-web/package.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(classify({path}), Areas(web=True))
 
     def test_distribution_inputs_select_distribution(self) -> None:
         for path in (
@@ -35,13 +49,13 @@ class LumiCiChangesTest(unittest.TestCase):
     def test_github_change_exercises_every_owned_surface(self) -> None:
         self.assertEqual(
             classify({".github/workflows/lumi-ci.yml"}),
-            Areas(rust=True, sdk=True, distribution=True),
+            Areas(rust=True, sdk=True, web=True, distribution=True),
         )
 
     def test_manual_force_exercises_every_owned_surface(self) -> None:
         self.assertEqual(
             classify(set(), force=True),
-            Areas(rust=True, sdk=True, distribution=True),
+            Areas(rust=True, sdk=True, web=True, distribution=True),
         )
 
 

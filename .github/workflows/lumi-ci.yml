@@ -29,6 +29,7 @@ jobs:
       distribution: ${{ steps.detect.outputs.distribution }}
       rust: ${{ steps.detect.outputs.rust }}
       sdk: ${{ steps.detect.outputs.sdk }}
+      web: ${{ steps.detect.outputs.web }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -345,6 +346,52 @@ jobs:
         if: ${{ always() && !cancelled() && needs.changes.outputs.sdk == 'true' }}
         uses: ./.github/actions/check-clean-worktree
 
+  web:
+    name: Web management shell
+    needs: changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: No relevant Web changes
+        if: ${{ needs.changes.outputs.web != 'true' }}
+        run: echo 'No Web management shell or workflow changes.'
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        if: ${{ needs.changes.outputs.web == 'true' }}
+        with:
+          ref: ${{ needs.changes.outputs.head }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        if: ${{ needs.changes.outputs.web == 'true' }}
+        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        if: ${{ needs.changes.outputs.web == 'true' }}
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Web dependencies
+        if: ${{ needs.changes.outputs.web == 'true' }}
+        run: pnpm --filter @lumi/codex-web... install --frozen-lockfile
+
+      - name: Format, lint, typecheck, test, and build
+        if: ${{ needs.changes.outputs.web == 'true' }}
+        run: |
+          pnpm --filter @lumi/codex-web run format
+          pnpm --filter @lumi/codex-web run lint
+          pnpm --filter @lumi/codex-web run typecheck
+          pnpm --filter @lumi/codex-web run test
+          pnpm --filter @lumi/codex-web run build
+
+      - name: Check for a clean worktree
+        if: ${{ always() && !cancelled() && needs.changes.outputs.web == 'true' }}
+        uses: ./.github/actions/check-clean-worktree
+
   distribution:
     name: Distribution contract
     needs: changes
@@ -389,6 +436,7 @@ jobs:
       - rust-hygiene
       - rust-linux
       - sdk
+      - web
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     steps:

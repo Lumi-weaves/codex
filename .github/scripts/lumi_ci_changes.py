@@ -30,6 +30,12 @@ SDK_PATTERNS = (
     "pnpm-lock.yaml",
     "pnpm-workspace.yaml",
 )
+WEB_PATTERNS = (
+    "lumi-web/**",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+)
 DISTRIBUTION_PATTERNS = (
     "scripts/codex_package/**",
     "scripts/install/**",
@@ -45,6 +51,7 @@ DISTRIBUTION_PATTERNS = (
 class Areas:
     rust: bool = False
     sdk: bool = False
+    web: bool = False
     distribution: bool = False
 
 
@@ -54,11 +61,12 @@ def matches(path: str, patterns: tuple[str, ...]) -> bool:
 
 def classify(paths: set[str], *, force: bool = False) -> Areas:
     if force or any(path.startswith(".github/") for path in paths):
-        return Areas(rust=True, sdk=True, distribution=True)
+        return Areas(rust=True, sdk=True, web=True, distribution=True)
 
     return Areas(
         rust=any(matches(path, RUST_PATTERNS) for path in paths),
         sdk=any(matches(path, SDK_PATTERNS) for path in paths),
+        web=any(matches(path, WEB_PATTERNS) for path in paths),
         distribution=any(matches(path, DISTRIBUTION_PATTERNS) for path in paths),
     )
 
@@ -83,6 +91,7 @@ def main() -> None:
     areas = classify(paths, force=args.force)
     print(f"rust={str(areas.rust).lower()}")
     print(f"sdk={str(areas.sdk).lower()}")
+    print(f"web={str(areas.web).lower()}")
     print(f"distribution={str(areas.distribution).lower()}")
 
 
