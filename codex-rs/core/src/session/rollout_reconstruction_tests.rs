@@ -135,6 +135,37 @@ async fn record_initial_history_reconstructs_typed_inter_agent_message() {
 }
 
 #[tokio::test]
+async fn record_initial_history_hides_source_only_agent_message() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let mut communication = InterAgentCommunication::new(
+        AgentPath::root().join("worker").expect("worker path"),
+        AgentPath::root(),
+        Vec::new(),
+        "sender-owned payload".to_string(),
+        /*trigger_turn*/ false,
+    );
+    communication.source_only = true;
+
+    session
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(vec![RolloutItem::InterAgentCommunication(communication)]),
+            rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+        }))
+        .await;
+
+    assert!(
+        session
+            .state
+            .lock()
+            .await
+            .clone_history()
+            .raw_items()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_restores_world_state_baseline() {
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);

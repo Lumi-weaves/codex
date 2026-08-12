@@ -409,7 +409,7 @@ mod job {
             .filter_map(|item| match item {
                 RolloutItem::ResponseItem(item) => sanitize_response_item_for_memories(item),
                 RolloutItem::InterAgentCommunication(communication) => {
-                    Some(communication.to_model_input_item())
+                    (!communication.source_only).then(|| communication.to_model_input_item())
                 }
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }

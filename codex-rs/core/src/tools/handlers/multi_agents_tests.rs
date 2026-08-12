@@ -16,8 +16,10 @@ use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
+use crate::tools::handlers::multi_agents_v2::ListAgentAttentionHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
 use crate::tools::handlers::multi_agents_v2::ReadAgentCheckpointsHandler;
+use crate::tools::handlers::multi_agents_v2::ReadAgentMessagesHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -92,6 +94,17 @@ fn invocation(
         source: crate::tools::context::ToolCallSource::Direct,
         payload,
     }
+}
+
+fn plaintext_invocation(
+    session: Arc<crate::session::session::Session>,
+    turn: Arc<TurnContext>,
+    tool_name: &str,
+    payload: ToolPayload,
+) -> ToolInvocation {
+    let mut invocation = invocation(session, turn, tool_name, payload);
+    invocation.source = crate::tools::context::ToolCallSource::DirectPlaintextMessage;
+    invocation
 }
 
 fn function_payload(args: serde_json::Value) -> ToolPayload {
@@ -1351,6 +1364,152 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                         && !communication.trigger_turn
             )
     }));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_plaintext_child_message_uses_durable_selective_read() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+
+    let child_path = AgentPath::try_from("/root/worker").expect("agent path");
+    let child_thread_id = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            (*turn.config).clone(),
+            vec![UserInput::Text {
+                text: "inspect this repo".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(child_path.clone()),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("worker spawn should succeed")
+        .thread_id;
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should exist");
+    let child_turn = child_thread.session.new_default_turn().await;
+    let child_session = child_thread.session.clone();
+    let root_session = Arc::new(session);
+    let root_turn = Arc::new(turn);
+
+    SendMessageHandlerV2
+        .handle(plaintext_invocation(
+            child_session,
+            child_turn.clone(),
+            "send_message",
+            function_payload(json!({
+                "target": "/root",
+                "message": "PRIVATE-SHADOW-MESSAGE"
+            })),
+        ))
+        .await
+        .expect("plaintext message should reach the root attention inbox");
+
+    let attention = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(id, op)| match op {
+            Op::InterAgentCommunication { communication }
+                if id == root.thread_id && communication.author == child_path =>
+            {
+                Some(communication.content)
+            }
+            _ => None,
+        })
+        .expect("root should receive a compact attention event");
+    assert!(attention.contains("Message Type: AGENT_ATTENTION"));
+    assert!(attention.contains("read_agent_messages"));
+    assert!(!attention.contains("PRIVATE-SHADOW-MESSAGE"));
+    let message_ref = attention
+        .split('"')
+        .find(|part| part.starts_with("agent-message:"))
+        .expect("attention should contain a stable message ref")
+        .to_string();
+
+    let root_history = root
+        .thread
+        .load_history(/*include_archived*/ true)
+        .await
+        .expect("root history should load");
+    assert!(root_history.items.iter().any(|item| matches!(
+        item,
+        RolloutItem::InterAgentCommunication(communication)
+            if communication.attention.as_deref().is_some_and(|attention| {
+                !attention.acknowledged && attention.reference == message_ref
+            })
+                && communication.content.contains(&message_ref)
+                && !communication.content.contains("PRIVATE-SHADOW-MESSAGE")
+    )));
+
+    let history = child_thread
+        .load_history(/*include_archived*/ true)
+        .await
+        .expect("child history should load");
+    assert!(history.items.iter().any(|item| matches!(
+        item,
+        RolloutItem::InterAgentCommunication(communication)
+            if communication.source_only && communication.content == "PRIVATE-SHADOW-MESSAGE"
+    )));
+
+    let read = ReadAgentMessagesHandler
+        .handle(plaintext_invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "read_agent_messages",
+            function_payload(json!({"message_refs": [message_ref.clone()]})),
+        ))
+        .await
+        .expect("direct parent should read the selected child message");
+    let (read_text, success) = expect_text_output(read);
+    assert_eq!(success, Some(true));
+    assert!(read_text.contains("PRIVATE-SHADOW-MESSAGE"));
+
+    let unread = ListAgentAttentionHandler
+        .handle(plaintext_invocation(
+            root_session.clone(),
+            root_turn.clone(),
+            "list_agent_attention",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("acknowledged message should leave the unread inbox");
+    let (unread_text, _) = expect_text_output(unread);
+    assert_eq!(unread_text, r#"{"items":[]}"#);
+
+    let all = ListAgentAttentionHandler
+        .handle(plaintext_invocation(
+            root_session,
+            root_turn,
+            "list_agent_attention",
+            function_payload(json!({"include_read": true})),
+        ))
+        .await
+        .expect("durable inbox should retain acknowledged state");
+    let (all_text, _) = expect_text_output(all);
+    assert!(all_text.contains(&message_ref));
+    assert!(all_text.contains(r#""state":"read""#));
 }
 
 #[tokio::test]

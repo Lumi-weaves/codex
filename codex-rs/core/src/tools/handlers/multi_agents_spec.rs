@@ -349,7 +349,7 @@ pub fn create_read_agent_checkpoints_tool() -> ToolSpec {
     ]);
     ToolSpec::Function(ResponsesApiTool {
         name: "read_agent_checkpoints".to_string(),
-        description: "Read one or more selected direct-child completion checkpoints. Payloads stay in the child thread's durable rollout until explicitly read; this does not acknowledge, retire, resume, or expose child-owned runtime resources."
+        description: "Read one or more selected direct-child completion checkpoints. Payloads stay in the child thread's durable rollout; reading a final page acknowledges its attention item but does not retire, resume, or expose child-owned runtime resources."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -359,6 +359,62 @@ pub fn create_read_agent_checkpoints_tool() -> ToolSpec {
             Some(false.into()),
         ),
         output_schema: Some(read_agent_checkpoints_output_schema()),
+    })
+}
+
+pub fn create_list_agent_attention_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "include_read".to_string(),
+        JsonSchema::boolean(Some(
+            "Include acknowledged items as well as unread items. Defaults to false.".to_string(),
+        )),
+    )]);
+    ToolSpec::Function(ResponsesApiTool {
+        name: "list_agent_attention".to_string(),
+        description: "List the compact durable attention inbox for this agent. By default only unread child messages and completions are returned."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(list_agent_attention_output_schema()),
+    })
+}
+
+pub fn create_read_agent_messages_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "message_refs".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(/*description*/ None),
+                Some("One to eight message refs from agent-attention events.".to_string()),
+            ),
+        ),
+        (
+            "offset".to_string(),
+            JsonSchema::number(Some(
+                "UTF-8 byte offset applied to each selected message. Defaults to 0.".to_string(),
+            )),
+        ),
+        (
+            "max_bytes".to_string(),
+            JsonSchema::number(Some(
+                "Target byte budget per message. Defaults to 4096 and is capped at 6000."
+                    .to_string(),
+            )),
+        ),
+    ]);
+    ToolSpec::Function(ResponsesApiTool {
+        name: "read_agent_messages".to_string(),
+        description: "Read one or more selected direct-child messages. Payloads stay in the child thread's durable rollout; reading a final page acknowledges its attention item but does not retire, resume, or expose child-owned runtime resources."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["message_refs".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(read_agent_messages_output_schema()),
     })
 }
 
@@ -552,6 +608,57 @@ fn read_agent_checkpoints_output_schema() -> Value {
             }
         },
         "required": ["checkpoints"],
+        "additionalProperties": false
+    })
+}
+
+fn list_agent_attention_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "enum": ["unread", "read"] },
+                        "attention_ref": { "type": "string" },
+                        "sender": { "type": "string" },
+                        "kind": { "type": "string", "enum": ["message", "completion"] }
+                    },
+                    "required": ["state", "attention_ref", "sender", "kind"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["items"],
+        "additionalProperties": false
+    })
+}
+
+fn read_agent_messages_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "messages": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "enum": ["available", "unavailable"] },
+                        "message_ref": { "type": "string" },
+                        "sender": { "type": "string" },
+                        "approximate_bytes": { "type": "number" },
+                        "output_offset": { "type": "number" },
+                        "output": { "type": "string" },
+                        "next_offset": { "type": "number" }
+                    },
+                    "required": ["state", "message_ref", "sender", "approximate_bytes"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["messages"],
         "additionalProperties": false
     })
 }

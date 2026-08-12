@@ -7,6 +7,8 @@ use super::*;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::tools::context::FunctionToolOutput;
+use codex_protocol::ResponseItemId;
+use codex_protocol::protocol::RolloutItem;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MessageDeliveryMode {
@@ -95,13 +97,47 @@ pub(crate) async fn handle_message_string_tool(
         .session_source
         .get_agent_path()
         .unwrap_or_else(AgentPath::root);
-    let communication = communication_from_tool_message(
-        author,
-        receiver_agent_path.clone(),
-        message,
-        &source,
-        mode.trigger_turn(),
-    );
+    let communication = if mode == MessageDeliveryMode::QueueOnly
+        && matches!(
+            source,
+            crate::tools::context::ToolCallSource::DirectPlaintextMessage
+        )
+        && direct_parent_of(&author).as_ref() == Some(&receiver_agent_path)
+    {
+        let approximate_bytes = message.len();
+        let mut source_communication = InterAgentCommunication::new(
+            author.clone(),
+            receiver_agent_path.clone(),
+            Vec::new(),
+            message,
+            false,
+        );
+        let source_id = ResponseItemId::new("amsg");
+        source_communication.id = Some(source_id.clone());
+        source_communication.source_only = true;
+        source_communication.set_turn_id_if_missing(&turn.sub_id);
+        session
+            .live_thread_for_persistence("persist an outbound agent message")
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?
+            .append_items(&[RolloutItem::InterAgentCommunication(source_communication)])
+            .await
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
+        let message_ref = format!("agent-message:{}:{source_id}", session.thread_id);
+        communication_from_message_ref(
+            author,
+            receiver_agent_path.clone(),
+            &message_ref,
+            approximate_bytes,
+        )
+    } else {
+        communication_from_tool_message(
+            author,
+            receiver_agent_path.clone(),
+            message,
+            &source,
+            mode.trigger_turn(),
+        )
+    };
     let kind = match mode {
         MessageDeliveryMode::QueueOnly => AgentCommunicationKind::Message,
         MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
@@ -129,4 +165,10 @@ pub(crate) async fn handle_message_string_tool(
     .await;
 
     Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
+}
+
+fn direct_parent_of(path: &AgentPath) -> Option<AgentPath> {
+    path.as_str()
+        .rsplit_once('/')
+        .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
 }

@@ -518,3 +518,30 @@ fn read_agent_checkpoints_tool_accepts_batched_refs() {
         ])
     );
 }
+
+#[test]
+fn read_agent_messages_tool_accepts_batched_refs() {
+    let ToolSpec::Function(ResponsesApiTool {
+        parameters,
+        output_schema,
+        ..
+    }) = create_read_agent_messages_tool()
+    else {
+        panic!("read_agent_messages should be a function tool");
+    };
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("read_agent_messages should use object params");
+    assert!(properties.contains_key("message_refs"));
+    assert!(properties.contains_key("offset"));
+    assert!(properties.contains_key("max_bytes"));
+    assert_eq!(
+        parameters.required.as_ref(),
+        Some(&vec!["message_refs".to_string()])
+    );
+    assert_eq!(
+        output_schema.expect("message output schema")["properties"]["messages"]["items"]["required"],
+        json!(["state", "message_ref", "sender", "approximate_bytes"])
+    );
+}

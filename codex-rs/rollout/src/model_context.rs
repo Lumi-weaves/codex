@@ -143,9 +143,10 @@ impl ModelContextScan {
                 self.active_segment.has_user_turn |=
                     response_item_counts_as_user_turn(response_item);
             }
-            RolloutItem::InterAgentCommunication(_) => {
+            RolloutItem::InterAgentCommunication(communication) if !communication.source_only => {
                 self.active_segment.has_user_turn = true;
             }
+            RolloutItem::InterAgentCommunication(_) => {}
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
                 self.active_segment.has_user_turn = true;
             }

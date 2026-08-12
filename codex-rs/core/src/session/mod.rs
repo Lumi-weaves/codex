@@ -1993,13 +1993,20 @@ impl Session {
             .rollout_thread_trace
             .is_enabled()
             .then(|| message.clone());
-        let communication = InterAgentCommunication::new(
+        let mut communication = InterAgentCommunication::new(
             child_agent_path.clone(),
             parent_agent_path,
             Vec::new(),
             message,
             /*trigger_turn*/ false,
         );
+        communication.attention = Some(Box::new(codex_protocol::protocol::InterAgentAttention {
+            reference: format!(
+                "agent-checkpoint:{}:{}",
+                self.thread_id, turn_context.sub_id
+            ),
+            acknowledged: false,
+        }));
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
         if let Err(err) = self
@@ -3312,13 +3319,15 @@ impl Session {
                 turn_context.model_info.truncation_policy.into(),
             );
         }
-        self.persist_rollout_items(&[
-            RolloutItem::InterAgentCommunicationMetadata {
-                trigger_turn: communication.trigger_turn,
-            },
-            RolloutItem::ResponseItem(response_item),
-        ])
-        .await;
+        if communication.attention.is_none() {
+            self.persist_rollout_items(&[
+                RolloutItem::InterAgentCommunicationMetadata {
+                    trigger_turn: communication.trigger_turn,
+                },
+                RolloutItem::ResponseItem(response_item),
+            ])
+            .await;
+        }
         self.send_raw_response_items(turn_context, items).await;
     }
 

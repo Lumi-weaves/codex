@@ -273,11 +273,14 @@ impl Session {
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment.counts_as_user_turn |= is_user_turn_boundary(response_item);
                 }
-                RolloutItem::InterAgentCommunication(_) => {
+                RolloutItem::InterAgentCommunication(communication)
+                    if !communication.source_only =>
+                {
                     let active_segment =
                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
                     active_segment.counts_as_user_turn = true;
                 }
+                RolloutItem::InterAgentCommunication(_) => {}
                 RolloutItem::EventMsg(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
@@ -331,11 +334,13 @@ impl Session {
                     );
                 }
                 RolloutItem::InterAgentCommunication(communication) => {
-                    let response_item = communication.to_model_input_item();
-                    history.record_items(
-                        std::iter::once(&response_item),
-                        turn_context.model_info.truncation_policy.into(),
-                    );
+                    if !communication.source_only {
+                        let response_item = communication.to_model_input_item();
+                        history.record_items(
+                            std::iter::once(&response_item),
+                            turn_context.model_info.truncation_policy.into(),
+                        );
+                    }
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
                 RolloutItem::Compacted(compacted) => {

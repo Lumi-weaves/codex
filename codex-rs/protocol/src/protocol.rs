@@ -752,7 +752,23 @@ pub struct InterAgentCommunication {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+    /// A sender-owned payload retained only as a durable source for an attention reference.
+    /// Source-only communications never enter model context or thread-history projections.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_only: bool,
+    /// Recipient-owned inbox state. Unacknowledged attention is persisted before its runtime
+    /// wake; acknowledged state is retained as a source-only marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attention: Option<Box<InterAgentAttention>>,
     pub trigger_turn: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct InterAgentAttention {
+    pub reference: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub acknowledged: bool,
 }
 
 impl InterAgentCommunication {
@@ -771,6 +787,8 @@ impl InterAgentCommunication {
             content,
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
+            source_only: false,
+            attention: None,
             trigger_turn,
         }
     }
@@ -790,6 +808,8 @@ impl InterAgentCommunication {
             content: String::new(),
             encrypted_content: Some(encrypted_content),
             internal_chat_message_metadata_passthrough: None,
+            source_only: false,
+            attention: None,
             trigger_turn,
         }
     }
@@ -4631,6 +4651,8 @@ mod tests {
             content: "review the diff".to_string(),
             encrypted_content: None,
             internal_chat_message_metadata_passthrough: None,
+            source_only: false,
+            attention: None,
             trigger_turn: true,
         };
         communication.set_turn_id_if_missing("turn-1");

@@ -19,6 +19,7 @@ use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -107,6 +108,42 @@ pub(crate) struct AgentCheckpointRead {
     pub(crate) output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) next_offset: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentMessageReadState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentMessageRead {
+    pub(crate) state: AgentMessageReadState,
+    pub(crate) message_ref: String,
+    pub(crate) sender: AgentPath,
+    pub(crate) approximate_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_offset: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentAttentionState {
+    Unread,
+    Read,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentAttentionItem {
+    pub(crate) state: AgentAttentionState,
+    pub(crate) attention_ref: String,
+    pub(crate) sender: AgentPath,
+    pub(crate) kind: String,
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -232,10 +269,26 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
-        communication: InterAgentCommunication,
+        mut communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
+        if communication
+            .attention
+            .as_deref()
+            .is_some_and(|attention| !attention.acknowledged)
+        {
+            communication
+                .id
+                .get_or_insert_with(|| ResponseItemId::new("amsg"));
+            let recipient_thread = state.get_thread(agent_id).await?;
+            recipient_thread
+                .append_rollout_items(&[RolloutItem::InterAgentCommunication(
+                    communication.clone(),
+                )])
+                .await
+                .map_err(|err| CodexErr::Io(std::io::Error::other(err.to_string())))?;
+        }
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
@@ -406,6 +459,192 @@ impl AgentControl {
             output: Some(output[offset..end].to_string()),
             next_offset: (end < output.len()).then_some(end),
         })
+    }
+
+    pub(crate) async fn read_agent_message(
+        &self,
+        current_session_source: &SessionSource,
+        message_ref: &str,
+        offset: usize,
+        max_bytes: usize,
+    ) -> CodexResult<AgentMessageRead> {
+        let Some(reference) = message_ref.strip_prefix("agent-message:") else {
+            return Err(CodexErr::InvalidRequest(
+                "message_ref must start with `agent-message:`".to_string(),
+            ));
+        };
+        let Some((thread_id, message_id)) = reference.split_once(':') else {
+            return Err(CodexErr::InvalidRequest(
+                "message_ref must identify a child thread and message".to_string(),
+            ));
+        };
+        let child_thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| CodexErr::InvalidRequest(format!("invalid message_ref: {err}")))?;
+        let child_metadata = self.ensure_agent_known(child_thread_id)?;
+        let child_path = child_metadata.agent_path.ok_or_else(|| {
+            CodexErr::InvalidRequest("message sender is missing an agent path".to_string())
+        })?;
+        let current_path = current_session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let direct_parent = child_path
+            .as_str()
+            .rsplit_once('/')
+            .and_then(|(parent, _)| AgentPath::try_from(parent).ok());
+        if direct_parent.as_ref() != Some(&current_path) {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "message `{message_ref}` is not owned by {current_path}"
+            )));
+        }
+
+        let state = self.upgrade()?;
+        let history = state
+            .load_stored_thread_history(LoadThreadHistoryParams {
+                thread_id: child_thread_id,
+                include_archived: true,
+            })
+            .await?;
+        let output = history.items.iter().rev().find_map(|item| match item {
+            RolloutItem::InterAgentCommunication(communication)
+                if communication.source_only
+                    && communication
+                        .id
+                        .as_ref()
+                        .is_some_and(|id| id.as_str() == message_id) =>
+            {
+                Some(communication.content.clone())
+            }
+            _ => None,
+        });
+        let Some(output) = output else {
+            return Ok(AgentMessageRead {
+                state: AgentMessageReadState::Unavailable,
+                message_ref: message_ref.to_string(),
+                sender: child_path,
+                approximate_bytes: 0,
+                output_offset: None,
+                output: None,
+                next_offset: None,
+            });
+        };
+        if offset > output.len() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "offset {offset} exceeds message payload size {}",
+                output.len()
+            )));
+        }
+        if !output.is_char_boundary(offset) {
+            return Err(CodexErr::InvalidRequest(format!(
+                "offset {offset} is not a valid UTF-8 boundary"
+            )));
+        }
+        let mut end = offset.saturating_add(max_bytes).min(output.len());
+        while end > offset && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == offset
+            && let Some(ch) = output[offset..].chars().next()
+        {
+            end += ch.len_utf8();
+        }
+        Ok(AgentMessageRead {
+            state: AgentMessageReadState::Available,
+            message_ref: message_ref.to_string(),
+            sender: child_path,
+            approximate_bytes: output.len(),
+            output_offset: Some(offset),
+            output: Some(output[offset..end].to_string()),
+            next_offset: (end < output.len()).then_some(end),
+        })
+    }
+
+    pub(crate) async fn acknowledge_agent_attention(
+        &self,
+        current_thread_id: ThreadId,
+        current_session_source: &SessionSource,
+        turn_id: &str,
+        attention_ref: String,
+    ) -> CodexResult<()> {
+        let agent_path = current_session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let mut acknowledgement = InterAgentCommunication::new(
+            agent_path.clone(),
+            agent_path,
+            Vec::new(),
+            String::new(),
+            false,
+        );
+        acknowledgement.source_only = true;
+        acknowledgement.attention = Some(Box::new(codex_protocol::protocol::InterAgentAttention {
+            reference: attention_ref,
+            acknowledged: true,
+        }));
+        acknowledgement.set_turn_id_if_missing(turn_id);
+        let state = self.upgrade()?;
+        let current_thread = state.get_thread(current_thread_id).await?;
+        current_thread
+            .append_rollout_items(&[RolloutItem::InterAgentCommunication(acknowledgement)])
+            .await
+            .map_err(|err| CodexErr::Io(std::io::Error::other(err.to_string())))
+    }
+
+    pub(crate) async fn list_agent_attention(
+        &self,
+        current_thread_id: ThreadId,
+        include_read: bool,
+    ) -> CodexResult<Vec<AgentAttentionItem>> {
+        let state = self.upgrade()?;
+        let history = state
+            .load_stored_thread_history(LoadThreadHistoryParams {
+                thread_id: current_thread_id,
+                include_archived: true,
+            })
+            .await?;
+        let acknowledged = history
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::InterAgentCommunication(communication) => communication
+                    .attention
+                    .as_deref()
+                    .filter(|attention| attention.acknowledged)
+                    .map(|attention| attention.reference.as_str()),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        Ok(history
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::InterAgentCommunication(communication) => {
+                    let attention = communication
+                        .attention
+                        .as_deref()
+                        .filter(|attention| !attention.acknowledged)?;
+                    let attention_ref = &attention.reference;
+                    let state = if acknowledged.contains(attention_ref.as_str()) {
+                        AgentAttentionState::Read
+                    } else {
+                        AgentAttentionState::Unread
+                    };
+                    if !include_read && state == AgentAttentionState::Read {
+                        return None;
+                    }
+                    Some(AgentAttentionItem {
+                        state,
+                        attention_ref: attention_ref.clone(),
+                        sender: communication.author.clone(),
+                        kind: if attention_ref.starts_with("agent-checkpoint:") {
+                            "completion".to_string()
+                        } else {
+                            "message".to_string()
+                        },
+                    })
+                }
+                _ => None,
+            })
+            .collect())
     }
 
     pub(crate) fn register_session_root(

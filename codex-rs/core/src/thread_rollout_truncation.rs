@@ -23,7 +23,7 @@ pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &Initia
 fn rollout_item_is_user_turn_boundary(item: &RolloutItem) -> bool {
     match item {
         RolloutItem::ResponseItem(item) => is_user_turn_boundary(item),
-        RolloutItem::InterAgentCommunication(_) => true,
+        RolloutItem::InterAgentCommunication(communication) => !communication.source_only,
         _ => false,
     }
 }
@@ -90,7 +90,7 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
                     fork_turn_positions.push(idx);
                 }
             }
-            RolloutItem::InterAgentCommunication(communication) => {
+            RolloutItem::InterAgentCommunication(communication) if !communication.source_only => {
                 rollback_turn_positions.push(idx);
                 if communication.trigger_turn {
                     fork_turn_positions.push(idx);

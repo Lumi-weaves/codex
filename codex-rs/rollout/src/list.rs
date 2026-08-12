@@ -1245,7 +1245,9 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                     }
                 }
                 RolloutItem::InterAgentCommunication(communication) => {
-                    if let Ok(value) = serde_json::to_value(communication.to_model_input_item()) {
+                    if !communication.source_only
+                        && let Ok(value) = serde_json::to_value(communication.to_model_input_item())
+                    {
                         head.push(value);
                     }
                 }
