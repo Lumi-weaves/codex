@@ -691,6 +691,7 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &harness.model_info,
             &harness.session_telemetry,
@@ -863,6 +864,7 @@ async fn responses_websocket_preconnect_is_reused_even_with_header_changes() {
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &harness.model_info,
             &harness.session_telemetry,
@@ -916,6 +918,7 @@ async fn responses_websocket_request_prewarm_is_reused_even_with_header_changes(
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &harness.model_info,
             &harness.session_telemetry,
@@ -1441,6 +1444,7 @@ async fn responses_websocket_emits_reasoning_included_event() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &harness.model_info,
             &harness.session_telemetry,
@@ -1516,6 +1520,7 @@ async fn responses_websocket_emits_rate_limit_events() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &harness.model_info,
             &harness.session_telemetry,
@@ -2187,6 +2192,7 @@ async fn responses_websocket_v2_after_error_uses_full_create_without_previous_re
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
     let mut second_stream = session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt_two,
             &harness.model_info,
             &harness.session_telemetry,
@@ -2276,6 +2282,7 @@ async fn responses_websocket_v2_surfaces_terminal_error_without_close_handshake(
     let responses_metadata = turn_metadata(&harness, /*turn_id*/ None);
     let mut second_stream = session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt_two,
             &harness.model_info,
             &harness.session_telemetry,
@@ -2573,6 +2580,7 @@ async fn stream_until_complete_with_model_info(
     let responses_metadata = turn_metadata(harness, /*turn_id*/ None);
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             prompt,
             model_info,
             &harness.session_telemetry,
@@ -2622,6 +2630,7 @@ async fn stream_until_complete_with_metadata(
 ) {
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             prompt,
             &harness.model_info,
             &harness.session_telemetry,

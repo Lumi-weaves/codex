@@ -718,6 +718,7 @@ async fn drain_to_completed(
 ) -> CodexResult<()> {
     let mut stream = client_session
         .stream(
+            crate::PromptInvocationKind::LocalCompaction,
             prompt,
             &turn_context.model_info,
             &turn_context.session_telemetry,

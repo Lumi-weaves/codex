@@ -248,6 +248,9 @@ enum DebugSubcommand {
     /// Render the effective client-owned model request as JSON.
     PromptReceipt(DebugPromptInputCommand),
 
+    /// Render the versioned model invocation and prompt contribution census as JSON.
+    PromptCensus,
+
     /// Replay a rollout trace bundle and write reduced state JSON.
     #[clap(hide = true)]
     TraceReduce(DebugTraceReduceCommand),
@@ -1639,6 +1642,17 @@ async fn cli_main(
                     DebugPromptOutput::Receipt,
                 )
                 .await?;
+            }
+            DebugSubcommand::PromptCensus => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-census",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::prompt_context_census())?
+                );
             }
             DebugSubcommand::TraceReduce(cmd) => {
                 reject_remote_mode_for_subcommand(
@@ -3302,6 +3316,18 @@ mod tests {
             cmd.images,
             vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
         );
+    }
+
+    #[test]
+    fn debug_prompt_census_parses_without_runtime_configuration() {
+        let cli = MultitoolCli::try_parse_from(["codex", "debug", "prompt-census"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::PromptCensus,
+            }))
+        ));
     }
 
     #[test]

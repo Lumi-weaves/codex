@@ -118,6 +118,7 @@ use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
 use crate::feedback_tags;
+use crate::prompt_census::PromptInvocationKind;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
 use crate::util::emit_feedback_auth_recovery_tags;
@@ -655,6 +656,10 @@ impl ModelClient {
         compaction_trace: &CompactionTraceContext,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<Vec<ResponseItem>> {
+        trace!(
+            invocation_kind = %PromptInvocationKind::RemoteCompaction,
+            "starting model invocation"
+        );
         if prompt.input.is_empty() {
             return Ok(Vec::new());
         }
@@ -759,6 +764,10 @@ impl ModelClient {
         mut extra_headers: ApiHeaderMap,
         api_provider_override: Option<ApiProvider>,
     ) -> Result<RealtimeWebrtcCallStart> {
+        trace!(
+            invocation_kind = %PromptInvocationKind::Realtime,
+            "starting model invocation"
+        );
         // Create the media call over HTTP first, then retain matching auth so realtime can attach
         // the server-side control WebSocket to the call id from that HTTP response.
         let client_setup = self.current_client_setup().await?;
@@ -795,6 +804,10 @@ impl ModelClient {
         effort: Option<ReasoningEffortConfig>,
         session_telemetry: &SessionTelemetry,
     ) -> Result<Vec<ApiMemorySummarizeOutput>> {
+        trace!(
+            invocation_kind = %PromptInvocationKind::MemoryTraceSummarization,
+            "starting model invocation"
+        );
         if raw_memories.is_empty() {
             return Ok(Vec::new());
         }
@@ -1941,6 +1954,10 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
+        trace!(
+            invocation_kind = %PromptInvocationKind::StartupPrewarm,
+            "starting model invocation"
+        );
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
@@ -1994,6 +2011,7 @@ impl ModelClientSession {
     /// branches.
     pub async fn stream(
         &mut self,
+        invocation_kind: PromptInvocationKind,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -2003,6 +2021,7 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        trace!(%invocation_kind, "starting model invocation");
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {

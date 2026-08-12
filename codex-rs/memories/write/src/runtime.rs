@@ -280,6 +280,7 @@ impl MemoryStartupContext {
         .await;
         let mut stream = client_session
             .stream(
+                codex_core::PromptInvocationKind::MemoryExtraction,
                 prompt,
                 &context.model_info,
                 &context.session_telemetry,

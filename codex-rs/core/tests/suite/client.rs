@@ -1534,6 +1534,7 @@ async fn send_request_with_provider(provider: ModelProviderInfo) {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &model_info,
             &session_telemetry,
@@ -3284,6 +3285,7 @@ async fn azure_responses_request_includes_store_and_prefixed_item_ids() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &model_info,
             &session_telemetry,

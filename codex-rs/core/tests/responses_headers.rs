@@ -151,6 +151,7 @@ async fn responses_stream_includes_subagent_header_on_review() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Review,
             &prompt,
             &model_info,
             &session_telemetry,
@@ -287,6 +288,7 @@ async fn responses_stream_includes_subagent_header_on_other() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &model_info,
             &session_telemetry,
@@ -408,6 +410,7 @@ async fn responses_respects_model_info_overrides_from_config() {
 
     let mut stream = client_session
         .stream(
+            codex_core::PromptInvocationKind::Turn,
             &prompt,
             &model_info,
             &session_telemetry,

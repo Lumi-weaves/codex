@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use crate::TurnContext;
 use crate::client_common::Prompt;
 use crate::config::Config;
+use crate::prompt_census::PromptInvocationKind;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::session::Session;
@@ -40,12 +41,6 @@ pub struct PromptRequestReceipt {
     pub request_form: PromptRequestForm,
     pub provider: PromptRequestProvider,
     pub request: ResponsesApiRequest,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PromptInvocationKind {
-    Turn,
 }
 
 #[derive(Debug, Serialize)]
