@@ -1,9 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   deriveRuntimeTraceStats,
   fixtureRuntimeTrace,
+  loadRuntimeTrace,
   parseRuntimeTrace,
 } from "../api/runtime-trace";
 import type { RuntimeTrace, RuntimeTraceResult } from "../api/runtime-trace";
@@ -14,6 +15,15 @@ function fixtureResult(trace = fixtureRuntimeTrace()): RuntimeTraceResult {
 }
 
 describe("runtime trace contract", () => {
+  it("loads the sanitized captured hw1 trace through the same closed parser", async () => {
+    const result = await loadRuntimeTrace();
+    expect(result.source).toBe("captured");
+    expect(result.trace.traceId).toBe("hw1-captured-coordination");
+    expect(result.trace.agents).toHaveLength(3);
+    expect(result.trace.generations).toHaveLength(77);
+    expect(result.trace.operations).toHaveLength(73);
+  });
+
   it("closes the DTO and preserves a valid causal trace", () => {
     const fixture = fixtureRuntimeTrace();
     const withPrivateContent = {
@@ -125,41 +135,31 @@ describe("runtime trace contract", () => {
   });
 });
 
-describe("Agent Operations causal timeline", () => {
-  it("renders agent lanes, generations, terminal, events, and statistics", async () => {
-    render(<AgentOperationsPage loader={async () => fixtureResult()} />);
+describe("Agent Operations Perfetto bridge", () => {
+  it("describes and opens the native runtime trace", async () => {
+    const opener = vi.fn(async () => undefined);
+    render(
+      <AgentOperationsPage
+        loader={async () => fixtureResult()}
+        perfettoOpener={opener}
+      />,
+    );
 
-    expect(await screen.findByText("Main agent")).not.toBeNull();
-    expect(screen.getByText("Subagents")).not.toBeNull();
-    expect(screen.getByText("2 resources · pooled")).not.toBeNull();
-    expect(screen.getByText("terminal · session 183")).not.toBeNull();
-    expect(screen.getByText("main-g1")).not.toBeNull();
-    expect(screen.getByText("luna-g3")).not.toBeNull();
-    expect(screen.getByText("vera-g1")).not.toBeNull();
     expect(
-      screen.getByRole("button", { name: "agent-message: checkpoint" }),
+      await screen.findByRole("heading", {
+        name: "Open this workflow in Perfetto",
+      }),
     ).not.toBeNull();
     expect(screen.getByText("28s")).not.toBeNull();
     expect(screen.getByText("78%")).not.toBeNull();
     expect(screen.getByText("Fixture trace")).not.toBeNull();
-  });
+    expect(screen.getByText("Perfetto TrackEvent proto")).not.toBeNull();
 
-  it("inspects generation joins and completion queue delay", async () => {
-    render(<AgentOperationsPage loader={async () => fixtureResult()} />);
-    const generation = await screen.findByRole("button", { name: /main-g3/ });
-    fireEvent.click(generation);
-    expect(screen.getByText("event-terminal-complete")).not.toBeNull();
-    expect(screen.getByText("event-luna-checkpoint")).not.toBeNull();
-    expect(screen.getByText("Events joined")).not.toBeNull();
-
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "operation-completion: exit 0",
-      }),
-    );
-    expect(screen.getByRole("heading", { name: "exit 0" })).not.toBeNull();
-    expect(screen.getAllByText("1.95s").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("main-g3").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Open in Perfetto" }));
+    expect(opener).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByText("Trace delivered to Perfetto in a new tab."),
+    ).not.toBeNull();
   });
 
   it("shows an empty trace and recovers after a load error", async () => {
@@ -187,7 +187,9 @@ describe("Agent Operations causal timeline", () => {
     );
     await screen.findByText(/Could not load runtime trace: trace unavailable/);
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
-    await screen.findByText("Main agent");
+    await screen.findByRole("heading", {
+      name: "Open this workflow in Perfetto",
+    });
     expect(calls).toBe(2);
   });
 });

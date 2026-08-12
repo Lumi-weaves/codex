@@ -5,10 +5,12 @@
  * output, terminal output, filesystem paths, or message bodies.
  */
 
+import capturedRuntimeTracePayload from "../fixtures/hw1-runtime-trace.json";
+
 export const RUNTIME_TRACE_SCHEMA_VERSION = 1;
 
 export type GenerationOutcome = "tool-call" | "message" | "final";
-export type OperationKind = "terminal";
+export type OperationKind = "terminal" | "wait" | "agent-control" | "tool";
 export type RuntimeEventKind =
   | "user-input"
   | "tool-yield"
@@ -42,7 +44,7 @@ export interface OperationSpan {
   label: string;
   emittedByGenerationId: string;
   startedAt: string;
-  yieldedAt: string;
+  yieldedAt: string | null;
   completedAt: string;
   completionEventId: string;
 }
@@ -73,7 +75,7 @@ export interface RuntimeTrace {
 
 export interface RuntimeTraceResult {
   trace: RuntimeTrace;
-  source: "fixture";
+  source: "captured" | "fixture";
 }
 
 export interface RuntimeTraceStats {
@@ -248,8 +250,8 @@ export function fixtureRuntimeTrace(): RuntimeTrace {
         id: "event-luna-spawn",
         kind: "agent-spawn",
         label: "spawn Luna",
-        occurredAt: at(2.4),
-        enqueuedAt: at(2.4),
+        occurredAt: at(2.9),
+        enqueuedAt: at(2.9),
         emittedByGenerationId: "main-g1",
         sourceOperationId: null,
         sourceAgentId: "agent-main",
@@ -272,8 +274,8 @@ export function fixtureRuntimeTrace(): RuntimeTrace {
         id: "event-vera-spawn",
         kind: "agent-spawn",
         label: "spawn Vera",
-        occurredAt: at(2.6),
-        enqueuedAt: at(2.6),
+        occurredAt: at(2.95),
+        enqueuedAt: at(2.95),
         emittedByGenerationId: "main-g1",
         sourceOperationId: null,
         sourceAgentId: "agent-main",
@@ -434,11 +436,13 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
     if (
       !isRecord(raw) ||
       typeof raw.id !== "string" ||
-      raw.kind !== "terminal" ||
+      !(["terminal", "wait", "agent-control", "tool"] as unknown[]).includes(
+        raw.kind,
+      ) ||
       typeof raw.label !== "string" ||
       typeof raw.emittedByGenerationId !== "string" ||
       timestamp(raw.startedAt) === null ||
-      timestamp(raw.yieldedAt) === null ||
+      (raw.yieldedAt !== null && timestamp(raw.yieldedAt) === null) ||
       timestamp(raw.completedAt) === null ||
       typeof raw.completionEventId !== "string"
     ) {
@@ -446,11 +450,11 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
     }
     operations.push({
       id: raw.id,
-      kind: raw.kind,
+      kind: raw.kind as OperationKind,
       label: raw.label,
       emittedByGenerationId: raw.emittedByGenerationId,
       startedAt: raw.startedAt as string,
-      yieldedAt: raw.yieldedAt as string,
+      yieldedAt: raw.yieldedAt as string | null,
       completedAt: raw.completedAt as string,
       completionEventId: raw.completionEventId,
     });
@@ -577,7 +581,10 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
   for (const operation of operations) {
     const emitter = generationById.get(operation.emittedByGenerationId);
     const operationStart = Date.parse(operation.startedAt);
-    const yieldedAt = Date.parse(operation.yieldedAt);
+    const yieldedAt =
+      operation.yieldedAt === null
+        ? operationStart
+        : Date.parse(operation.yieldedAt);
     const operationEnd = Date.parse(operation.completedAt);
     const completion = eventById.get(operation.completionEventId);
     if (
@@ -639,7 +646,8 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
         occurredAt < Date.parse(sourceOperation.startedAt) ||
         occurredAt > Date.parse(sourceOperation.completedAt) ||
         (event.kind === "tool-yield" &&
-          occurredAt !== Date.parse(sourceOperation.yieldedAt)) ||
+          (sourceOperation.yieldedAt === null ||
+            occurredAt !== Date.parse(sourceOperation.yieldedAt))) ||
         (event.kind === "operation-completion" &&
           sourceOperation.completionEventId !== event.id)
       )
@@ -649,8 +657,7 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
         emitter === undefined ||
         event.sourceOperationId !== null ||
         event.sourceAgentId !== emitter.agentId ||
-        occurredAt < Date.parse(emitter.startedAt) ||
-        occurredAt > Date.parse(emitter.completedAt)
+        occurredAt < Date.parse(emitter.startedAt)
       )
         return null;
 
@@ -660,10 +667,11 @@ export function parseRuntimeTrace(value: unknown): RuntimeTrace | null {
         );
         if (
           spawnedAgent?.parentAgentId !== event.sourceAgentId ||
-          spawnedAgent.spawnedByGenerationId !== event.emittedByGenerationId
+          spawnedAgent.spawnedByGenerationId !== event.emittedByGenerationId ||
+          occurredAt < Date.parse(emitter.completedAt)
         )
           return null;
-      }
+      } else if (occurredAt > Date.parse(emitter.completedAt)) return null;
     }
   }
 
@@ -779,5 +787,7 @@ export function deriveRuntimeTraceStats(
 }
 
 export async function loadRuntimeTrace(): Promise<RuntimeTraceResult> {
-  return { trace: fixtureRuntimeTrace(), source: "fixture" };
+  const trace = parseRuntimeTrace(capturedRuntimeTracePayload);
+  if (trace === null) throw new Error("captured runtime trace is invalid");
+  return { trace, source: "captured" };
 }
