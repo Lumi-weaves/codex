@@ -5,6 +5,7 @@ use crate::context::InternalModelContextFragment;
 use crate::context::SubagentNotification;
 use crate::context::UnifiedExecCompletionEvent;
 use crate::context::UnifiedExecOutputAvailableEvent;
+use crate::context::UnifiedExecResourceAuditEvent;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ResponseItem;
@@ -168,6 +169,15 @@ fn detects_unified_exec_output_available_fragment() {
     assert!(is_contextual_user_fragment(&ContentItem::InputText {
         text: attention.render(),
     }));
+}
+
+#[test]
+fn detects_resource_audit_fragment() {
+    let audit = UnifiedExecResourceAuditEvent::new(1, 300, vec![42], Vec::new());
+    let item = ContentItem::InputText {
+        text: audit.render(),
+    };
+    assert!(is_contextual_user_fragment(&item));
 }
 
 #[test]

@@ -5,6 +5,7 @@
 
 use crate::context::UnifiedExecCompletionEvent;
 use crate::context::UnifiedExecOutputAvailableEvent;
+use crate::context::UnifiedExecResourceAuditEvent;
 
 /// Internal session event produced inside the process.
 #[derive(Debug)]
@@ -16,4 +17,6 @@ pub(crate) enum InternalSessionEvent {
     /// An interactive background terminal produced unread output and may need
     /// model input. Carries a bounded, model-visible attention fragment.
     UnifiedExecOutputAvailable(UnifiedExecOutputAvailableEvent),
+    /// The owning session's periodic, output-free active-resource panel.
+    ResourceAudit(UnifiedExecResourceAuditEvent),
 }

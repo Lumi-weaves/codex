@@ -2493,3 +2493,18 @@ fn unified_exec_completion_is_not_a_user_turn_boundary() {
     };
     assert!(!is_user_turn_boundary(&item));
 }
+
+#[test]
+fn resource_audit_is_not_a_user_turn_boundary() {
+    let audit = crate::context::UnifiedExecResourceAuditEvent::new(1, 300, vec![4242], Vec::new());
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: audit.render(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(!is_user_turn_boundary(&item));
+}

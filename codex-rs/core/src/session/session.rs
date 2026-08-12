@@ -6,6 +6,7 @@ use crate::config::ConstraintError;
 use crate::environment_selection::ThreadEnvironments;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::awaited_terminals::AwaitedTerminals;
+use crate::session::resource_audit::ResourceAuditScheduler;
 use crate::session::turn_context::EnvironmentConfig;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillError;
@@ -63,6 +64,13 @@ pub(crate) struct Session {
     /// completion must keep the session status non-final (see
     /// [`awaited_terminals`] for semantics).
     pub(crate) awaited_terminals: AwaitedTerminals,
+    /// Periodic owner-local audit cadence, armed only while awaited resources
+    /// exist. The sleeping task holds only a weak session reference.
+    pub(crate) resource_audit: ResourceAuditScheduler,
+    /// Serializes awaited-resource membership transitions with audit
+    /// arm/disarm/reconfiguration so an empty→active→empty race cannot leave
+    /// a stray sleeping audit task behind.
+    pub(crate) resource_audit_transition_lock: std::sync::Mutex<()>,
     /// Weak sender for Core-private internal session events on the single
     /// session ingress FIFO. Internal machinery can only upgrade this while
     /// the session's submission channel is alive, so it can never keep the
@@ -1228,6 +1236,8 @@ impl Session {
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
                 awaited_terminals: AwaitedTerminals::new(),
+                resource_audit: ResourceAuditScheduler::new(),
+                resource_audit_transition_lock: std::sync::Mutex::new(()),
                 internal_session_event_tx,
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,

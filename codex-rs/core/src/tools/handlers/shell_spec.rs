@@ -183,6 +183,30 @@ pub fn create_list_background_terminals_tool() -> ToolSpec {
     })
 }
 
+pub fn create_configure_resource_audit_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "interval_seconds".to_string(),
+        JsonSchema::number(Some(
+            "New periodic audit interval in seconds (10-3600). Omit to inspect the current configuration without changing it. Changing it restarts the deadline only when resources are active."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "configure_resource_audit".to_string(),
+        description: "Reads or adjusts the owner-local periodic audit cadence for active background resources. The default is 300 seconds. The audit is armed only while resources are held; ordinary completion, terminal-output, agent, approval, and user events may wake earlier but do not postpone its deadline."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ Some(vec![]),
+            /*additional_properties*/ Some(false.into()),
+        ),
+        output_schema: Some(resource_audit_configuration_output_schema()),
+    })
+}
+
 pub fn create_read_terminal_result_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -237,6 +261,19 @@ fn terminal_result_read_output_schema() -> Value {
             "next_offset": { "type": "number" }
         },
         "required": ["state", "result_ref"],
+        "additionalProperties": false
+    })
+}
+
+fn resource_audit_configuration_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "interval_seconds": { "type": "number" },
+            "armed": { "type": "boolean" },
+            "active_resource_count": { "type": "number" }
+        },
+        "required": ["interval_seconds", "armed", "active_resource_count"],
         "additionalProperties": false
     })
 }

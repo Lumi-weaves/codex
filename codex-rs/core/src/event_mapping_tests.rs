@@ -5,6 +5,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
 use crate::context::UnifiedExecCompletionEvent;
+use crate::context::UnifiedExecResourceAuditEvent;
 use codex_protocol::ResponseItemId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::HookPromptFragment;
@@ -409,6 +410,24 @@ fn unified_exec_completion_is_not_mapped_to_a_user_message_item() {
     assert!(
         parse_turn_item(&item).is_none(),
         "completion context must not surface as a user message turn item"
+    );
+}
+
+#[test]
+fn resource_audit_is_not_mapped_to_a_user_message_item() {
+    let audit = UnifiedExecResourceAuditEvent::new(1, 300, vec![4242], Vec::new());
+    let item = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: audit.render(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    assert!(
+        parse_turn_item(&item).is_none(),
+        "resource audit context must not surface as a user message turn item"
     );
 }
 

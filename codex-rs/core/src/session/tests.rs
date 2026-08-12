@@ -5915,6 +5915,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         awaited_terminals: super::awaited_terminals::AwaitedTerminals::new(),
+        resource_audit: super::resource_audit::ResourceAuditScheduler::new(),
+        resource_audit_transition_lock: std::sync::Mutex::new(()),
         internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
@@ -7979,6 +7981,43 @@ async fn submission_loop_admits_internal_event_on_the_shared_fifo() {
     .expect("the completion must be consumed by the wake's safe boundary");
 }
 
+/// A periodic resource panel uses the same serialized internal ingress as
+/// other runtime events and can wake an idle owner without resolving any
+/// awaited resource.
+#[tokio::test]
+async fn submission_loop_admits_resource_audit_without_resolving_resources() {
+    let (mut session, _turn_context, mut rx_event) = make_session_and_context_with_rx().await;
+    let (tx_ingress, rx_ingress) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = tx_ingress.downgrade();
+    let loop_session = Arc::clone(&session);
+    let loop_config = session.get_config().await;
+    let loop_handle = tokio::spawn(async move {
+        submission_loop(loop_session, loop_config, rx_ingress).await;
+    });
+    let _loop_guard = LoopAbortOnDrop(loop_handle);
+
+    session.register_awaited_terminal(4246).await;
+    tx_ingress
+        .send(super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::ResourceAudit(
+                crate::context::UnifiedExecResourceAuditEvent::new(1, 300, vec![4246], Vec::new()),
+            ),
+        ))
+        .await
+        .expect("internal resource audit");
+    wait_for_session_event(&mut rx_event, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    assert!(
+        session.has_awaited_terminals().await,
+        "an audit observes ownership but never resolves it"
+    );
+    session.resolve_awaited_terminal(4246).await;
+}
+
 /// A `TurnComplete` stays a real turn terminal event with final text, but
 /// while awaited terminals remain the session status stays non-final
 /// (`Running`); resolving the last terminal with no continuation restores the
@@ -8024,6 +8063,139 @@ async fn turn_complete_with_awaited_terminals_stays_running_then_cleanup_restore
         session.agent_status.borrow().clone(),
         AgentStatus::Completed(Some("final words".to_string()))
     );
+}
+
+/// The audit cadence is session-owned: it arms on the first resource, is not
+/// postponed when more resources or unrelated runtime events arrive, and
+/// disarms as soon as the authoritative awaited set becomes empty.
+#[tokio::test]
+async fn resource_audit_arms_on_first_resource_keeps_deadline_and_disarms_on_last() {
+    let (mut session, _turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let (tx_ingress, rx_ingress) = async_channel::bounded(8);
+    Arc::get_mut(&mut session)
+        .expect("session must be uniquely held")
+        .internal_session_event_tx = tx_ingress.downgrade();
+
+    let initial = session
+        .configure_resource_audit(Some(10))
+        .await
+        .expect("minimum cadence is valid");
+    assert_eq!(initial.interval_seconds, 10);
+    assert!(!initial.armed);
+    assert_eq!(initial.active_resource_count, 0);
+
+    tokio::time::pause();
+    session.register_awaited_terminal(41).await;
+    tokio::task::yield_now().await;
+    let armed = session
+        .configure_resource_audit(None)
+        .await
+        .expect("read configuration");
+    assert!(armed.armed);
+    assert_eq!(armed.active_resource_count, 1);
+
+    tokio::time::advance(StdDuration::from_secs(6)).await;
+    tokio::task::yield_now().await;
+    assert!(rx_ingress.try_recv().is_err());
+
+    // Neither a new resource nor an unrelated early event resets the audit
+    // deadline that began when resource 41 was registered.
+    session.register_awaited_terminal(42).await;
+    tx_ingress
+        .send(super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::UnifiedExecOutputAvailable(
+                crate::context::UnifiedExecOutputAvailableEvent::new(41, 0, 1, 1, 0, "x"),
+            ),
+        ))
+        .await
+        .expect("early runtime event");
+    assert!(matches!(
+        rx_ingress.recv().await.expect("early event"),
+        super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::UnifiedExecOutputAvailable(_)
+        )
+    ));
+
+    tokio::time::advance(StdDuration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    let audit = rx_ingress.recv().await.expect("audit at original deadline");
+    let super::SessionIngress::Internal(
+        super::internal_event::InternalSessionEvent::ResourceAudit(audit),
+    ) = audit
+    else {
+        panic!("expected resource audit");
+    };
+    let rendered = audit.render();
+    assert!(rendered.contains("\"active_resource_count\":2"));
+    assert!(rendered.contains("\"interval_seconds\":10"));
+
+    // An explicit owner adjustment is the one operation that intentionally
+    // restarts the cadence from now.
+    let changed = session
+        .configure_resource_audit(Some(20))
+        .await
+        .expect("change active cadence");
+    assert_eq!(changed.interval_seconds, 20);
+    assert!(changed.armed);
+    tokio::task::yield_now().await;
+    tokio::time::advance(StdDuration::from_secs(19)).await;
+    tokio::task::yield_now().await;
+    assert!(rx_ingress.try_recv().is_err());
+    tokio::time::advance(StdDuration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+    assert!(matches!(
+        rx_ingress.recv().await.expect("audit at adjusted deadline"),
+        super::SessionIngress::Internal(
+            super::internal_event::InternalSessionEvent::ResourceAudit(_)
+        )
+    ));
+
+    session.resolve_awaited_terminal(41).await;
+    assert!(session.resource_audit.is_armed());
+    session.resolve_awaited_terminal(42).await;
+    assert!(!session.resource_audit.is_armed());
+    tokio::time::advance(StdDuration::from_secs(20)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        rx_ingress.try_recv().is_err(),
+        "no audit may wake an owner with no active resources"
+    );
+    tokio::time::resume();
+}
+
+#[tokio::test]
+async fn resource_audit_configuration_rejects_out_of_range_intervals() {
+    let (session, _turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    assert_eq!(
+        session.configure_resource_audit(Some(9)).await,
+        Err("interval_seconds must be between 10 and 3600".to_string())
+    );
+    assert_eq!(
+        session.configure_resource_audit(Some(3601)).await,
+        Err("interval_seconds must be between 10 and 3600".to_string())
+    );
+    assert_eq!(
+        session
+            .configure_resource_audit(None)
+            .await
+            .expect("read configuration")
+            .interval_seconds,
+        super::resource_audit::DEFAULT_RESOURCE_AUDIT_INTERVAL_SECONDS
+    );
+}
+
+#[tokio::test]
+async fn resource_audit_is_local_to_the_resource_owner() {
+    let (owner, _turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let (other, _turn_context, _rx_event) = make_session_and_context_with_rx().await;
+
+    owner.register_awaited_terminal(77).await;
+    assert!(owner.resource_audit.is_armed());
+    assert_eq!(owner.awaited_terminal_count().await, 1);
+    assert!(!other.resource_audit.is_armed());
+    assert_eq!(other.awaited_terminal_count().await, 0);
+
+    owner.resolve_awaited_terminal(77).await;
 }
 
 /// With no awaited terminals a `TurnComplete` is a normal final completion
@@ -9112,6 +9284,8 @@ where
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         awaited_terminals: super::awaited_terminals::AwaitedTerminals::new(),
+        resource_audit: super::resource_audit::ResourceAuditScheduler::new(),
+        resource_audit_transition_lock: std::sync::Mutex::new(()),
         internal_session_event_tx: dead_internal_tx(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,

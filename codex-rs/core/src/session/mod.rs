@@ -213,6 +213,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod resource_audit;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;
@@ -2045,8 +2046,14 @@ impl Session {
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn register_awaited_terminal(&self, process_id: i32) {
-        self.awaited_terminals.register(process_id).await;
+    pub(crate) async fn register_awaited_terminal(self: &Arc<Self>, process_id: i32) {
+        let _transition = self
+            .resource_audit_transition_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.awaited_terminals.register(process_id) {
+            self.arm_resource_audit();
+        }
     }
 
     /// Resolve an awaited terminal id after its completion was admitted or it
@@ -2055,9 +2062,17 @@ impl Session {
     /// restores the held-back `Completed` status so the session never stays
     /// permanently non-final.
     pub(crate) async fn resolve_awaited_terminal(&self, process_id: i32) {
-        if !self.awaited_terminals.resolve(process_id).await {
+        let transition = self
+            .resource_audit_transition_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.awaited_terminals.resolve(process_id) {
             return;
         }
+        if self.awaited_terminals.is_empty() {
+            self.resource_audit.disarm();
+        }
+        drop(transition);
         self.maybe_restore_awaited_finality().await;
         self.emit_thread_idle_lifecycle_if_idle().await;
     }
@@ -2067,7 +2082,7 @@ impl Session {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn awaited_terminal_ids(&self) -> Vec<i32> {
-        self.awaited_terminals.ids().await
+        self.awaited_terminals.ids()
     }
 
     /// Query the number of currently awaited terminal ids.
@@ -2075,7 +2090,7 @@ impl Session {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn awaited_terminal_count(&self) -> usize {
-        self.awaited_terminals.count().await
+        self.awaited_terminals.count()
     }
 
     /// Whether any terminal id is currently awaited.
@@ -2083,7 +2098,7 @@ impl Session {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn has_awaited_terminals(&self) -> bool {
-        !self.awaited_terminals.is_empty().await
+        !self.awaited_terminals.is_empty()
     }
 
     /// Clear every awaited terminal id (cleanup/disposal), then restore the
@@ -2092,11 +2107,108 @@ impl Session {
     // session tests today.
     #[allow(dead_code)]
     pub(crate) async fn clear_awaited_terminals(&self) {
-        if !self.awaited_terminals.clear().await {
+        let transition = self
+            .resource_audit_transition_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !self.awaited_terminals.clear() {
             return;
         }
+        self.resource_audit.disarm();
+        drop(transition);
         self.maybe_restore_awaited_finality().await;
         self.emit_thread_idle_lifecycle_if_idle().await;
+    }
+
+    fn arm_resource_audit(self: &Arc<Self>) {
+        let weak_session = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            loop {
+                let Some(session) = weak_session.upgrade() else {
+                    return;
+                };
+                let interval = session.resource_audit.interval();
+                drop(session);
+
+                tokio::time::sleep(interval).await;
+
+                let Some(session) = weak_session.upgrade() else {
+                    return;
+                };
+                let awaited_ids = session.awaited_terminal_ids().await;
+                if awaited_ids.is_empty() {
+                    return;
+                }
+                let event = session
+                    .build_resource_audit_event(
+                        session.resource_audit.next_sequence(),
+                        session.resource_audit.interval_seconds(),
+                        awaited_ids,
+                    )
+                    .await;
+                let Some(tx) = session.internal_session_event_tx.upgrade() else {
+                    return;
+                };
+                drop(session);
+                if tx
+                    .send(SessionIngress::Internal(
+                        self::internal_event::InternalSessionEvent::ResourceAudit(event),
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        self.resource_audit.replace_task(task);
+    }
+
+    pub(crate) async fn configure_resource_audit(
+        self: &Arc<Self>,
+        interval_seconds: Option<u64>,
+    ) -> Result<crate::context::ResourceAuditConfiguration, String> {
+        let _transition = self
+            .resource_audit_transition_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(interval_seconds) = interval_seconds {
+            if !(self::resource_audit::MIN_RESOURCE_AUDIT_INTERVAL_SECONDS
+                ..=self::resource_audit::MAX_RESOURCE_AUDIT_INTERVAL_SECONDS)
+                .contains(&interval_seconds)
+            {
+                return Err(format!(
+                    "interval_seconds must be between {} and {}",
+                    self::resource_audit::MIN_RESOURCE_AUDIT_INTERVAL_SECONDS,
+                    self::resource_audit::MAX_RESOURCE_AUDIT_INTERVAL_SECONDS,
+                ));
+            }
+            self.resource_audit.set_interval_seconds(interval_seconds);
+            self.resource_audit.disarm();
+            if !self.awaited_terminals.is_empty() {
+                self.arm_resource_audit();
+            }
+        }
+
+        Ok(crate::context::ResourceAuditConfiguration {
+            interval_seconds: self.resource_audit.interval_seconds(),
+            armed: self.resource_audit.is_armed(),
+            active_resource_count: self.awaited_terminals.count(),
+        })
+    }
+
+    async fn build_resource_audit_event(
+        &self,
+        sequence: u64,
+        interval_seconds: u64,
+        awaited_ids: Vec<i32>,
+    ) -> crate::context::UnifiedExecResourceAuditEvent {
+        crate::context::UnifiedExecResourceAuditEvent::new(
+            sequence,
+            interval_seconds,
+            awaited_ids,
+            self.list_background_terminals().await,
+        )
     }
 
     /// Narrowest safe finality bookkeeping: once the awaited set is empty and
@@ -2108,13 +2220,13 @@ impl Session {
     /// tail emits the thread-idle lifecycle itself; `resolve`/`clear` emit it
     /// after this returns).
     pub(crate) async fn maybe_restore_awaited_finality(&self) {
-        if !self.awaited_terminals.is_empty().await
+        if !self.awaited_terminals.is_empty()
             || self.active_turn.lock().await.is_some()
             || self.input_queue.has_pending_session_inputs().await
         {
             return;
         }
-        let waiting_final_message = self.awaited_terminals.take_waiting_final().await;
+        let waiting_final_message = self.awaited_terminals.take_waiting_final();
         if matches!(self.agent_status.borrow().clone(), AgentStatus::Running) {
             self.agent_status
                 .send_replace(AgentStatus::Completed(waiting_final_message));
@@ -2209,7 +2321,7 @@ impl Session {
         // Record the last known agent status.
         let mut suppress_parent_completion = false;
         if let Some(status) = agent_status_from_event(&event.msg) {
-            let (status, suppress) = self.awaited_terminal_status(&event.msg, status).await;
+            let (status, suppress) = self.awaited_terminal_status(&event.msg, status);
             suppress_parent_completion = suppress;
             self.agent_status.send_replace(status);
         }
@@ -2229,21 +2341,16 @@ impl Session {
     /// is retained so a later cleanup with no continuation can restore a
     /// truthful `Completed`. A `TurnComplete` with zero awaited terminals is
     /// a normal final completion and supersedes any retained message.
-    async fn awaited_terminal_status(
-        &self,
-        msg: &EventMsg,
-        status: AgentStatus,
-    ) -> (AgentStatus, bool) {
+    fn awaited_terminal_status(&self, msg: &EventMsg, status: AgentStatus) -> (AgentStatus, bool) {
         let EventMsg::TurnComplete(completion) = msg else {
             return (status, false);
         };
-        if self.awaited_terminals.is_empty().await {
-            self.awaited_terminals.clear_waiting_final().await;
+        if self.awaited_terminals.is_empty() {
+            self.awaited_terminals.clear_waiting_final();
             return (status, false);
         }
         self.awaited_terminals
-            .note_waiting_final(completion.last_agent_message.clone())
-            .await;
+            .note_waiting_final(completion.last_agent_message.clone());
         (AgentStatus::Running, true)
     }
 

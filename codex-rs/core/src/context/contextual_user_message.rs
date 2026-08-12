@@ -14,6 +14,7 @@ use super::SubagentNotification;
 use super::TurnAborted;
 use super::UnifiedExecCompletionEvent;
 use super::UnifiedExecOutputAvailableEvent;
+use super::UnifiedExecResourceAuditEvent;
 use super::UserInstructions;
 use super::UserShellCommand;
 use super::world_state::EnvironmentsState;
@@ -33,6 +34,7 @@ const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
     LegacyModelMismatchWarning::matches_text,
     UnifiedExecCompletionEvent::matches_text,
     UnifiedExecOutputAvailableEvent::matches_text,
+    UnifiedExecResourceAuditEvent::matches_text,
 ];
 
 fn is_standard_contextual_user_text(text: &str) -> bool {

@@ -34,6 +34,7 @@ mod token_budget_context;
 mod turn_aborted;
 mod unified_exec_background_attention;
 mod unified_exec_background_completion;
+mod unified_exec_resource_audit;
 mod user_instructions;
 mod user_shell_command;
 pub(crate) mod world_state;
@@ -93,5 +94,7 @@ pub(crate) use unified_exec_background_completion::UNIFIED_EXEC_RESULT_CWD_MAX_B
 pub(crate) use unified_exec_background_completion::UnifiedExecCompletionEvent;
 pub(crate) use unified_exec_background_completion::bound_fragment_text;
 pub(crate) use unified_exec_background_completion::decode_lossy_one_for_one;
+pub(crate) use unified_exec_resource_audit::ResourceAuditConfiguration;
+pub(crate) use unified_exec_resource_audit::UnifiedExecResourceAuditEvent;
 pub(crate) use user_instructions::UserInstructions;
 pub(crate) use user_shell_command::UserShellCommand;

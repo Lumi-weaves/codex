@@ -42,7 +42,7 @@ impl Session {
     pub(crate) async fn emit_thread_idle_lifecycle_if_idle(&self) {
         if self.active_turn.lock().await.is_some()
             || self.input_queue.has_trigger_turn_session_inputs().await
-            || !self.awaited_terminals.is_empty().await
+            || !self.awaited_terminals.is_empty()
         {
             return;
         }

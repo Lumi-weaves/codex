@@ -353,6 +353,16 @@ async fn handle_internal_session_event(
                 .await;
             sess.maybe_start_turn_for_pending_work().await;
         }
+        super::internal_event::InternalSessionEvent::ResourceAudit(audit) => {
+            sess.input_queue
+                .enqueue_pending_session_input(
+                    TurnInput::ResponseItem(crate::context::ContextualUserFragment::into(audit)),
+                    /*trigger_turn*/ true,
+                    /*parent_turn_id*/ None,
+                )
+                .await;
+            sess.maybe_start_turn_for_pending_work().await;
+        }
     }
 }
 

@@ -11,6 +11,7 @@ use crate::tools::effective_tool_mode;
 use crate::tools::handlers::ApplyPatchHandler;
 use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
+use crate::tools::handlers::ConfigureResourceAuditHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
 use crate::tools::handlers::ExecCommandHandler;
@@ -918,6 +919,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
             ));
             registry.add(ListBackgroundTerminalsHandler);
             if features.enabled(Feature::UnifiedExecCompletionWake) {
+                registry.add(ConfigureResourceAuditHandler);
                 registry.add(ReadTerminalResultHandler);
             }
 

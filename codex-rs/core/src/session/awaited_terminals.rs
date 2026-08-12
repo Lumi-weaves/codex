@@ -18,7 +18,8 @@
 
 use std::collections::HashSet;
 
-use tokio::sync::Mutex;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 /// Session-scoped awaited-terminal registry (see module docs).
 #[derive(Default)]
@@ -44,7 +45,8 @@ impl AwaitedTerminals {
         Self::default()
     }
 
-    /// Register a live terminal id that was yielded to the model.
+    /// Register a live terminal id that was yielded to the model. Returns true
+    /// only when this insertion transitions the set from empty to active.
     ///
     /// Expected to be called while a turn is active (from the tool-result
     /// path that hands the model a still-running terminal), so the session is
@@ -52,42 +54,44 @@ impl AwaitedTerminals {
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn register(&self, process_id: i32) {
-        self.state.lock().await.awaited.insert(process_id);
+    pub(crate) fn register(&self, process_id: i32) -> bool {
+        let mut state = self.lock_state();
+        let was_empty = state.awaited.is_empty();
+        state.awaited.insert(process_id) && was_empty
     }
 
     /// Resolve a terminal id after its completion was admitted or it was
     /// observed/disposed synchronously. Returns whether the id was awaited.
-    pub(crate) async fn resolve(&self, process_id: i32) -> bool {
-        self.state.lock().await.awaited.remove(&process_id)
+    pub(crate) fn resolve(&self, process_id: i32) -> bool {
+        self.lock_state().awaited.remove(&process_id)
     }
 
     /// Snapshot of the currently awaited terminal ids (unsorted).
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn ids(&self) -> Vec<i32> {
-        self.state.lock().await.awaited.iter().copied().collect()
+    pub(crate) fn ids(&self) -> Vec<i32> {
+        self.lock_state().awaited.iter().copied().collect()
     }
 
     /// Number of currently awaited terminal ids.
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn count(&self) -> usize {
-        self.state.lock().await.awaited.len()
+    pub(crate) fn count(&self) -> usize {
+        self.lock_state().awaited.len()
     }
 
-    pub(crate) async fn is_empty(&self) -> bool {
-        self.state.lock().await.awaited.is_empty()
+    pub(crate) fn is_empty(&self) -> bool {
+        self.lock_state().awaited.is_empty()
     }
 
     /// Resolve every awaited terminal id at once (cleanup/disposal).
     // Integration API for the unified-exec tool-result path; exercised by
     // session tests today.
     #[allow(dead_code)]
-    pub(crate) async fn clear(&self) -> bool {
-        let mut state = self.state.lock().await;
+    pub(crate) fn clear(&self) -> bool {
+        let mut state = self.lock_state();
         let changed = !state.awaited.is_empty();
         state.awaited.clear();
         changed
@@ -101,21 +105,27 @@ impl AwaitedTerminals {
     /// turn) must not erase the model's final words from an earlier
     /// suppressed turn. The most recent waiting *message* therefore always
     /// wins while `None` never clobbers a retained message.
-    pub(crate) async fn note_waiting_final(&self, last_agent_message: Option<String>) {
+    pub(crate) fn note_waiting_final(&self, last_agent_message: Option<String>) {
         if let Some(message) = last_agent_message {
-            self.state.lock().await.waiting_final_message = Some(message);
+            self.lock_state().waiting_final_message = Some(message);
         }
     }
 
     /// Drop the retained waiting final message because a real final status
     /// superseded it.
-    pub(crate) async fn clear_waiting_final(&self) {
-        self.state.lock().await.waiting_final_message = None;
+    pub(crate) fn clear_waiting_final(&self) {
+        self.lock_state().waiting_final_message = None;
     }
 
     /// Take (and clear) the retained waiting final message, if any.
-    pub(crate) async fn take_waiting_final(&self) -> Option<String> {
-        self.state.lock().await.waiting_final_message.take()
+    pub(crate) fn take_waiting_final(&self) -> Option<String> {
+        self.lock_state().waiting_final_message.take()
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, AwaitedTerminalState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -123,55 +133,47 @@ impl AwaitedTerminals {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn register_query_resolve_and_clear() {
+    #[test]
+    fn register_query_resolve_and_clear() {
         let registry = AwaitedTerminals::new();
-        assert!(registry.is_empty().await);
-        assert_eq!(registry.count().await, 0);
+        assert!(registry.is_empty());
+        assert_eq!(registry.count(), 0);
 
-        registry.register(41).await;
-        registry.register(42).await;
-        registry.register(42).await; // duplicate is idempotent
-        assert!(!registry.is_empty().await);
-        assert_eq!(registry.count().await, 2);
-        let mut ids = registry.ids().await;
+        assert!(registry.register(41), "first id enters active state");
+        assert!(!registry.register(42), "additional id keeps active state");
+        assert!(!registry.register(42), "duplicate is idempotent");
+        assert!(!registry.is_empty());
+        assert_eq!(registry.count(), 2);
+        let mut ids = registry.ids();
         ids.sort_unstable();
         assert_eq!(ids, vec![41, 42]);
 
-        assert!(registry.resolve(41).await);
-        assert_eq!(registry.count().await, 1);
-        assert!(!registry.resolve(99).await, "unknown id resolves to false");
+        assert!(registry.resolve(41));
+        assert_eq!(registry.count(), 1);
+        assert!(!registry.resolve(99), "unknown id resolves to false");
 
-        assert!(registry.clear().await);
-        assert!(!registry.clear().await, "clearing twice is unchanged");
-        assert!(registry.is_empty().await);
-        assert_eq!(registry.count().await, 0);
+        assert!(registry.clear());
+        assert!(!registry.clear(), "clearing twice is unchanged");
+        assert!(registry.is_empty());
+        assert_eq!(registry.count(), 0);
     }
 
-    #[tokio::test]
-    async fn waiting_final_message_keeps_most_recent_message() {
+    #[test]
+    fn waiting_final_message_keeps_most_recent_message() {
         let registry = AwaitedTerminals::new();
-        assert_eq!(registry.take_waiting_final().await, None);
+        assert_eq!(registry.take_waiting_final(), None);
 
-        registry.note_waiting_final(Some("first".to_string())).await;
-        registry
-            .note_waiting_final(Some("second".to_string()))
-            .await;
-        assert_eq!(
-            registry.take_waiting_final().await,
-            Some("second".to_string())
-        );
+        registry.note_waiting_final(Some("first".to_string()));
+        registry.note_waiting_final(Some("second".to_string()));
+        assert_eq!(registry.take_waiting_final(), Some("second".to_string()));
 
         // A message-less suppressed completion must not erase the retained
         // final message.
-        registry.note_waiting_final(Some("third".to_string())).await;
-        registry.note_waiting_final(None).await;
-        assert_eq!(
-            registry.take_waiting_final().await,
-            Some("third".to_string())
-        );
+        registry.note_waiting_final(Some("third".to_string()));
+        registry.note_waiting_final(None);
+        assert_eq!(registry.take_waiting_final(), Some("third".to_string()));
 
-        registry.clear_waiting_final().await;
-        assert_eq!(registry.take_waiting_final().await, None);
+        registry.clear_waiting_final();
+        assert_eq!(registry.take_waiting_final(), None);
     }
 }

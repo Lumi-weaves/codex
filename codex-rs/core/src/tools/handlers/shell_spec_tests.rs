@@ -202,6 +202,17 @@ fn list_background_terminals_tool_matches_expected_spec() {
 }
 
 #[test]
+fn configure_resource_audit_tool_exposes_bounded_optional_cadence() {
+    let tool = create_configure_resource_audit_tool();
+    let ToolSpec::Function(tool) = tool else {
+        panic!("expected function tool spec");
+    };
+    assert_eq!(tool.name, "configure_resource_audit");
+    assert!(tool.description.contains("default is 300 seconds"));
+    assert!(has_parameter(&ToolSpec::Function(tool), "interval_seconds"));
+}
+
+#[test]
 fn request_permissions_tool_includes_full_permission_schema() {
     let tool =
         create_request_permissions_tool("Request extra permissions for this turn.".to_string());

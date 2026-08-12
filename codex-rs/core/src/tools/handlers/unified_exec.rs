@@ -17,11 +17,13 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::tools::handlers::parse_arguments;
 
+mod configure_resource_audit;
 mod exec_command;
 mod list_background_terminals;
 mod terminal_result;
 mod write_stdin;
 
+pub use configure_resource_audit::ConfigureResourceAuditHandler;
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
 pub use list_background_terminals::ListBackgroundTerminalsHandler;

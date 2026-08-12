@@ -554,6 +554,40 @@ async fn list_background_terminals_returns_empty_result_with_no_live_terminals()
     );
 }
 
+#[tokio::test]
+async fn configure_resource_audit_reads_default_and_validates_updates() {
+    let invocation = invocation_for_payload(
+        "configure_resource_audit",
+        "audit-config",
+        ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+    )
+    .await;
+    let output = ConfigureResourceAuditHandler
+        .handle(invocation)
+        .await
+        .expect("configuration read should succeed");
+    assert_eq!(
+        list_background_terminals_output_text(output.as_ref()),
+        r#"{"interval_seconds":300,"armed":false,"active_resource_count":0}"#
+    );
+
+    let invocation = invocation_for_payload(
+        "configure_resource_audit",
+        "audit-config-invalid",
+        ToolPayload::Function {
+            arguments: r#"{"interval_seconds":9}"#.to_string(),
+        },
+    )
+    .await;
+    let error = match ConfigureResourceAuditHandler.handle(invocation).await {
+        Ok(_) => panic!("out-of-range cadence should fail"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("between 10 and 3600"));
+}
+
 #[test]
 fn list_background_terminals_result_renders_existing_fields() {
     use crate::codex_thread::BackgroundTerminalInfo;
