@@ -324,6 +324,44 @@ pub fn create_list_agents_tool() -> ToolSpec {
     })
 }
 
+pub fn create_read_agent_checkpoints_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "checkpoint_refs".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(/*description*/ None),
+                Some("One to eight checkpoint refs from agent-attention events.".to_string()),
+            ),
+        ),
+        (
+            "offset".to_string(),
+            JsonSchema::number(Some(
+                "UTF-8 byte offset applied to each selected checkpoint. Defaults to 0.".to_string(),
+            )),
+        ),
+        (
+            "max_bytes".to_string(),
+            JsonSchema::number(Some(
+                "Target byte budget per checkpoint. Defaults to 4096 and is capped at 6000."
+                    .to_string(),
+            )),
+        ),
+    ]);
+    ToolSpec::Function(ResponsesApiTool {
+        name: "read_agent_checkpoints".to_string(),
+        description: "Read one or more selected direct-child completion checkpoints. Payloads stay in the child thread's durable rollout until explicitly read; this does not acknowledge, retire, resume, or expose child-owned runtime resources."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["checkpoint_refs".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(read_agent_checkpoints_output_schema()),
+    })
+}
+
 pub fn create_close_agent_tool_v1() -> ToolSpec {
     let properties = BTreeMap::from([(
         "target".to_string(),
@@ -486,6 +524,34 @@ fn list_agents_output_schema() -> Value {
             }
         },
         "required": ["agents"],
+        "additionalProperties": false
+    })
+}
+
+fn read_agent_checkpoints_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "checkpoints": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "state": { "type": "string", "enum": ["available", "unavailable"] },
+                        "checkpoint_ref": { "type": "string" },
+                        "sender": { "type": "string" },
+                        "status": { "type": "string" },
+                        "approximate_bytes": { "type": "number" },
+                        "output_offset": { "type": "number" },
+                        "output": { "type": "string" },
+                        "next_offset": { "type": "number" }
+                    },
+                    "required": ["state", "checkpoint_ref", "sender", "status", "approximate_bytes"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["checkpoints"],
         "additionalProperties": false
     })
 }

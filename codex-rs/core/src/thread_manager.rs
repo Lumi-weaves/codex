@@ -77,6 +77,7 @@ use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::StoredModelContext;
 use codex_thread_store::StoredThread;
+use codex_thread_store::StoredThreadHistory;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
@@ -1311,6 +1312,24 @@ impl ThreadManagerState {
                     }
                 }
                 err => CodexErr::Fatal(format!("failed to read stored thread {thread_id}: {err}")),
+            })
+    }
+
+    pub(crate) async fn load_stored_thread_history(
+        &self,
+        params: LoadThreadHistoryParams,
+    ) -> CodexResult<StoredThreadHistory> {
+        let thread_id = params.thread_id;
+        self.thread_store
+            .load_history(params)
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => CodexErr::Fatal(format!(
+                    "failed to load stored thread history {thread_id}: {err}"
+                )),
             })
     }
 

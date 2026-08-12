@@ -485,3 +485,36 @@ fn list_agents_tool_status_schema_includes_interrupted() {
         ])
     );
 }
+
+#[test]
+fn read_agent_checkpoints_tool_accepts_batched_refs() {
+    let ToolSpec::Function(ResponsesApiTool {
+        parameters,
+        output_schema,
+        ..
+    }) = create_read_agent_checkpoints_tool()
+    else {
+        panic!("read_agent_checkpoints should be a function tool");
+    };
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("read_agent_checkpoints should use object params");
+    assert!(properties.contains_key("checkpoint_refs"));
+    assert!(properties.contains_key("offset"));
+    assert!(properties.contains_key("max_bytes"));
+    assert_eq!(
+        parameters.required.as_ref(),
+        Some(&vec!["checkpoint_refs".to_string()])
+    );
+    assert_eq!(
+        output_schema.expect("checkpoint output schema")["properties"]["checkpoints"]["items"]["required"],
+        json!([
+            "state",
+            "checkpoint_ref",
+            "sender",
+            "status",
+            "approximate_bytes"
+        ])
+    );
+}

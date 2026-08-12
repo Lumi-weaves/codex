@@ -11,12 +11,13 @@ use crate::local_agent_graph_store_from_state_db;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use crate::session::turn_context::TurnContext;
-use crate::session_prefix::format_inter_agent_completion_message;
+use crate::session_prefix::format_inter_agent_checkpoint_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::ReadAgentCheckpointsHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -1515,7 +1516,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
-    assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert_eq!(worker.agent_status, json!({"completed": null}));
     assert_eq!(success, Some(true));
 }
 
@@ -1927,8 +1928,8 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
 
     FollowupTaskHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
@@ -1967,15 +1968,19 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
-    let first_notification = format_inter_agent_completion_message(
+    let first_notification = format_inter_agent_checkpoint_message(
         AgentPath::root(),
         worker_path.clone(),
+        agent_id,
+        &first_turn.sub_id,
         &AgentStatus::Completed(Some("first done".to_string())),
     )
     .expect("completed status should render");
-    let second_notification = format_inter_agent_completion_message(
+    let second_notification = format_inter_agent_checkpoint_message(
         AgentPath::root(),
         worker_path.clone(),
+        agent_id,
+        &second_turn.sub_id,
         &AgentStatus::Completed(Some("second done".to_string())),
     )
     .expect("completed status should render");
@@ -2019,6 +2024,30 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     .expect("parent should receive one completion notification per child turn");
 
     assert_eq!(notifications.len(), 2);
+    assert!(notifications.iter().all(|message| {
+        message.contains("AGENT_ATTENTION")
+            && !message.contains("first done")
+            && !message.contains("second done")
+    }));
+
+    let read = ReadAgentCheckpointsHandler
+        .handle(invocation(
+            session,
+            turn,
+            "read_agent_checkpoints",
+            function_payload(json!({
+                "checkpoint_refs": [
+                    format!("agent-checkpoint:{agent_id}:{}", first_turn.sub_id),
+                    format!("agent-checkpoint:{agent_id}:{}", second_turn.sub_id),
+                ]
+            })),
+        ))
+        .await
+        .expect("selected checkpoints should be readable");
+    let (read_text, success) = expect_text_output(read);
+    assert_eq!(success, Some(true));
+    assert!(read_text.contains("first done"));
+    assert!(read_text.contains("second done"));
 }
 
 #[tokio::test]

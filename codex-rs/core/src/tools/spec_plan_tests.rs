@@ -2184,6 +2184,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "assign_task",
         "list_agents",
+        "read_agent_checkpoints",
     ]);
     assert_eq!(
         v1.namespace_function_names(MULTI_AGENT_V1_NAMESPACE),
@@ -2236,6 +2237,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "read_agent_checkpoints",
         "send_input",
         "resume_agent",
         "assign_task",
@@ -2248,6 +2250,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "read_agent_checkpoints",
     ] {
         assert!(
             v2.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
@@ -2394,6 +2397,7 @@ async fn multi_agent_v2_can_disable_wait_agent() {
             "followup_task".to_string(),
             "interrupt_agent".to_string(),
             "list_agents".to_string(),
+            "read_agent_checkpoints".to_string(),
             "send_message".to_string(),
             "spawn_agent".to_string(),
         ]
@@ -2492,6 +2496,7 @@ async fn multi_agent_v2_can_use_configured_tool_namespace() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "read_agent_checkpoints",
     ] {
         namespaced.assert_visible_lacks(&[tool_name]);
         assert!(
@@ -2628,6 +2633,7 @@ async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
         "wait_agent",
         "interrupt_agent",
         "list_agents",
+        "read_agent_checkpoints",
     ] {
         assert!(
             plan.namespace_function_names("agents")

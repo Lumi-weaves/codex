@@ -1,4 +1,5 @@
 use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::AgentStatus;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::truncate_text;
@@ -41,6 +42,35 @@ pub(crate) fn format_inter_agent_completion_message(
         AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
     };
     Some(InterAgentCompletionMessage::new(task_name, sender, payload).render())
+}
+
+pub(crate) fn format_inter_agent_checkpoint_message(
+    task_name: AgentPath,
+    sender: AgentPath,
+    child_thread_id: ThreadId,
+    turn_id: &str,
+    status: &AgentStatus,
+) -> Option<String> {
+    let (status_name, approximate_bytes) = match status {
+        AgentStatus::Completed(message) => (
+            "completed",
+            message.as_ref().map_or(0, std::string::String::len),
+        ),
+        AgentStatus::Errored(error) => ("errored", error.len()),
+        AgentStatus::Shutdown => ("shutdown", 0),
+        AgentStatus::NotFound => ("not_found", 0),
+        AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => return None,
+    };
+    Some(
+        InterAgentCompletionMessage::checkpoint(
+            task_name,
+            sender,
+            format!("agent-checkpoint:{child_thread_id}:{turn_id}"),
+            status_name,
+            approximate_bytes,
+        )
+        .render(),
+    )
 }
 
 #[cfg(test)]

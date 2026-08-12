@@ -1,4 +1,5 @@
 use codex_protocol::AgentPath;
+use serde_json::json;
 
 use super::ContextualUserFragment;
 
@@ -6,7 +7,17 @@ use super::ContextualUserFragment;
 pub(crate) struct InterAgentCompletionMessage {
     task_name: AgentPath,
     sender: AgentPath,
-    payload: String,
+    body: CompletionBody,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompletionBody {
+    Inline(String),
+    Checkpoint {
+        checkpoint_ref: String,
+        status: &'static str,
+        approximate_bytes: usize,
+    },
 }
 
 impl InterAgentCompletionMessage {
@@ -14,7 +25,25 @@ impl InterAgentCompletionMessage {
         Self {
             task_name,
             sender,
-            payload: payload.into(),
+            body: CompletionBody::Inline(payload.into()),
+        }
+    }
+
+    pub(crate) fn checkpoint(
+        task_name: AgentPath,
+        sender: AgentPath,
+        checkpoint_ref: String,
+        status: &'static str,
+        approximate_bytes: usize,
+    ) -> Self {
+        Self {
+            task_name,
+            sender,
+            body: CompletionBody::Checkpoint {
+                checkpoint_ref,
+                status,
+                approximate_bytes,
+            },
         }
     }
 }
@@ -33,9 +62,28 @@ impl ContextualUserFragment for InterAgentCompletionMessage {
     }
 
     fn body(&self) -> String {
-        format!(
-            "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
-            self.task_name, self.sender, self.payload,
-        )
+        match &self.body {
+            CompletionBody::Inline(payload) => format!(
+                "Message Type: FINAL_ANSWER\nTask name: {}\nSender: {}\nPayload:\n{}",
+                self.task_name, self.sender, payload,
+            ),
+            CompletionBody::Checkpoint {
+                checkpoint_ref,
+                status,
+                approximate_bytes,
+            } => {
+                let event = json!({
+                    "kind": "completion",
+                    "checkpoint_ref": checkpoint_ref,
+                    "status": status,
+                    "approximate_bytes": approximate_bytes,
+                    "read_hint": "Call read_agent_checkpoints with one or more checkpoint refs to inspect selected payloads.",
+                });
+                format!(
+                    "Message Type: AGENT_ATTENTION\nTask name: {}\nSender: {}\nEvent:\n{}",
+                    self.task_name, self.sender, event,
+                )
+            }
+        }
     }
 }

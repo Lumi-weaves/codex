@@ -87,6 +87,28 @@ pub(crate) struct ListedAgent {
     pub(crate) agent_status: AgentStatus,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum AgentCheckpointReadState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct AgentCheckpointRead {
+    pub(crate) state: AgentCheckpointReadState,
+    pub(crate) checkpoint_ref: String,
+    pub(crate) sender: AgentPath,
+    pub(crate) status: String,
+    pub(crate) approximate_bytes: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) output: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) next_offset: Option<usize>,
+}
+
 /// Control-plane handle for multi-agent operations.
 /// `AgentControl` is held by each session (via `SessionServices`). It provides capability to
 /// spawn new agents and the inter-agent communication layer.
@@ -285,6 +307,107 @@ impl AgentControl {
         thread.agent_status().await
     }
 
+    pub(crate) async fn read_agent_checkpoint(
+        &self,
+        current_session_source: &SessionSource,
+        checkpoint_ref: &str,
+        offset: usize,
+        max_bytes: usize,
+    ) -> CodexResult<AgentCheckpointRead> {
+        let Some(reference) = checkpoint_ref.strip_prefix("agent-checkpoint:") else {
+            return Err(CodexErr::InvalidRequest(
+                "checkpoint_ref must start with `agent-checkpoint:`".to_string(),
+            ));
+        };
+        let Some((thread_id, turn_id)) = reference.split_once(':') else {
+            return Err(CodexErr::InvalidRequest(
+                "checkpoint_ref must identify a child thread and turn".to_string(),
+            ));
+        };
+        let child_thread_id = ThreadId::from_string(thread_id)
+            .map_err(|err| CodexErr::InvalidRequest(format!("invalid checkpoint_ref: {err}")))?;
+        let child_metadata = self.ensure_agent_known(child_thread_id)?;
+        let child_path = child_metadata.agent_path.ok_or_else(|| {
+            CodexErr::InvalidRequest("checkpoint child is missing an agent path".to_string())
+        })?;
+        let current_path = current_session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let direct_parent = child_path
+            .as_str()
+            .rsplit_once('/')
+            .and_then(|(parent, _)| AgentPath::try_from(parent).ok());
+        if direct_parent.as_ref() != Some(&current_path) {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "checkpoint `{checkpoint_ref}` is not owned by {current_path}"
+            )));
+        }
+
+        let state = self.upgrade()?;
+        let history = state
+            .load_stored_thread_history(LoadThreadHistoryParams {
+                thread_id: child_thread_id,
+                include_archived: true,
+            })
+            .await?;
+        let checkpoint = history.items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) if event.turn_id == turn_id => {
+                Some((
+                    "completed".to_string(),
+                    event.last_agent_message.clone().unwrap_or_default(),
+                ))
+            }
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event))
+                if event.turn_id.as_deref() == Some(turn_id) =>
+            {
+                Some(("errored".to_string(), format!("{:?}", event.reason)))
+            }
+            _ => None,
+        });
+        let Some((status, output)) = checkpoint else {
+            return Ok(AgentCheckpointRead {
+                state: AgentCheckpointReadState::Unavailable,
+                checkpoint_ref: checkpoint_ref.to_string(),
+                sender: child_path,
+                status: "unavailable".to_string(),
+                approximate_bytes: 0,
+                output_offset: None,
+                output: None,
+                next_offset: None,
+            });
+        };
+        if offset > output.len() {
+            return Err(CodexErr::InvalidRequest(format!(
+                "offset {offset} exceeds checkpoint payload size {}",
+                output.len()
+            )));
+        }
+        if !output.is_char_boundary(offset) {
+            return Err(CodexErr::InvalidRequest(format!(
+                "offset {offset} is not a valid UTF-8 boundary"
+            )));
+        }
+        let mut end = offset.saturating_add(max_bytes).min(output.len());
+        while end > offset && !output.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == offset
+            && let Some(ch) = output[offset..].chars().next()
+        {
+            end += ch.len_utf8();
+        }
+        Ok(AgentCheckpointRead {
+            state: AgentCheckpointReadState::Available,
+            checkpoint_ref: checkpoint_ref.to_string(),
+            sender: child_path,
+            status,
+            approximate_bytes: output.len(),
+            output_offset: Some(offset),
+            output: Some(output[offset..end].to_string()),
+            next_offset: (end < output.len()).then_some(end),
+        })
+    }
+
     pub(crate) fn register_session_root(
         &self,
         current_thread_id: ThreadId,
@@ -420,7 +543,7 @@ impl AgentControl {
         {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
+                agent_status: status_without_payload(root_thread.agent_status().await),
             });
         }
 
@@ -445,7 +568,7 @@ impl AgentControl {
                 .unwrap_or_else(|| thread_id.to_string());
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status: status_without_payload(thread.agent_status().await),
             });
         }
 
@@ -768,6 +891,16 @@ fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> b
                 .strip_prefix(prefix.as_str())
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
+}
+
+fn status_without_payload(status: AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Completed(_) => AgentStatus::Completed(None),
+        AgentStatus::Errored(_) => {
+            AgentStatus::Errored("details available from the agent checkpoint".to_string())
+        }
+        status => status,
+    }
 }
 
 pub(crate) fn render_input_preview(input: &[UserInput]) -> String {

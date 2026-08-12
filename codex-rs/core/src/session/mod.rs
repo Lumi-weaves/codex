@@ -37,7 +37,7 @@ use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnEnvironment;
-use crate::session_prefix::format_inter_agent_completion_message;
+use crate::session_prefix::format_inter_agent_checkpoint_message;
 use crate::skills_load_input_from_config;
 use crate::turn_metadata::TurnMetadataState;
 use crate::turn_timing::now_unix_timestamp_ms;
@@ -1977,9 +1977,11 @@ impl Session {
             return;
         };
 
-        let Some(message) = format_inter_agent_completion_message(
+        let Some(message) = format_inter_agent_checkpoint_message(
             parent_agent_path.clone(),
             child_agent_path.clone(),
+            self.thread_id,
+            &turn_context.sub_id,
             &status,
         ) else {
             return;
