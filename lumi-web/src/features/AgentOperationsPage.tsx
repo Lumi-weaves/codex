@@ -260,10 +260,7 @@ function OperationDetailPanel({
             </div>
           </dl>
           <p className="detail-panel__activity">{selected.activity}</p>
-          <SnapshotLimitation
-            isPartial={isPartial}
-            isTruncated={isTruncated}
-          />
+          <SnapshotLimitation isPartial={isPartial} isTruncated={isTruncated} />
         </>
       ) : (
         <>
@@ -289,10 +286,7 @@ function OperationDetailPanel({
             Captured {new Date(capturedAt).toLocaleString()} ·{" "}
             {source === "fixture" ? "fixture" : "live"} source
           </p>
-          <SnapshotLimitation
-            isPartial={isPartial}
-            isTruncated={isTruncated}
-          />
+          <SnapshotLimitation isPartial={isPartial} isTruncated={isTruncated} />
         </>
       )}
     </aside>
