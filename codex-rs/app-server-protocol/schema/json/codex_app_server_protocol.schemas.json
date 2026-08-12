@@ -14014,6 +14014,85 @@
         "title": "ModelVerificationNotification",
         "type": "object"
       },
+      "ModelWorkbenchEntry": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "modelTag": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "modelTag"
+        ],
+        "type": "object"
+      },
+      "ModelWorkbenchPublication": {
+        "properties": {
+          "catalogRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "modelsCacheRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "registryRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ModelWorkbenchPublicationStatus"
+          },
+          "synchronized": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "registryRevision",
+          "status",
+          "synchronized"
+        ],
+        "type": "object"
+      },
+      "ModelWorkbenchPublicationStatus": {
+        "enum": [
+          "synchronized",
+          "pending",
+          "failed"
+        ],
+        "type": "string"
+      },
+      "ModelWorkbenchStoredEntry": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "modelTag": {
+            "type": "string"
+          },
+          "retired": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "displayName",
+          "modelTag",
+          "retired"
+        ],
+        "type": "object"
+      },
       "ModelsRequirements": {
         "properties": {
           "newThread": {

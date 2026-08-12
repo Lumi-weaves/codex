@@ -924,6 +924,24 @@ client_request_definitions! {
         serialization: None,
         response: v2::ModelListResponse,
     },
+    #[experimental("modelWorkbench/read")]
+    ModelWorkbenchRead => "modelWorkbench/read" {
+        params: v2::ModelWorkbenchReadParams,
+        serialization: global_shared_read("model-workbench"),
+        response: v2::ModelWorkbenchReadResponse,
+    },
+    #[experimental("modelWorkbench/upsert")]
+    ModelWorkbenchUpsert => "modelWorkbench/upsert" {
+        params: v2::ModelWorkbenchUpsertParams,
+        serialization: global("model-workbench"),
+        response: v2::ModelWorkbenchUpsertResponse,
+    },
+    #[experimental("modelWorkbench/retire")]
+    ModelWorkbenchRetire => "modelWorkbench/retire" {
+        params: v2::ModelWorkbenchRetireParams,
+        serialization: global("model-workbench"),
+        response: v2::ModelWorkbenchRetireResponse,
+    },
     ModelProviderCapabilitiesRead => "modelProvider/capabilities/read" {
         params: v2::ModelProviderCapabilitiesReadParams,
         serialization: None,

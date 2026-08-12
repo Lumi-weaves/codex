@@ -33,6 +33,7 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::ModelWorkbenchRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
@@ -119,6 +120,7 @@ pub(crate) struct MessageProcessor {
     initialize_processor: InitializeRequestProcessor,
     marketplace_processor: MarketplaceRequestProcessor,
     mcp_processor: McpRequestProcessor,
+    model_workbench_processor: ModelWorkbenchRequestProcessor,
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
@@ -385,8 +387,9 @@ impl MessageProcessor {
             config: Arc::clone(&config),
             config_manager: config_manager.clone(),
             workspace_settings_cache: Arc::clone(&workspace_settings_cache),
-            model_list_catalog,
+            model_list_catalog: Arc::clone(&model_list_catalog),
         });
+        let model_workbench_processor = ModelWorkbenchRequestProcessor::new(model_list_catalog);
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
             Arc::clone(&config),
@@ -529,6 +532,7 @@ impl MessageProcessor {
             initialize_processor,
             marketplace_processor,
             mcp_processor,
+            model_workbench_processor,
             plugin_processor,
             remote_control_processor,
             search_processor,
@@ -1298,6 +1302,15 @@ impl MessageProcessor {
             }
             ClientRequest::ModelList { params, .. } => {
                 self.catalog_processor.model_list(params).await
+            }
+            ClientRequest::ModelWorkbenchRead { params, .. } => {
+                self.model_workbench_processor.read(params).await
+            }
+            ClientRequest::ModelWorkbenchUpsert { params, .. } => {
+                self.model_workbench_processor.upsert(params).await
+            }
+            ClientRequest::ModelWorkbenchRetire { params, .. } => {
+                self.model_workbench_processor.retire(params).await
             }
             ClientRequest::ExperimentalFeatureList { params, .. } => {
                 self.catalog_processor
