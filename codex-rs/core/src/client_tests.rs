@@ -12,6 +12,9 @@ use super::X_OPENAI_SUBAGENT_HEADER;
 use crate::AttestationContext;
 use crate::AttestationProvider;
 use crate::GenerateAttestationFuture;
+use crate::prompt_census::PromptInvocationKind;
+use crate::prompt_debug::PromptReceiptView;
+use crate::prompt_debug::PromptRequestReceipt;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::test_support::TestCodexResponsesRequestKind;
 use crate::test_support::responses_metadata as test_responses_metadata;
@@ -52,6 +55,11 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::sse;
+use core_test_support::responses::start_mock_server;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -286,6 +294,119 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+#[tokio::test]
+async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Result<()> {
+    for use_responses_lite in [false, true] {
+        let server = start_mock_server().await;
+        let response_mock = mount_sse_once(
+            &server,
+            sse(vec![
+                ev_response_created("receipt-test"),
+                ev_completed("receipt-test"),
+            ]),
+        )
+        .await;
+        let mut provider =
+            create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+        provider.supports_websockets = false;
+        let provider_name = provider.name.clone();
+        let thread_id = ThreadId::new();
+        let client = ModelClient::new(
+            /*auth_manager*/ None,
+            AgentIdentityAuthPolicy::JwtOnly,
+            thread_id,
+            provider,
+            SessionSource::Exec,
+            "receipt_test".to_string(),
+            /*model_verbosity*/ None,
+            /*enable_request_compression*/ false,
+            /*include_timing_metrics*/ false,
+            /*beta_features_header*/ None,
+            /*concurrent_reasoning_summaries_enabled*/ false,
+            /*attestation_provider*/ None,
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        );
+        let mut model_info = test_model_info();
+        model_info.use_responses_lite = use_responses_lite;
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "receipt body equality".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+            base_instructions: BaseInstructions {
+                text: "receipt base instructions".to_string(),
+                provenance: None,
+            },
+            output_schema: Some(json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false,
+            })),
+            ..Default::default()
+        };
+        let responses_metadata = test_responses_metadata_for_client(
+            &client,
+            Some("receipt-turn"),
+            format!("{thread_id}:0"),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let request = client
+            .build_responses_request_for_debug(
+                &prompt,
+                &model_info,
+                /*effort*/ None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+            )
+            .await?;
+        let receipt = PromptRequestReceipt::from_lowered_request(
+            PromptInvocationKind::Turn,
+            provider_name,
+            client.provider_info(),
+            use_responses_lite,
+            request,
+        )?;
+
+        let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
+        assert_eq!(
+            metadata["provider"]["clientNormalization"],
+            "non_open_ai_sanitized"
+        );
+        assert!(metadata.get("request").is_none());
+
+        let mut stream = client
+            .new_session()
+            .stream(
+                PromptInvocationKind::Turn,
+                &prompt,
+                &model_info,
+                &test_session_telemetry(),
+                /*effort*/ None,
+                codex_protocol::config_types::ReasoningSummary::None,
+                /*service_tier*/ None,
+                &responses_metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await?;
+        while stream.next().await.is_some() {}
+
+        assert_eq!(
+            response_mock.single_request().body_json(),
+            serde_json::to_value(receipt.request())?,
+            "receipt must describe the body emitted by the production transport"
+        );
+    }
+    Ok(())
 }
 
 #[test]

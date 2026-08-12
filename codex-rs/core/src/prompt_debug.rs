@@ -11,12 +11,18 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
+use codex_utils_string::approx_tokens_from_byte_count;
 use serde::Serialize;
+use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 
 use crate::TurnContext;
 use crate::client_common::Prompt;
 use crate::config::Config;
+use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
+use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -27,20 +33,129 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 1;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 2;
+const PROMPT_RECEIPT_COMPILER_REVISION: &str = "responses_request_lowering_v1";
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
 /// This is deliberately a receipt of the effective request rather than a second prompt model. The
 /// nested request is built by the same lowering path used for inference.
+#[derive(Debug)]
+pub struct PromptRequestReceipt {
+    schema_version: u32,
+    compiler_revision: &'static str,
+    invocation_kind: PromptInvocationKind,
+    request_form: PromptRequestForm,
+    provider: PromptRequestProvider,
+    provenance: PromptReceiptProvenance,
+    summary: PromptReceiptSummary,
+    bounds: PromptReceiptBounds,
+    request: ResponsesApiRequest,
+}
+
+/// Controls whether sensitive model-visible content is included in a rendered receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptReceiptView {
+    /// Safe default: stable hashes, sizes, estimates, and provenance without prompt content.
+    MetadataOnly,
+    /// Explicit local diagnostic view containing the complete client-owned logical request.
+    FullLocal,
+}
+
+/// A serialization view over one underlying receipt. Redacted and full output never rebuild the
+/// request and therefore cannot drift from each other.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PromptRequestReceipt {
-    pub schema_version: u32,
-    pub invocation_kind: PromptInvocationKind,
-    pub request_form: PromptRequestForm,
-    pub provider: PromptRequestProvider,
-    pub request: ResponsesApiRequest,
+pub struct RenderedPromptRequestReceipt<'a> {
+    schema_version: u32,
+    compiler_revision: &'static str,
+    invocation_kind: PromptInvocationKind,
+    request_form: &'a PromptRequestForm,
+    provider: &'a PromptRequestProvider,
+    provenance: &'a PromptReceiptProvenance,
+    summary: &'a PromptReceiptSummary,
+    bounds: &'a PromptReceiptBounds,
+    redaction: PromptReceiptRedaction,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request: Option<&'a ResponsesApiRequest>,
+}
+
+impl PromptRequestReceipt {
+    pub(crate) fn from_lowered_request(
+        invocation_kind: PromptInvocationKind,
+        provider_id: String,
+        provider_info: &codex_model_provider_info::ModelProviderInfo,
+        use_responses_lite: bool,
+        request: ResponsesApiRequest,
+    ) -> CodexResult<Self> {
+        let lowering = if use_responses_lite {
+            PromptRequestLowering::ResponsesLite
+        } else {
+            PromptRequestLowering::Responses
+        };
+        let client_normalization = if provider_info.is_openai() {
+            PromptClientNormalization::OpenAi
+        } else {
+            PromptClientNormalization::NonOpenAiSanitized
+        };
+        let summary = build_receipt_summary(&request)?;
+
+        Ok(Self {
+            schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
+            compiler_revision: PROMPT_RECEIPT_COMPILER_REVISION,
+            invocation_kind,
+            request_form: PromptRequestForm::LogicalFull,
+            provider: PromptRequestProvider {
+                id: provider_id,
+                name: provider_info.name.clone(),
+                wire_api: provider_info.wire_api.to_string(),
+                lowering,
+                client_normalization,
+            },
+            provenance: PromptReceiptProvenance {
+                census_schema_version: PROMPT_CENSUS_SCHEMA_VERSION,
+                invocation_ref: invocation_kind,
+                contribution_refs: invocation_kind.contributions(),
+                provider_processing: "provider_owned_unknown",
+            },
+            summary,
+            bounds: PromptReceiptBounds {
+                receipt_content_truncated: false,
+                request_is_post_client_lowering: true,
+                upstream_prompt_bounds_already_applied: true,
+                provider_owned_processing_observable: false,
+            },
+            request,
+        })
+    }
+
+    pub fn render(&self, view: PromptReceiptView) -> RenderedPromptRequestReceipt<'_> {
+        RenderedPromptRequestReceipt {
+            schema_version: self.schema_version,
+            compiler_revision: self.compiler_revision,
+            invocation_kind: self.invocation_kind,
+            request_form: &self.request_form,
+            provider: &self.provider,
+            provenance: &self.provenance,
+            summary: &self.summary,
+            bounds: &self.bounds,
+            redaction: PromptReceiptRedaction {
+                view,
+                content_included: view == PromptReceiptView::FullLocal,
+                full_local_requires_explicit_opt_in: true,
+                persisted_by_debug_command: false,
+                transmitted_by_debug_command: false,
+            },
+            request: (view == PromptReceiptView::FullLocal).then_some(&self.request),
+        }
+    }
+
+    /// The exact client-owned logical request used to compute this receipt.
+    #[doc(hidden)]
+    pub fn request(&self) -> &ResponsesApiRequest {
+        &self.request
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -57,6 +172,7 @@ pub struct PromptRequestProvider {
     pub name: String,
     pub wire_api: String,
     pub lowering: PromptRequestLowering,
+    pub client_normalization: PromptClientNormalization,
 }
 
 #[derive(Debug, Serialize)]
@@ -65,6 +181,73 @@ pub enum PromptRequestLowering {
     Responses,
     ResponsesLite,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptClientNormalization {
+    OpenAi,
+    NonOpenAiSanitized,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReceiptProvenance {
+    census_schema_version: u32,
+    invocation_ref: PromptInvocationKind,
+    contribution_refs: &'static [PromptContributionKind],
+    provider_processing: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReceiptSummary {
+    hash_algorithm: &'static str,
+    canonical_request_sha256: String,
+    canonical_request_bytes: usize,
+    estimated_model_visible_tokens: u64,
+    estimate_method: &'static str,
+    regions: Vec<PromptReceiptRegion>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReceiptRegion {
+    id: &'static str,
+    contribution_refs: &'static [PromptContributionKind],
+    sha256: String,
+    canonical_bytes: usize,
+    estimated_tokens: u64,
+    sensitive: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReceiptBounds {
+    receipt_content_truncated: bool,
+    request_is_post_client_lowering: bool,
+    upstream_prompt_bounds_already_applied: bool,
+    provider_owned_processing_observable: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReceiptRedaction {
+    view: PromptReceiptView,
+    content_included: bool,
+    full_local_requires_explicit_opt_in: bool,
+    persisted_by_debug_command: bool,
+    transmitted_by_debug_command: bool,
+}
+
+const INPUT_CONTRIBUTIONS: &[PromptContributionKind] = &[
+    PromptContributionKind::BaseInstructions,
+    PromptContributionKind::WorldStateDeveloperContext,
+    PromptContributionKind::WorldStateContextualUserContext,
+    PromptContributionKind::ConversationHistory,
+    PromptContributionKind::InvocationInput,
+    PromptContributionKind::ToolSpecifications,
+    PromptContributionKind::ProviderLowering,
+];
 
 /// Build the model-visible `input` list for a single debug turn.
 #[doc(hidden)]
@@ -248,23 +431,121 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
             &responses_metadata,
         )
         .await?;
-    let provider_info = turn_context.provider.info();
-    let lowering = if turn_context.model_info.use_responses_lite {
-        PromptRequestLowering::ResponsesLite
-    } else {
-        PromptRequestLowering::Responses
-    };
-
-    Ok(PromptRequestReceipt {
-        schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
-        invocation_kind: PromptInvocationKind::Turn,
-        request_form: PromptRequestForm::LogicalFull,
-        provider: PromptRequestProvider {
-            id: turn_context.config.model_provider_id.clone(),
-            name: provider_info.name.clone(),
-            wire_api: provider_info.wire_api.to_string(),
-            lowering,
-        },
+    PromptRequestReceipt::from_lowered_request(
+        PromptInvocationKind::Turn,
+        turn_context.config.model_provider_id.clone(),
+        turn_context.provider.info(),
+        turn_context.model_info.use_responses_lite,
         request,
+    )
+}
+
+fn build_receipt_summary(request: &ResponsesApiRequest) -> CodexResult<PromptReceiptSummary> {
+    let request_bytes = canonical_json_bytes(request)?;
+    let regions = vec![
+        receipt_region(
+            "base_instructions",
+            &[
+                PromptContributionKind::BaseInstructions,
+                PromptContributionKind::ProviderLowering,
+            ],
+            &request.instructions,
+            /*sensitive*/ true,
+        )?,
+        receipt_region(
+            "ordered_input",
+            INPUT_CONTRIBUTIONS,
+            &request.input,
+            /*sensitive*/ true,
+        )?,
+        receipt_region(
+            "tool_specifications",
+            &[
+                PromptContributionKind::ToolSpecifications,
+                PromptContributionKind::ProviderLowering,
+            ],
+            &request.tools,
+            /*sensitive*/ true,
+        )?,
+        receipt_region(
+            "output_control",
+            &[
+                PromptContributionKind::OutputSchema,
+                PromptContributionKind::ProviderLowering,
+            ],
+            &request.text,
+            /*sensitive*/ true,
+        )?,
+        receipt_region(
+            "request_shape",
+            &[PromptContributionKind::ProviderLowering],
+            &serde_json::json!({
+                "model": request.model,
+                "tool_choice": request.tool_choice,
+                "parallel_tool_calls": request.parallel_tool_calls,
+                "reasoning": request.reasoning,
+                "store": request.store,
+                "stream": request.stream,
+                "stream_options": request.stream_options,
+                "include": request.include,
+                "service_tier": request.service_tier,
+            }),
+            /*sensitive*/ false,
+        )?,
+    ];
+    let estimated_model_visible_tokens = regions.iter().map(|region| region.estimated_tokens).sum();
+
+    Ok(PromptReceiptSummary {
+        hash_algorithm: "sha256_canonical_json",
+        canonical_request_sha256: sha256_hex(&request_bytes),
+        canonical_request_bytes: request_bytes.len(),
+        estimated_model_visible_tokens,
+        estimate_method: "canonical_region_bytes_div_4_ceiling",
+        regions,
     })
+}
+
+fn receipt_region<T: Serialize>(
+    id: &'static str,
+    contribution_refs: &'static [PromptContributionKind],
+    value: &T,
+    sensitive: bool,
+) -> CodexResult<PromptReceiptRegion> {
+    let bytes = canonical_json_bytes(value)?;
+    Ok(PromptReceiptRegion {
+        id,
+        contribution_refs,
+        sha256: sha256_hex(&bytes),
+        canonical_bytes: bytes.len(),
+        estimated_tokens: approx_tokens_from_byte_count(bytes.len()),
+        sensitive,
+    })
+}
+
+fn canonical_json_bytes<T: Serialize>(value: &T) -> CodexResult<Vec<u8>> {
+    let value = serde_json::to_value(value)
+        .map_err(|err| CodexErr::Fatal(format!("failed to serialize prompt receipt: {err}")))?;
+    serde_json::to_vec(&canonicalize_json(value))
+        .map_err(|err| CodexErr::Fatal(format!("failed to encode prompt receipt: {err}")))
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
+        Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        scalar => scalar,
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }

@@ -77,6 +77,8 @@ pub use plugins::plugins_manager_for_config;
 #[doc(hidden)]
 pub(crate) mod prompt_debug;
 #[doc(hidden)]
+pub use prompt_debug::PromptReceiptView;
+#[doc(hidden)]
 pub use prompt_debug::PromptRequestReceipt;
 pub use prompt_debug::build_prompt_input;
 pub use prompt_debug::build_prompt_request_receipt;

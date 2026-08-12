@@ -246,7 +246,7 @@ enum DebugSubcommand {
     PromptInput(DebugPromptInputCommand),
 
     /// Render the effective client-owned model request as JSON.
-    PromptReceipt(DebugPromptInputCommand),
+    PromptReceipt(DebugPromptReceiptCommand),
 
     /// Render the versioned model invocation and prompt contribution census as JSON.
     PromptCensus,
@@ -287,6 +287,30 @@ struct DebugPromptInputCommand {
     /// Optional image(s) to attach to the user prompt.
     #[arg(long = "image", short = 'i', value_name = "FILE", value_delimiter = ',', num_args = 1..)]
     images: Vec<PathBuf>,
+}
+
+#[derive(Debug, Parser)]
+struct DebugPromptReceiptCommand {
+    /// Optional user prompt to append after session context.
+    #[arg(value_name = "PROMPT")]
+    prompt: Option<String>,
+
+    /// Optional image(s) to attach to the user prompt.
+    #[arg(long = "image", short = 'i', value_name = "FILE", value_delimiter = ',', num_args = 1..)]
+    images: Vec<PathBuf>,
+
+    /// Include the complete sensitive model-visible request. Never persisted by this command.
+    #[arg(long, default_value_t = false)]
+    full: bool,
+}
+
+impl From<DebugPromptReceiptCommand> for DebugPromptInputCommand {
+    fn from(command: DebugPromptReceiptCommand) -> Self {
+        Self {
+            prompt: command.prompt,
+            images: command.images,
+        }
+    }
 }
 
 #[derive(Debug, Parser)]
@@ -1634,12 +1658,13 @@ async fn cli_main(
                     root_remote_auth_token_env.as_deref(),
                     "debug prompt-receipt",
                 )?;
+                let full = cmd.full;
                 run_debug_prompt_command(
-                    cmd,
+                    cmd.into(),
                     root_config_overrides,
                     interactive,
                     arg0_paths.clone(),
-                    DebugPromptOutput::Receipt,
+                    DebugPromptOutput::Receipt { full },
                 )
                 .await?;
             }
@@ -2104,7 +2129,7 @@ async fn run_debug_trace_reduce_command(cmd: DebugTraceReduceCommand) -> anyhow:
 #[derive(Clone, Copy)]
 enum DebugPromptOutput {
     Input,
-    Receipt,
+    Receipt { full: bool },
 }
 
 async fn run_debug_prompt_command(
@@ -2194,26 +2219,37 @@ async fn run_debug_prompt_command(
     });
     let extensions = Arc::new(extensions.build());
     let rendered = match output {
-        DebugPromptOutput::Input => serde_json::to_string_pretty(
-            &codex_core::build_prompt_input(
+        DebugPromptOutput::Input => {
+            eprintln!(
+                "warning: `codex debug prompt-input` is deprecated; use `codex debug prompt-receipt --full`"
+            );
+            serde_json::to_string_pretty(
+                &codex_core::build_prompt_input(
+                    config,
+                    input,
+                    /*state_db*/ None,
+                    extensions,
+                    user_instructions_provider,
+                )
+                .await?,
+            )?
+        }
+        DebugPromptOutput::Receipt { full } => {
+            let receipt = codex_core::build_prompt_request_receipt(
                 config,
                 input,
                 /*state_db*/ None,
                 extensions,
                 user_instructions_provider,
             )
-            .await?,
-        )?,
-        DebugPromptOutput::Receipt => serde_json::to_string_pretty(
-            &codex_core::build_prompt_request_receipt(
-                config,
-                input,
-                /*state_db*/ None,
-                extensions,
-                user_instructions_provider,
-            )
-            .await?,
-        )?,
+            .await?;
+            let view = if full {
+                codex_core::PromptReceiptView::FullLocal
+            } else {
+                codex_core::PromptReceiptView::MetadataOnly
+            };
+            serde_json::to_string_pretty(&receipt.render(view))?
+        }
     };
     println!("{rendered}");
 
@@ -3301,6 +3337,7 @@ mod tests {
             "hello",
             "--image",
             "/tmp/a.png,/tmp/b.png",
+            "--full",
         ])
         .expect("parse");
 
@@ -3316,6 +3353,7 @@ mod tests {
             cmd.images,
             vec![PathBuf::from("/tmp/a.png"), PathBuf::from("/tmp/b.png")]
         );
+        assert!(cmd.full);
     }
 
     #[test]
