@@ -3322,7 +3322,12 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
             status: ProviderAccountStatus::Ready,
             added_at: 1,
         }],
-        providers: Vec::new(),
+        providers: vec![codex_app_server_protocol::ProviderAccountProvider {
+            id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            account_count: 1,
+            status: codex_app_server_protocol::ProviderAccountProviderStatus::Ready,
+        }],
         desired_state_revision: "1".to_string(),
         catalog_revision: "1".to_string(),
         next_cursor: None,
@@ -3331,24 +3336,27 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
     assert!(provider_popup.contains("Provider accounts"));
     assert!(provider_popup.contains("Sign in with OpenAI"));
     assert!(provider_popup.contains("Add OpenAI API key"));
+    assert!(provider_popup.contains("Add compatible API provider"));
     assert!(provider_popup.contains("Secondary Codex"));
     assert!(!provider_popup.contains("opaque-provider-id-must-not-render"));
+    assert_chatwidget_snapshot!("provider_accounts", provider_popup);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(AppEvent::OpenProviderApiKeyLabelPrompt)
-    ));
-    chat.open_provider_api_key_label_prompt();
+    let config = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeyLabelPrompt { config }) => config,
+        other => panic!("expected OpenProviderApiKeyLabelPrompt, got {other:?}"),
+    };
+    assert_eq!(config.provider_id, "openai");
+    chat.open_provider_api_key_label_prompt(config);
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
-    let user_label = match rx.try_recv() {
-        Ok(AppEvent::OpenProviderApiKeySecretPrompt { user_label }) => user_label,
+    let (config, user_label) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeySecretPrompt { config, user_label }) => (config, user_label),
         other => panic!("expected OpenProviderApiKeySecretPrompt, got {other:?}"),
     };
     assert_eq!(user_label, "OpenAI API");
 
-    chat.open_provider_api_key_secret_prompt(user_label);
+    chat.open_provider_api_key_secret_prompt(config, user_label);
     let secret = "sk-provider-secret-canary";
     chat.handle_paste(secret.to_string());
     let secret_popup = render_bottom_popup(&chat, /*width*/ 100);
@@ -3362,14 +3370,47 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
     assert!(debug.contains("[REDACTED]"));
     match event {
         AppEvent::SubmitProviderApiKey {
+            config,
             user_label,
             api_key,
         } => {
+            assert_eq!(config.provider_id, "openai");
+            assert_eq!(config.api_base_url, "https://api.openai.com/v1");
             assert_eq!(user_label, "OpenAI API");
             assert_eq!(api_key.into_inner(), secret);
         }
         other => panic!("expected SubmitProviderApiKey, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn provider_plane_collects_a_compatible_provider_without_exposing_its_key() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.open_compatible_provider_id_prompt();
+    chat.handle_paste("alibaba".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let provider_id = match rx.try_recv() {
+        Ok(AppEvent::OpenCompatibleProviderDisplayNamePrompt { provider_id }) => provider_id,
+        other => panic!("expected provider display-name prompt, got {other:?}"),
+    };
+    assert_eq!(provider_id, "alibaba");
+
+    chat.open_compatible_provider_display_name_prompt(provider_id);
+    chat.handle_paste("Alibaba Model Studio".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (provider_id, provider_display_name) = match rx.try_recv() {
+        Ok(AppEvent::OpenCompatibleProviderBaseUrlPrompt {
+            provider_id,
+            provider_display_name,
+        }) => (provider_id, provider_display_name),
+        other => panic!("expected provider base-URL prompt, got {other:?}"),
+    };
+    assert_eq!(provider_id, "alibaba");
+    assert_eq!(provider_display_name, "Alibaba Model Studio");
+
+    chat.open_compatible_provider_base_url_prompt(provider_id, provider_display_name);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("compatible_provider_base_url", popup);
 }
 
 #[tokio::test]

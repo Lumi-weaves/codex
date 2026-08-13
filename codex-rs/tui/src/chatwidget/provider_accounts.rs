@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::app_event::ProviderApiKey;
+use crate::app_event::ProviderApiKeyConfig;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
@@ -16,7 +17,7 @@ const PROVIDER_OAUTH_LOGIN_VIEW_ID: &str = "provider-oauth-login";
 
 impl ChatWidget {
     pub(crate) fn show_provider_accounts(&mut self, response: ProviderAccountListResponse) {
-        let mut items = Vec::with_capacity(response.data.len() + 2);
+        let mut items = Vec::with_capacity(response.data.len() + 3);
         items.push(SelectionItem {
             name: "Sign in with OpenAI".to_string(),
             description: Some("Add another ChatGPT/Codex account by device code".to_string()),
@@ -30,16 +31,35 @@ impl ChatWidget {
             name: "Add OpenAI API key".to_string(),
             description: Some("Create a write-only provider account".to_string()),
             actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenProviderApiKeyLabelPrompt);
+                tx.send(AppEvent::OpenProviderApiKeyLabelPrompt {
+                    config: openai_api_key_config(),
+                });
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
+        items.push(SelectionItem {
+            name: "Add compatible API provider".to_string(),
+            description: Some(
+                "Configure an HTTPS OpenAI-compatible Responses endpoint".to_string(),
+            ),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenCompatibleProviderIdPrompt);
             })],
             dismiss_on_select: true,
             ..Default::default()
         });
 
         for account in response.data {
+            let provider_name = response
+                .providers
+                .iter()
+                .find(|provider| provider.id == account.provider_id)
+                .map(|provider| provider.display_name.as_str())
+                .unwrap_or(account.provider_id.as_str());
             let credential = match account.credential_kind {
-                ProviderAccountCredentialKind::OAuth => "OpenAI OAuth",
-                ProviderAccountCredentialKind::ApiKey => "OpenAI API key",
+                ProviderAccountCredentialKind::OAuth => "OpenAI OAuth".to_string(),
+                ProviderAccountCredentialKind::ApiKey => format!("{provider_name} API key"),
             };
             let status = match account.status {
                 ProviderAccountStatus::Ready => "ready",
@@ -70,15 +90,76 @@ impl ChatWidget {
         });
     }
 
-    pub(crate) fn open_provider_api_key_label_prompt(&mut self) {
+    pub(crate) fn open_compatible_provider_id_prompt(&mut self) {
         let tx = self.app_event_tx.clone();
         let view = CustomPromptView::new(
-            "Add OpenAI API key — display name".to_string(),
+            "Add compatible provider — ID".to_string(),
+            "Stable lowercase ID (letters, digits, '.', '_', '-')".to_string(),
+            String::new(),
+            Some("Targets bind to this identifier; choose it once.".to_string()),
+            Box::new(move |provider_id| {
+                tx.send(AppEvent::OpenCompatibleProviderDisplayNamePrompt { provider_id });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_compatible_provider_display_name_prompt(&mut self, provider_id: String) {
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            "Add compatible provider — display name".to_string(),
+            "Friendly provider name".to_string(),
+            String::new(),
+            Some(format!("Provider ID: {provider_id}")),
+            Box::new(move |provider_display_name| {
+                tx.send(AppEvent::OpenCompatibleProviderBaseUrlPrompt {
+                    provider_id: provider_id.clone(),
+                    provider_display_name,
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_compatible_provider_base_url_prompt(
+        &mut self,
+        provider_id: String,
+        provider_display_name: String,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            "Add compatible provider — API base URL".to_string(),
+            "HTTPS base without /responses".to_string(),
+            "https://example.com/v1".to_string(),
+            Some(format!("{provider_display_name} · ID: {provider_id}")),
+            Box::new(move |api_base_url| {
+                tx.send(AppEvent::OpenProviderApiKeyLabelPrompt {
+                    config: ProviderApiKeyConfig {
+                        provider_id: provider_id.clone(),
+                        provider_display_name: provider_display_name.clone(),
+                        api_base_url,
+                    },
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_provider_api_key_label_prompt(&mut self, config: ProviderApiKeyConfig) {
+        let tx = self.app_event_tx.clone();
+        let view = CustomPromptView::new(
+            format!(
+                "Add {} API key — account name",
+                config.provider_display_name
+            ),
             "Friendly account name".to_string(),
-            "OpenAI API".to_string(),
+            format!("{} API", config.provider_display_name),
             Some("The secret is entered on the next screen.".to_string()),
             Box::new(move |user_label| {
-                tx.send(AppEvent::OpenProviderApiKeySecretPrompt { user_label });
+                tx.send(AppEvent::OpenProviderApiKeySecretPrompt {
+                    config: config.clone(),
+                    user_label,
+                });
             }),
         );
         self.bottom_pane.show_view(Box::new(view));
@@ -183,15 +264,20 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn open_provider_api_key_secret_prompt(&mut self, user_label: String) {
+    pub(crate) fn open_provider_api_key_secret_prompt(
+        &mut self,
+        config: ProviderApiKeyConfig,
+        user_label: String,
+    ) {
         let tx = self.app_event_tx.clone();
         let context_label = Some(format!("Account label: {user_label}"));
         let view = CustomPromptView::new_secret(
-            "Add OpenAI API key".to_string(),
+            format!("Add {} API key", config.provider_display_name),
             "Paste API key (input is hidden)".to_string(),
             context_label,
             Box::new(move |api_key| {
                 tx.send(AppEvent::SubmitProviderApiKey {
+                    config: config.clone(),
                     user_label: user_label.clone(),
                     api_key: ProviderApiKey::new(api_key),
                 });
@@ -207,8 +293,8 @@ impl ChatWidget {
         match result {
             Ok(response) => self.add_info_message(
                 format!(
-                    "Added provider account: {} (OpenAI API key) · ready to attach to a model target",
-                    response.account.user_label
+                    "Added provider account: {} ({} API key) · ready to attach to a model target",
+                    response.account.user_label, response.account.provider_id
                 ),
                 None,
             ),
@@ -216,6 +302,14 @@ impl ChatWidget {
                 self.add_error_message(format!("Could not add provider account: {error}"));
             }
         }
+    }
+}
+
+fn openai_api_key_config() -> ProviderApiKeyConfig {
+    ProviderApiKeyConfig {
+        provider_id: "openai".to_string(),
+        provider_display_name: "OpenAI".to_string(),
+        api_base_url: "https://api.openai.com/v1".to_string(),
     }
 }
 

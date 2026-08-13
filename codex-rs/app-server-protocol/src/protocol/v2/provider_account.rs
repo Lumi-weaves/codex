@@ -36,6 +36,12 @@ pub struct ProviderAccountImportParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountAddApiKeyParams {
+    /// Stable lowercase provider identifier used by model targets.
+    pub provider_id: String,
+    /// User-facing provider name shown in the provider plane.
+    pub provider_display_name: String,
+    /// HTTPS OpenAI-compatible API base URL, without the `/responses` suffix.
+    pub api_base_url: String,
     pub api_key: String,
     pub user_label: String,
 }
@@ -68,6 +74,9 @@ impl std::fmt::Debug for ProviderAccountAddApiKeyParams {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ProviderAccountAddApiKeyParams")
+            .field("provider_id", &self.provider_id)
+            .field("provider_display_name", &self.provider_display_name)
+            .field("api_base_url", &self.api_base_url)
             .field("api_key", &"[REDACTED]")
             .field("user_label", &self.user_label)
             .finish()

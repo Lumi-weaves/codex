@@ -143,8 +143,11 @@ async fn provider_account_api_key_add_returns_only_safe_account_state() -> Resul
         .send_raw_request(
             "providerAccount/apiKey/add",
             Some(serde_json::json!({
+                "providerId": "alibaba",
+                "providerDisplayName": "Alibaba Model Studio",
+                "apiBaseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "apiKey": api_key,
-                "userLabel": "OpenAI API",
+                "userLabel": "Alibaba Primary",
             })),
         )
         .await?;
@@ -155,8 +158,20 @@ async fn provider_account_api_key_add_returns_only_safe_account_state() -> Resul
         response.account.credential_kind,
         ProviderAccountCredentialKind::ApiKey
     );
-    assert_eq!(response.account.user_label, "OpenAI API");
+    assert_eq!(response.account.provider_id, "alibaba");
+    assert_eq!(response.account.user_label, "Alibaba Primary");
     assert!(!serde_json::to_string(&response)?.contains(api_key));
+    let recorded = std::fs::read_to_string(
+        codex_home
+            .path()
+            .join("richcodex/model-backend/provider-api-key-add.json"),
+    )?;
+    let recorded: serde_json::Value = serde_json::from_str(&recorded)?;
+    assert_eq!(recorded["providerId"], "alibaba");
+    assert_eq!(
+        recorded["apiBaseUrl"],
+        "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    );
     assert!(server.shutdown_gracefully().await?.success());
     Ok(())
 }
@@ -245,7 +260,7 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":7,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":8,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -254,7 +269,8 @@ while IFS= read -r line; do
       printf '{"type":"providerAccountImportResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":3,"account":{"id":"local-secondary","providerId":"openai","userLabel":"Secondary","credentialKind":"oauth","status":"verificationRequired","addedAt":123}}\n' "$request_id"
       ;;
     *'"type":"providerAccountAddApiKey"'*'sk-api-key-canary-must-not-return'*)
-      printf '{"type":"providerAccountAddApiKeyResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"account":{"id":"local-api-key","providerId":"openai","userLabel":"OpenAI API","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      printf '%s\n' "$line" > "$state_root/provider-api-key-add.json"
+      printf '{"type":"providerAccountAddApiKeyResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
       ;;
     *'"type":"providerAccountLoginStart"'*)
       printf '{"type":"providerAccountLoginStartResult","requestId":"%s","loginId":"login-safe-handle","status":"awaitingUser","verificationUrl":"https://auth.openai.com/codex/device","userCode":"SAFE-CODE","expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":1,"catalogRevision":1}\n' "$request_id"

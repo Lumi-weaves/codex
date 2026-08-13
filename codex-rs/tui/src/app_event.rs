@@ -221,6 +221,13 @@ pub(crate) struct ModelRouteTargetEditorState {
     pub(crate) accounts: Vec<ProviderAccount>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderApiKeyConfig {
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) api_base_url: String,
+}
+
 /// Secret-bearing provider input with deliberately redacted event diagnostics.
 pub(crate) struct ProviderApiKey(String);
 
@@ -917,16 +924,34 @@ pub(crate) enum AppEvent {
         result: Result<ProviderAccountListResponse, String>,
     },
 
-    /// Start the API-key account wizard by collecting a safe display label.
-    OpenProviderApiKeyLabelPrompt,
+    /// Start the compatible-provider wizard by collecting a stable provider ID.
+    OpenCompatibleProviderIdPrompt,
+
+    /// Continue the compatible-provider wizard with its user-facing name.
+    OpenCompatibleProviderDisplayNamePrompt {
+        provider_id: String,
+    },
+
+    /// Continue the compatible-provider wizard with its Responses API base URL.
+    OpenCompatibleProviderBaseUrlPrompt {
+        provider_id: String,
+        provider_display_name: String,
+    },
+
+    /// Continue an API-key account wizard by collecting a safe account label.
+    OpenProviderApiKeyLabelPrompt {
+        config: ProviderApiKeyConfig,
+    },
 
     /// Continue the API-key account wizard after accepting its display label.
     OpenProviderApiKeySecretPrompt {
+        config: ProviderApiKeyConfig,
         user_label: String,
     },
 
     /// Submit one write-only API key to the bundled provider plane.
     SubmitProviderApiKey {
+        config: ProviderApiKeyConfig,
         user_label: String,
         api_key: ProviderApiKey,
     },

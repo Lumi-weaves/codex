@@ -4100,6 +4100,9 @@ mod tests {
         let add_api_key = ClientRequest::ProviderAccountAddApiKey {
             request_id: request_id(),
             params: v2::ProviderAccountAddApiKeyParams {
+                provider_id: "openai".to_string(),
+                provider_display_name: "OpenAI".to_string(),
+                api_base_url: "https://api.openai.com/v1".to_string(),
                 api_key: api_key.to_string(),
                 user_label: "OpenAI API".to_string(),
             },
@@ -4123,6 +4126,9 @@ mod tests {
                 "id": 1,
                 "method": "providerAccount/apiKey/add",
                 "params": {
+                    "providerId": "openai",
+                    "providerDisplayName": "OpenAI",
+                    "apiBaseUrl": "https://api.openai.com/v1",
                     "apiKey": api_key,
                     "userLabel": "OpenAI API"
                 }

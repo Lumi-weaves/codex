@@ -212,7 +212,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "targets": [
                     {
                         "id": null,
-                        "providerId": "openai",
+                        "providerId": "alibaba",
                         "accountId": "account-backup",
                         "upstreamModelId": "gpt-primary-backup",
                     },
@@ -231,6 +231,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
     assert_eq!(updated.desired_state_revision, "3");
     assert_eq!(updated.route.targets.len(), 2);
     assert_eq!(updated.route.targets[0].id, "target-backup");
+    assert_eq!(updated.route.targets[0].provider_id, "alibaba");
     assert_eq!(updated.route.targets[0].priority, 0);
     assert_eq!(updated.route.targets[1].id, "target-created");
     assert_eq!(updated.route.targets[1].priority, 1);
@@ -325,6 +326,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
     assert_eq!(recorded_targets["expectedRevision"], 2);
     assert_eq!(recorded_targets["modelTag"], "gpt-primary");
     assert_eq!(recorded_targets["targets"].as_array().unwrap().len(), 2);
+    assert_eq!(recorded_targets["targets"][0]["providerId"], "alibaba");
     assert!(server.shutdown_gracefully().await?.success());
     Ok(())
 }
@@ -361,7 +363,7 @@ test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
 route_state=0
-printf '%s\n' '{"type":"ready","protocolVersion":7,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}'
+printf '%s\n' '{"type":"ready","protocolVersion":8,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":1,"status":"ready"},{"id":"alibaba","displayName":"Alibaba Model Studio","accountCount":1,"status":"ready"}],"models":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -371,9 +373,9 @@ while IFS= read -r line; do
       elif [ "$route_state" -eq 1 ]; then
         printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}]}\n' "$request_id"
       elif [ "$route_state" -eq 2 ]; then
-        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"alibaba","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
       else
-        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"alibaba","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
       fi
       ;;
     *'"type":"modelRouteCreate"'*'"expectedRevision":0'*)
@@ -387,11 +389,11 @@ while IFS= read -r line; do
     *'"type":"modelRouteSetTargets"'*)
       printf '%s\n' "$line" > "$state_root/model-route-set-targets.json"
       route_state=2
-      printf '{"type":"modelRouteSetTargetsResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
+      printf '{"type":"modelRouteSetTargetsResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"alibaba","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
       ;;
     *'"type":"modelRouteRetire"'*)
       route_state=3
-      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
+      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"alibaba","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

@@ -1313,18 +1313,33 @@ impl App {
                     .chat_widget
                     .add_error_message(format!("Could not load provider accounts: {error}")),
             },
-            AppEvent::OpenProviderApiKeyLabelPrompt => {
-                self.chat_widget.open_provider_api_key_label_prompt();
+            AppEvent::OpenCompatibleProviderIdPrompt => {
+                self.chat_widget.open_compatible_provider_id_prompt();
             }
-            AppEvent::OpenProviderApiKeySecretPrompt { user_label } => {
+            AppEvent::OpenCompatibleProviderDisplayNamePrompt { provider_id } => {
                 self.chat_widget
-                    .open_provider_api_key_secret_prompt(user_label);
+                    .open_compatible_provider_display_name_prompt(provider_id);
+            }
+            AppEvent::OpenCompatibleProviderBaseUrlPrompt {
+                provider_id,
+                provider_display_name,
+            } => {
+                self.chat_widget
+                    .open_compatible_provider_base_url_prompt(provider_id, provider_display_name);
+            }
+            AppEvent::OpenProviderApiKeyLabelPrompt { config } => {
+                self.chat_widget.open_provider_api_key_label_prompt(config);
+            }
+            AppEvent::OpenProviderApiKeySecretPrompt { config, user_label } => {
+                self.chat_widget
+                    .open_provider_api_key_secret_prompt(config, user_label);
             }
             AppEvent::SubmitProviderApiKey {
+                config,
                 user_label,
                 api_key,
             } => {
-                self.submit_provider_api_key(app_server, user_label, api_key);
+                self.submit_provider_api_key(app_server, config, user_label, api_key);
             }
             AppEvent::ProviderApiKeyAddCompleted { result } => {
                 self.chat_widget.finish_provider_api_key_add(result);

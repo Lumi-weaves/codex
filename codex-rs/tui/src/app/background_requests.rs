@@ -76,6 +76,7 @@ impl App {
     pub(super) fn submit_provider_api_key(
         &mut self,
         app_server: &AppServerSession,
+        config: crate::app_event::ProviderApiKeyConfig,
         user_label: String,
         api_key: crate::app_event::ProviderApiKey,
     ) {
@@ -88,6 +89,9 @@ impl App {
                 .request_typed(ClientRequest::ProviderAccountAddApiKey {
                     request_id,
                     params: ProviderAccountAddApiKeyParams {
+                        provider_id: config.provider_id,
+                        provider_display_name: config.provider_display_name,
+                        api_base_url: config.api_base_url,
                         api_key: api_key.into_inner(),
                         user_label,
                     },

@@ -62,6 +62,14 @@ pub(crate) struct ProviderAccountImportResult {
 
 pub(crate) type ProviderAccountAddApiKeyResult = ProviderAccountImportResult;
 
+pub(crate) struct ProviderAccountAddApiKeyRequest {
+    pub provider_id: String,
+    pub provider_display_name: String,
+    pub api_base_url: String,
+    pub api_key: String,
+    pub user_label: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModelRouteReadResult {
     pub desired_state_revision: u64,
@@ -119,6 +127,8 @@ pub(super) enum BackendOperationErrorCode {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    InvalidProvider,
+    ProviderConflict,
     InvalidApiKey,
     LoginUnavailable,
     LoginLimitReached,
@@ -140,6 +150,8 @@ pub(crate) enum RichCodexBackendClientError {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    InvalidProvider,
+    ProviderConflict,
     InvalidApiKey,
     LoginUnavailable,
     LoginLimitReached,
@@ -161,6 +173,8 @@ impl From<BackendOperationErrorCode> for RichCodexBackendClientError {
             BackendOperationErrorCode::CredentialExpired => Self::CredentialExpired,
             BackendOperationErrorCode::AccountAlreadyExists => Self::AccountAlreadyExists,
             BackendOperationErrorCode::AccountLimitReached => Self::AccountLimitReached,
+            BackendOperationErrorCode::InvalidProvider => Self::InvalidProvider,
+            BackendOperationErrorCode::ProviderConflict => Self::ProviderConflict,
             BackendOperationErrorCode::InvalidApiKey => Self::InvalidApiKey,
             BackendOperationErrorCode::LoginUnavailable => Self::LoginUnavailable,
             BackendOperationErrorCode::LoginLimitReached => Self::LoginLimitReached,
@@ -190,8 +204,7 @@ enum BackendCommand {
     },
     AddApiKey {
         request_id: String,
-        api_key: String,
-        user_label: String,
+        request: ProviderAccountAddApiKeyRequest,
         response:
             oneshot::Sender<Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>>,
     },
@@ -306,15 +319,13 @@ impl RichCodexBackendClient {
 
     pub(crate) async fn add_api_key_provider_account(
         &self,
-        api_key: String,
-        user_label: String,
+        request: ProviderAccountAddApiKeyRequest,
     ) -> Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError> {
         let (response, received) = oneshot::channel();
         self.commands
             .send(BackendCommand::AddApiKey {
                 request_id: self.request_id(),
-                api_key,
-                user_label,
+                request,
                 response,
             })
             .await
@@ -523,16 +534,14 @@ async fn run_backend_actor(
             }
             BackendCommand::AddApiKey {
                 request_id,
-                api_key,
-                user_label,
+                request,
                 response,
             } => {
                 let result = request_provider_account_add_api_key(
                     &mut stdin,
                     &mut stdout,
                     &request_id,
-                    &api_key,
-                    &user_label,
+                    &request,
                 )
                 .await;
                 let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
@@ -833,8 +842,7 @@ pub(super) async fn request_provider_account_add_api_key<W, R>(
     writer: &mut W,
     reader: &mut R,
     request_id: &str,
-    api_key: &str,
-    user_label: &str,
+    request: &ProviderAccountAddApiKeyRequest,
 ) -> Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>
 where
     W: AsyncWrite + Unpin,
@@ -844,8 +852,11 @@ where
         writer,
         &AppServerMessage::ProviderAccountAddApiKey {
             request_id,
-            api_key,
-            user_label,
+            provider_id: &request.provider_id,
+            provider_display_name: &request.provider_display_name,
+            api_base_url: &request.api_base_url,
+            api_key: &request.api_key,
+            user_label: &request.user_label,
         },
     )
     .await
@@ -1062,11 +1073,24 @@ fn validate_provider_accounts(
             "model backend provider-account response exceeded its item limit",
         ));
     }
+    let mut provider_ids = HashSet::with_capacity(providers.len());
     for provider in providers {
         validate_provider(provider)?;
+        if !provider_ids.insert(provider.id.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model backend sent a duplicate provider id",
+            ));
+        }
     }
     for account in accounts {
         validate_provider_account(account)?;
+        if !provider_ids.contains(account.provider_id.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model backend sent an account for an unknown provider",
+            ));
+        }
     }
     if let Some(cursor) = next_cursor {
         validate_safe_text(cursor, 64)?;
@@ -1075,8 +1099,14 @@ fn validate_provider_accounts(
 }
 
 pub(super) fn validate_provider(provider: &ProviderSummary) -> io::Result<()> {
-    validate_safe_text(&provider.id, 256)?;
+    validate_provider_id(&provider.id)?;
     validate_safe_text(&provider.display_name, 256)?;
+    if provider.account_count > 100 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid provider account count",
+        ));
+    }
     if !matches!(provider.status.as_str(), "ready" | "needsAccount") {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1149,12 +1179,7 @@ pub(super) fn validate_model_route(route: &ModelSummary) -> io::Result<()> {
                 "model backend sent a duplicate model-route target id",
             ));
         }
-        if target.provider_id != "openai" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "model backend sent an unsupported model-route provider",
-            ));
-        }
+        validate_provider_id(&target.provider_id)?;
         validate_safe_text(&target.account_id, 80)?;
         validate_trimmed_safe_text(&target.upstream_model_id, 512)?;
         if usize::try_from(target.priority).ok() != Some(priority) {
@@ -1200,6 +1225,30 @@ fn validate_model_tag(value: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn validate_provider_id(value: &str) -> io::Result<()> {
+    validate_trimmed_safe_text(value, 64)?;
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid provider id",
+        ));
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit()
+        || bytes.any(|byte| {
+            !byte.is_ascii_lowercase()
+                && !byte.is_ascii_digit()
+                && !matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid provider id",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_trimmed_safe_text(value: &str, max_bytes: usize) -> io::Result<()> {
     validate_safe_text(value, max_bytes)?;
     if value.trim() != value {
@@ -1213,7 +1262,7 @@ fn validate_trimmed_safe_text(value: &str, max_bytes: usize) -> io::Result<()> {
 
 pub(super) fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()> {
     validate_safe_text(&account.id, 80)?;
-    validate_safe_text(&account.provider_id, 256)?;
+    validate_provider_id(&account.provider_id)?;
     validate_safe_text(&account.user_label, 80)?;
     if !matches!(account.credential_kind.as_str(), "oauth" | "apiKey") {
         return Err(io::Error::new(

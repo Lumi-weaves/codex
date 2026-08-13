@@ -1,5 +1,6 @@
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
+use crate::richcodex_backend::ProviderAccountAddApiKeyRequest;
 use crate::richcodex_backend::ProviderAccountAddApiKeyResult;
 use crate::richcodex_backend::ProviderAccountImportResult;
 use crate::richcodex_backend::ProviderAccountListResult;
@@ -85,7 +86,11 @@ impl ProviderAccountRequestProcessor {
         &self,
         params: ProviderAccountAddApiKeyParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        if params.api_key.is_empty()
+        if !valid_provider_id(&params.provider_id)
+            || !valid_safe_text(&params.provider_display_name, 80)
+            || params.provider_display_name.trim() != params.provider_display_name
+            || !valid_api_base_url(&params.api_base_url)
+            || params.api_key.is_empty()
             || params.api_key.len() > 64 * 1024
             || params.api_key.trim() != params.api_key
             || params.api_key.chars().any(char::is_control)
@@ -98,7 +103,13 @@ impl ProviderAccountRequestProcessor {
         }
         let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
         backend
-            .add_api_key_provider_account(params.api_key, params.user_label)
+            .add_api_key_provider_account(ProviderAccountAddApiKeyRequest {
+                provider_id: params.provider_id,
+                provider_display_name: params.provider_display_name,
+                api_base_url: params.api_base_url,
+                api_key: params.api_key,
+                user_label: params.user_label,
+            })
             .await
             .map(provider_account_add_api_key_response)
             .map(|response| Some(response.into()))
@@ -286,6 +297,12 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
         RichCodexBackendClientError::AccountLimitReached => {
             invalid_params("provider account limit reached")
         }
+        RichCodexBackendClientError::InvalidProvider => {
+            invalid_params("provider configuration is invalid")
+        }
+        RichCodexBackendClientError::ProviderConflict => {
+            invalid_params("providerId is already configured differently")
+        }
         RichCodexBackendClientError::InvalidApiKey => invalid_params("API key is invalid"),
         RichCodexBackendClientError::LoginUnavailable => {
             internal_error("OpenAI provider login is unavailable")
@@ -307,4 +324,32 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
             internal_error("RichCodex provider account backend returned an invalid operation error")
         }
     }
+}
+
+fn valid_provider_id(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    value.len() <= 64
+        && (first.is_ascii_lowercase() || first.is_ascii_digit())
+        && bytes.all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'_' | b'-')
+        })
+}
+
+fn valid_api_base_url(value: &str) -> bool {
+    if value.len() > 2048 || value.trim() != value || value.ends_with('/') {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    let loopback = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    (url.scheme() == "https" || url.scheme() == "http" && loopback)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() != "/"
 }

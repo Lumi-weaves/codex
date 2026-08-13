@@ -28,6 +28,7 @@ pub(crate) use client::ModelRouteMutationResult;
 pub(crate) use client::ModelRouteReadResult;
 pub(crate) use client::ModelRouteSetTargetsRequest;
 pub(crate) use client::ModelRouteTargetRequest;
+pub(crate) use client::ProviderAccountAddApiKeyRequest;
 pub(crate) use client::ProviderAccountAddApiKeyResult;
 pub(crate) use client::ProviderAccountImportResult;
 pub(crate) use client::ProviderAccountListResult;
@@ -52,7 +53,7 @@ use provider_login::request_provider_account_login_start;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 7;
+const BACKEND_PROTOCOL_VERSION: u32 = 8;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -262,6 +263,9 @@ enum AppServerMessage<'a> {
     },
     ProviderAccountAddApiKey {
         request_id: &'a str,
+        provider_id: &'a str,
+        provider_display_name: &'a str,
+        api_base_url: &'a str,
         api_key: &'a str,
         user_label: &'a str,
     },
@@ -602,8 +606,15 @@ fn validate_snapshot(
             "model backend snapshot exceeded its item limit",
         ));
     }
+    let mut provider_ids = HashSet::with_capacity(providers.len());
     for provider in providers {
         client::validate_provider(provider)?;
+        if !provider_ids.insert(provider.id.as_str()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model backend snapshot contained a duplicate provider id",
+            ));
+        }
     }
     let mut model_tags = HashSet::with_capacity(models.len());
     let mut target_ids = HashSet::new();
@@ -631,6 +642,12 @@ fn validate_snapshot(
             ));
         }
         for target in &model.targets {
+            if !provider_ids.contains(target.provider_id.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "model backend snapshot referenced an unknown provider",
+                ));
+            }
             if !target_ids.insert(target.id.as_str()) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,

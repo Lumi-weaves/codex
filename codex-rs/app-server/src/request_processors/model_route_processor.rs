@@ -128,9 +128,7 @@ impl ModelRouteRequestProcessor {
         let mut bindings = std::collections::HashSet::new();
         let mut targets = Vec::with_capacity(params.targets.len());
         for target in params.targets {
-            if target.provider_id != "openai" {
-                return Err(invalid_params("providerId is not supported by this build"));
-            }
+            validate_provider_id(&target.provider_id)?;
             if let Some(id) = target.id.as_deref() {
                 validate_text(id, 80, "target id")?;
                 if !target_ids.insert(id.to_string()) {
@@ -211,9 +209,7 @@ fn validate_create_params(params: &ModelRouteCreateParams) -> Result<(), JSONRPC
     validate_model_tag(&params.model_tag)?;
     validate_trimmed_text(&params.display_name, 80, "displayName")?;
     validate_trimmed_text(&params.semantic_model, 200, "semanticModel")?;
-    if params.provider_id != "openai" {
-        return Err(invalid_params("providerId is not supported by this build"));
-    }
+    validate_provider_id(&params.provider_id)?;
     validate_text(&params.account_id, 80, "accountId")?;
     validate_trimmed_text(&params.upstream_model_id, 512, "upstreamModelId")
 }
@@ -232,6 +228,24 @@ fn validate_model_tag(value: &str) -> Result<(), JSONRPCErrorError> {
         })
     {
         return Err(invalid_params("modelTag is invalid"));
+    }
+    Ok(())
+}
+
+fn validate_provider_id(value: &str) -> Result<(), JSONRPCErrorError> {
+    validate_trimmed_text(value, 64, "providerId")?;
+    let mut bytes = value.bytes();
+    let Some(first) = bytes.next() else {
+        return Err(invalid_params("providerId is invalid"));
+    };
+    if (!first.is_ascii_lowercase() && !first.is_ascii_digit())
+        || bytes.any(|byte| {
+            !byte.is_ascii_lowercase()
+                && !byte.is_ascii_digit()
+                && !matches!(byte, b'.' | b'_' | b'-')
+        })
+    {
+        return Err(invalid_params("providerId is invalid"));
     }
     Ok(())
 }
@@ -341,6 +355,8 @@ fn model_route_error(error: RichCodexBackendClientError) -> JSONRPCErrorError {
         | RichCodexBackendClientError::CredentialExpired
         | RichCodexBackendClientError::AccountAlreadyExists
         | RichCodexBackendClientError::AccountLimitReached
+        | RichCodexBackendClientError::InvalidProvider
+        | RichCodexBackendClientError::ProviderConflict
         | RichCodexBackendClientError::InvalidApiKey
         | RichCodexBackendClientError::LoginUnavailable
         | RichCodexBackendClientError::LoginLimitReached
