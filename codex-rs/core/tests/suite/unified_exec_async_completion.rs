@@ -34,6 +34,7 @@ use tokio::time::timeout;
 use wiremock::ResponseTemplate;
 
 const COMPLETION_MARKER: &str = "<unified_exec_completion>";
+const NO_FINISH_MARKER: &str = "no-finish";
 const OUTPUT_AVAILABLE_MARKER: &str = "<unified_exec_output_available>";
 
 fn completion_feature_config(config: &mut codex_core::config::Config) {
@@ -90,6 +91,30 @@ async fn submit_turn(test: &TestCodex, prompt: &str) -> Result<()> {
 
 fn request_contains_completion_marker(body: &Value) -> bool {
     request_contains_marker(body, COMPLETION_MARKER)
+}
+
+fn no_finish_message_count(body: &Value) -> usize {
+    body.get("input")
+        .and_then(Value::as_array)
+        .map(|input| {
+            input
+                .iter()
+                .filter(|item| {
+                    item.get("role").and_then(Value::as_str) == Some("developer")
+                        && item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|content| {
+                                content.as_slice()
+                                    == [json!({
+                                        "text": NO_FINISH_MARKER,
+                                        "type": "input_text",
+                                    })]
+                            })
+                })
+                .count()
+        })
+        .unwrap_or_default()
 }
 
 fn request_contains_marker(body: &Value, marker: &str) -> bool {
@@ -393,9 +418,19 @@ async fn user_input_wakes_awaited_turn_before_terminal_completion() -> Result<()
         !request_contains_completion_marker(&user_wake_request),
         "the user wake must happen before terminal completion"
     );
+    assert_eq!(
+        no_finish_message_count(&user_wake_request),
+        1,
+        "the model must be told not to finish while the terminal remains live"
+    );
     assert!(
         request_contains_completion_marker(&completion_request),
         "the later poll must still consume the terminal completion"
+    );
+    assert_eq!(
+        no_finish_message_count(&completion_request),
+        0,
+        "the constraint must disappear after the terminal closes"
     );
     Ok(())
 }
@@ -449,7 +484,18 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
         completed.last_agent_message.as_deref(),
         Some("The awaited work is now handled.")
     );
-    assert_eq!(response_mock.requests().len(), 3);
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        no_finish_message_count(&requests[1].body_json()),
+        1,
+        "the premature final-answer request must carry the active-resource constraint"
+    );
+    assert_eq!(
+        no_finish_message_count(&requests[2].body_json()),
+        0,
+        "the completion request must not retain the transient constraint"
+    );
     Ok(())
 }
 
@@ -753,6 +799,11 @@ async fn synchronous_exit_does_not_start_an_extra_turn() -> Result<()> {
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2, "no extra turn for a synchronous exit");
+    assert_eq!(
+        no_finish_message_count(&requests[1].body_json()),
+        0,
+        "a synchronously closed terminal must not prohibit finishing"
+    );
     assert!(
         !request_contains_completion_marker(&requests[1].body_json()),
         "no completion fragment when the exit was returned synchronously"
