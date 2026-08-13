@@ -19,7 +19,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 7 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 8 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -207,6 +207,9 @@ type HeadlessInboundMessage =
   | {
     readonly type: "providerAccountAddApiKey";
     readonly requestId: string;
+    readonly providerId: string;
+    readonly providerDisplayName: string;
+    readonly apiBaseUrl: string;
     readonly apiKey: string;
     readonly userLabel: string;
   }
@@ -233,7 +236,7 @@ type HeadlessInboundMessage =
     readonly modelTag: string;
     readonly displayName: string;
     readonly semanticModel: string;
-    readonly providerId: "openai";
+    readonly providerId: string;
     readonly accountId: string;
     readonly upstreamModelId: string;
   }
@@ -250,7 +253,7 @@ type HeadlessInboundMessage =
     readonly modelTag: string;
     readonly targets: readonly {
       readonly id?: string;
-      readonly providerId: "openai";
+      readonly providerId: string;
       readonly accountId: string;
       readonly upstreamModelId: string;
     }[];
@@ -477,8 +480,20 @@ function parseInboundMessage(text: string):
   if (record.type === "providerAccountAddApiKey") {
     const requestId = parseRequestId(record.requestId);
     if (
-      !hasExactlyKeys(record, ["type", "requestId", "apiKey", "userLabel"])
+      !hasExactlyKeys(record, [
+        "type",
+        "requestId",
+        "providerId",
+        "providerDisplayName",
+        "apiBaseUrl",
+        "apiKey",
+        "userLabel",
+      ])
       || !requestId
+      || !isProviderId(record.providerId)
+      || !isBoundedOpaqueText(record.providerDisplayName, 80)
+      || record.providerDisplayName.trim() !== record.providerDisplayName
+      || !isApiBaseUrl(record.apiBaseUrl)
       || !isBoundedOpaqueText(record.apiKey, 64 * 1024)
       || record.apiKey.trim() !== record.apiKey
       || !isBoundedOpaqueText(record.userLabel, 80)
@@ -491,6 +506,9 @@ function parseInboundMessage(text: string):
       message: {
         type: "providerAccountAddApiKey",
         requestId,
+        providerId: record.providerId,
+        providerDisplayName: record.providerDisplayName,
+        apiBaseUrl: record.apiBaseUrl,
         apiKey: record.apiKey,
         userLabel: record.userLabel,
       },
@@ -559,7 +577,7 @@ function parseInboundMessage(text: string):
       || record.displayName.trim() !== record.displayName
       || !isBoundedOpaqueText(record.semanticModel, 200)
       || record.semanticModel.trim() !== record.semanticModel
-      || record.providerId !== "openai"
+      || !isProviderId(record.providerId)
       || !isBoundedOpaqueText(record.accountId, 80)
       || !isBoundedOpaqueText(record.upstreamModelId, 512)
       || record.upstreamModelId.trim() !== record.upstreamModelId
@@ -575,7 +593,7 @@ function parseInboundMessage(text: string):
         modelTag: record.modelTag,
         displayName: record.displayName,
         semanticModel: record.semanticModel,
-        providerId: "openai",
+        providerId: record.providerId,
         accountId: record.accountId,
         upstreamModelId: record.upstreamModelId,
       },
@@ -601,14 +619,14 @@ function parseInboundMessage(text: string):
         !isRecord(target)
         || ownKeys(target).some(key => !["id", "providerId", "accountId", "upstreamModelId"].includes(key))
         || target.id !== undefined && target.id !== null && !isBoundedOpaqueText(target.id, 80)
-        || target.providerId !== "openai"
+        || !isProviderId(target.providerId)
         || !isBoundedOpaqueText(target.accountId, 80)
         || !isBoundedOpaqueText(target.upstreamModelId, 512)
         || target.upstreamModelId.trim() !== target.upstreamModelId
       ) return [];
       return [{
         ...(typeof target.id === "string" ? { id: target.id } : {}),
-        providerId: "openai" as const,
+        providerId: target.providerId,
         accountId: target.accountId,
         upstreamModelId: target.upstreamModelId,
       }];
@@ -657,6 +675,31 @@ function isBoundedOpaqueText(value: unknown, maxBytes: number): value is string 
     && value.length > 0
     && Buffer.byteLength(value, "utf8") <= maxBytes
     && !CONTROL_CHARACTER.test(value);
+}
+
+function isProviderId(value: unknown): value is string {
+  return isBoundedOpaqueText(value, 64)
+    && value.trim() === value
+    && /^[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+
+function isApiBaseUrl(value: unknown): value is string {
+  if (!isBoundedOpaqueText(value, 2048) || value.trim() !== value) return false;
+  try {
+    const url = new URL(value);
+    const loopback = url.hostname === "localhost"
+      || url.hostname === "127.0.0.1"
+      || url.hostname === "[::1]";
+    return (url.protocol === "https:" || url.protocol === "http:" && loopback)
+      && url.username === ""
+      && url.password === ""
+      && url.search === ""
+      && url.hash === ""
+      && url.pathname !== "/"
+      && !url.pathname.endsWith("/");
+  } catch {
+    return false;
+  }
 }
 
 async function* streamChunks(input: HeadlessBackendInput): AsyncGenerator<Uint8Array> {
@@ -742,6 +785,8 @@ function operationErrorForCode(
     credential_expired: "selected Codex login has expired",
     account_already_exists: "this provider account is already configured",
     account_limit_reached: "provider account limit reached",
+    invalid_provider: "provider configuration is invalid",
+    provider_conflict: "provider ID is already configured differently",
     invalid_api_key: "API key is invalid",
     login_unavailable: "provider login is unavailable",
     login_limit_reached: "provider login limit reached",
@@ -917,10 +962,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 continue;
               }
               if (parsed.message.type === "providerAccountAddApiKey") {
-                const account = modelPlaneStore.addApiKeyAccount(
-                  parsed.message.apiKey,
-                  parsed.message.userLabel,
-                );
+                const account = modelPlaneStore.addApiKeyAccount(parsed.message);
                 const snapshot = modelPlaneStore.snapshot();
                 if (!await write({
                   type: "providerAccountAddApiKeyResult",

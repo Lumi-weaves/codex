@@ -6,7 +6,6 @@ import type {
 } from "./model-plane";
 
 const OPENAI_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
-const OPENAI_API_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -293,7 +292,9 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
   ): Promise<Response> => {
     const credential = await refreshCredential(candidate, forceRefresh);
     const upstream = await fetchImpl(
-      credential.kind === "oauth" ? OPENAI_CODEX_RESPONSES_URL : OPENAI_API_RESPONSES_URL,
+      credential.kind === "oauth"
+        ? OPENAI_CODEX_RESPONSES_URL
+        : `${candidate.apiBaseUrl}/responses`,
       {
         method: "POST",
         headers: forwardedRequestHeaders(request, credential),

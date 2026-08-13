@@ -17,11 +17,14 @@ import { dirname, join } from "node:path";
 
 export const OPENAI_PROVIDER_ID = "openai" as const;
 export const OPENAI_PROVIDER_DISPLAY_NAME = "OpenAI" as const;
+export const OPENAI_API_BASE_URL = "https://api.openai.com/v1" as const;
 export const PROVIDER_ACCOUNT_STORE_MAX_BYTES = 1024 * 1024;
 export const PROVIDER_ACCOUNT_MAX_ROWS = 64;
+export const PROVIDER_MAX_ROWS = 64;
 export const MODEL_ROUTE_MAX_ROWS = 256;
 
-const MODEL_PLANE_SCHEMA_VERSION = 1 as const;
+const MODEL_PLANE_SCHEMA_VERSION = 2 as const;
+const LEGACY_MODEL_PLANE_SCHEMA_VERSION = 1 as const;
 const LEGACY_ACCOUNT_SCHEMA_VERSION = 1 as const;
 const SAFE_TEXT_CONTROL = /[\u0000-\u001f\u007f]/;
 
@@ -29,7 +32,7 @@ export type ProviderAccountStatus = "ready" | "verificationRequired" | "reauthen
 
 export interface SafeProviderAccount {
   readonly id: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly userLabel: string;
   readonly credentialKind: "oauth" | "apiKey";
   readonly status: ProviderAccountStatus;
@@ -37,8 +40,8 @@ export interface SafeProviderAccount {
 }
 
 export interface SafeProviderSummary {
-  readonly id: typeof OPENAI_PROVIDER_ID;
-  readonly displayName: typeof OPENAI_PROVIDER_DISPLAY_NAME;
+  readonly id: string;
+  readonly displayName: string;
   readonly accountCount: number;
   readonly status: "ready" | "needsAccount";
 }
@@ -58,13 +61,19 @@ export interface StoredApiKeyCredential {
 
 export type StoredProviderCredential = StoredOAuthCredential | StoredApiKeyCredential;
 
+interface StoredProvider {
+  readonly id: string;
+  readonly displayName: string;
+  readonly apiBaseUrl: string;
+}
+
 interface StoredProviderAccount extends SafeProviderAccount {
   readonly credential: StoredProviderCredential;
 }
 
 interface StoredModelTarget {
   readonly id: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModelId: string;
   readonly priority: number;
@@ -87,6 +96,7 @@ interface ModelPlaneDocument {
   readonly schemaVersion: typeof MODEL_PLANE_SCHEMA_VERSION;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
+  readonly providers: readonly StoredProvider[];
   readonly accounts: readonly StoredProviderAccount[];
   readonly modelTags: readonly StoredModelTag[];
   readonly displayEntries: readonly StoredDisplayEntry[];
@@ -106,6 +116,8 @@ export type ProviderAccountImportCode =
   | "credential_expired"
   | "account_already_exists"
   | "account_limit_reached"
+  | "invalid_provider"
+  | "provider_conflict"
   | "invalid_api_key"
   | "login_unavailable"
   | "login_limit_reached"
@@ -142,7 +154,7 @@ export type SafeModelTargetStatus = "unverified" | "reauthenticationRequired";
 
 export interface SafeModelTarget {
   readonly id: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModelId: string;
   readonly priority: number;
@@ -162,14 +174,14 @@ export interface CreateModelRouteInput {
   readonly modelTag: string;
   readonly displayName: string;
   readonly semanticModel: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModelId: string;
 }
 
 export interface SetModelRouteTargetInput {
   readonly id?: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModelId: string;
 }
@@ -180,11 +192,19 @@ export interface SetModelRouteTargetsInput {
   readonly targets: readonly SetModelRouteTargetInput[];
 }
 
+export interface AddApiKeyAccountInput {
+  readonly providerId: string;
+  readonly providerDisplayName: string;
+  readonly apiBaseUrl: string;
+  readonly apiKey: string;
+  readonly userLabel: string;
+}
+
 export interface ModelPlaneStore {
   snapshot(): ProviderAccountSnapshot;
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount;
-  addApiKeyAccount(apiKey: string, userLabel: string): SafeProviderAccount;
+  addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
   createModelRoute(input: CreateModelRouteInput): SafeModelRoute;
   setModelRouteTargets(input: SetModelRouteTargetsInput): SafeModelRoute;
   retireModelRoute(modelTag: string, expectedRevision: number): SafeModelRoute;
@@ -202,11 +222,20 @@ export interface ModelExecutionCandidate {
   readonly modelTag: string;
   readonly semanticModel: string;
   readonly targetId: string;
-  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly providerId: string;
   readonly accountId: string;
   readonly upstreamModelId: string;
+  readonly apiBaseUrl: string;
   readonly priority: number;
   readonly credential: StoredProviderCredential;
+}
+
+function openAiProvider(): StoredProvider {
+  return {
+    id: OPENAI_PROVIDER_ID,
+    displayName: OPENAI_PROVIDER_DISPLAY_NAME,
+    apiBaseUrl: OPENAI_API_BASE_URL,
+  };
 }
 
 function emptyDocument(): ModelPlaneDocument {
@@ -214,6 +243,7 @@ function emptyDocument(): ModelPlaneDocument {
     schemaVersion: MODEL_PLANE_SCHEMA_VERSION,
     desiredStateRevision: 0,
     catalogRevision: 0,
+    providers: [openAiProvider()],
     accounts: [],
     modelTags: [],
     displayEntries: [],
@@ -235,6 +265,48 @@ function isSafeText(value: unknown, maxBytes: number): value is string {
     && !SAFE_TEXT_CONTROL.test(value);
 }
 
+function isProviderId(value: unknown): value is string {
+  return isSafeText(value, 64)
+    && value.trim() === value
+    && /^[a-z0-9][a-z0-9._-]*$/.test(value);
+}
+
+function normalizedApiBaseUrl(value: unknown): string | null {
+  if (!isSafeText(value, 2048) || value.trim() !== value) return null;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  const loopback = url.hostname === "localhost"
+    || url.hostname === "127.0.0.1"
+    || url.hostname === "[::1]";
+  if (
+    url.protocol !== "https:" && !(url.protocol === "http:" && loopback)
+    || url.username !== ""
+    || url.password !== ""
+    || url.search !== ""
+    || url.hash !== ""
+  ) return null;
+  const pathname = url.pathname.replace(/\/+$/, "");
+  if (pathname === "") return null;
+  url.pathname = pathname;
+  return url.toString().replace(/\/$/, "");
+}
+
+function parseStoredProvider(value: unknown): StoredProvider | null {
+  if (
+    !isRecord(value)
+    || !isProviderId(value.id)
+    || !isSafeText(value.displayName, 80)
+    || value.displayName.trim() !== value.displayName
+  ) return null;
+  const apiBaseUrl = normalizedApiBaseUrl(value.apiBaseUrl);
+  if (apiBaseUrl === null || apiBaseUrl !== value.apiBaseUrl) return null;
+  return { id: value.id, displayName: value.displayName, apiBaseUrl };
+}
+
 function isSafeAccountStatus(value: unknown): value is ProviderAccountStatus {
   return value === "ready"
     || value === "verificationRequired"
@@ -245,7 +317,7 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
   if (!isRecord(value) || !isRecord(value.credential)) return null;
   const credential = value.credential;
   const commonIsValid = isSafeText(value.id, 80)
-    && value.providerId === OPENAI_PROVIDER_ID
+    && isProviderId(value.providerId)
     && isSafeText(value.userLabel, 80)
     && isSafeAccountStatus(value.status)
     && Number.isSafeInteger(value.addedAt)
@@ -255,7 +327,7 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     if (!isSafeText(credential.apiKey, 64 * 1024)) return null;
     return {
       id: value.id as string,
-      providerId: OPENAI_PROVIDER_ID,
+      providerId: value.providerId as string,
       userLabel: value.userLabel as string,
       credentialKind: "apiKey",
       status: value.status as ProviderAccountStatus,
@@ -264,7 +336,8 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     };
   }
   if (
-    credential.kind !== undefined && credential.kind !== "oauth"
+    value.providerId !== OPENAI_PROVIDER_ID
+    || credential.kind !== undefined && credential.kind !== "oauth"
     || !isSafeText(credential.accessToken, 64 * 1024)
     || !isSafeText(credential.refreshToken, 64 * 1024)
     || !isSafeText(credential.chatgptAccountId, 512)
@@ -274,7 +347,7 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
   }
   return {
     id: value.id as string,
-    providerId: OPENAI_PROVIDER_ID,
+    providerId: value.providerId as string,
     userLabel: value.userLabel as string,
     credentialKind: "oauth",
     status: value.status as ProviderAccountStatus,
@@ -293,7 +366,7 @@ function parseStoredTarget(value: unknown): StoredModelTarget | null {
   if (
     !isRecord(value)
     || !isSafeText(value.id, 80)
-    || value.providerId !== OPENAI_PROVIDER_ID
+    || !isProviderId(value.providerId)
     || !isSafeText(value.accountId, 80)
     || !isSafeText(value.upstreamModelId, 512)
     || !Number.isSafeInteger(value.priority)
@@ -303,7 +376,7 @@ function parseStoredTarget(value: unknown): StoredModelTarget | null {
   }
   return {
     id: value.id as string,
-    providerId: OPENAI_PROVIDER_ID,
+    providerId: value.providerId as string,
     accountId: value.accountId as string,
     upstreamModelId: value.upstreamModelId as string,
     priority: value.priority as number,
@@ -389,6 +462,7 @@ function parseDocument(bytes: Uint8Array): ModelPlaneDocument {
   const value = decodeDocument(bytes);
   if (
     value.schemaVersion !== MODEL_PLANE_SCHEMA_VERSION
+      && value.schemaVersion !== LEGACY_MODEL_PLANE_SCHEMA_VERSION
     || !Array.isArray(value.modelTags)
     || value.modelTags.length > MODEL_ROUTE_MAX_ROWS
     || !Array.isArray(value.displayEntries)
@@ -396,23 +470,43 @@ function parseDocument(bytes: Uint8Array): ModelPlaneDocument {
   ) {
     throw new ModelPlaneError("store_unavailable");
   }
+  const providers = value.schemaVersion === LEGACY_MODEL_PLANE_SCHEMA_VERSION
+    ? [openAiProvider()]
+    : Array.isArray(value.providers) && value.providers.length <= PROVIDER_MAX_ROWS
+      ? value.providers.map(parseStoredProvider)
+      : [];
   const accounts = parseRevisionedAccounts(value);
   const modelTags = value.modelTags.map(parseStoredTag);
   const displayEntries = value.displayEntries.map(parseStoredDisplayEntry);
-  if (modelTags.some(tag => tag === null) || displayEntries.some(entry => entry === null)) {
+  if (
+    providers.length === 0
+    || providers.some(provider => provider === null)
+    || modelTags.some(tag => tag === null)
+    || displayEntries.some(entry => entry === null)
+  ) {
     throw new ModelPlaneError("store_unavailable");
   }
+  const typedProviders = providers as StoredProvider[];
   const typedTags = modelTags as StoredModelTag[];
   const typedEntries = displayEntries as StoredDisplayEntry[];
-  const accountIds = new Set(accounts.map(account => account.id));
+  const providerIds = new Set(typedProviders.map(provider => provider.id));
+  const accountById = new Map(accounts.map(account => [account.id, account]));
   const tagIds = new Set(typedTags.map(tag => tag.id));
   const targetIds = typedTags.flatMap(tag => tag.targets.map(target => target.id));
+  const builtInOpenAi = typedProviders.find(provider => provider.id === OPENAI_PROVIDER_ID);
   if (
-    tagIds.size !== typedTags.length
+    providerIds.size !== typedProviders.length
+    || builtInOpenAi?.displayName !== OPENAI_PROVIDER_DISPLAY_NAME
+    || builtInOpenAi?.apiBaseUrl !== OPENAI_API_BASE_URL
+    || accounts.some(account => !providerIds.has(account.providerId))
+    || tagIds.size !== typedTags.length
     || new Set(typedEntries.map(entry => entry.modelTag)).size !== typedEntries.length
     || new Set(targetIds).size !== targetIds.length
     || typedEntries.some(entry => !tagIds.has(entry.modelTag))
-    || typedTags.some(tag => tag.targets.some(target => !accountIds.has(target.accountId)))
+    || typedTags.some(tag => tag.targets.some(target => {
+      const account = accountById.get(target.accountId);
+      return !account || account.providerId !== target.providerId;
+    }))
   ) {
     throw new ModelPlaneError("store_unavailable");
   }
@@ -420,6 +514,7 @@ function parseDocument(bytes: Uint8Array): ModelPlaneDocument {
     schemaVersion: MODEL_PLANE_SCHEMA_VERSION,
     desiredStateRevision: value.desiredStateRevision as number,
     catalogRevision: value.catalogRevision as number,
+    providers: typedProviders,
     accounts,
     modelTags: typedTags,
     displayEntries: typedEntries,
@@ -515,6 +610,7 @@ function loadDocument(stateRoot: string): ModelPlaneDocument {
     schemaVersion: MODEL_PLANE_SCHEMA_VERSION,
     desiredStateRevision: legacy.desiredStateRevision,
     catalogRevision: legacy.catalogRevision,
+    providers: [openAiProvider()],
     accounts: legacy.accounts,
     modelTags: [],
     displayEntries: [],
@@ -630,7 +726,7 @@ export function oauthCredentialFromTokens(
 function safeAccount(account: StoredProviderAccount, now: number): SafeProviderAccount {
   return {
     id: account.id,
-    providerId: OPENAI_PROVIDER_ID,
+    providerId: account.providerId,
     userLabel: account.userLabel,
     credentialKind: account.credential.kind,
     status: account.credential.kind === "oauth" && account.credential.expiresAt <= now
@@ -676,12 +772,15 @@ function safeSnapshot(document: ModelPlaneDocument, now: number): ProviderAccoun
   return {
     desiredStateRevision: document.desiredStateRevision,
     catalogRevision: document.catalogRevision,
-    providers: [{
-      id: OPENAI_PROVIDER_ID,
-      displayName: OPENAI_PROVIDER_DISPLAY_NAME,
-      accountCount: accounts.length,
-      status: accounts.length === 0 ? "needsAccount" : "ready",
-    }],
+    providers: document.providers.map(provider => {
+      const accountCount = accounts.filter(account => account.providerId === provider.id).length;
+      return {
+        id: provider.id,
+        displayName: provider.displayName,
+        accountCount,
+        status: accountCount === 0 ? "needsAccount" as const : "ready" as const,
+      };
+    }),
     accounts,
     modelRoutes: document.displayEntries.map(entry => {
       const tag = tags.get(entry.modelTag);
@@ -693,7 +792,10 @@ function safeSnapshot(document: ModelPlaneDocument, now: number): ProviderAccoun
 
 function nextDocument(
   document: ModelPlaneDocument,
-  changes: Pick<ModelPlaneDocument, "accounts" | "modelTags" | "displayEntries">,
+  changes: Partial<Pick<
+    ModelPlaneDocument,
+    "providers" | "accounts" | "modelTags" | "displayEntries"
+  >>,
 ): ModelPlaneDocument {
   if (
     document.desiredStateRevision >= Number.MAX_SAFE_INTEGER
@@ -705,7 +807,10 @@ function nextDocument(
     schemaVersion: MODEL_PLANE_SCHEMA_VERSION,
     desiredStateRevision: document.desiredStateRevision + 1,
     catalogRevision: document.catalogRevision + 1,
-    ...changes,
+    providers: changes.providers ?? document.providers,
+    accounts: changes.accounts ?? document.accounts,
+    modelTags: changes.modelTags ?? document.modelTags,
+    displayEntries: changes.displayEntries ?? document.displayEntries,
   };
 }
 
@@ -720,7 +825,7 @@ function validateCreateModelRouteInput(input: CreateModelRouteInput): void {
     || input.displayName.trim() !== input.displayName
     || !isSafeText(input.semanticModel, 200)
     || input.semanticModel.trim() !== input.semanticModel
-    || input.providerId !== OPENAI_PROVIDER_ID
+    || !isProviderId(input.providerId)
     || !isSafeText(input.accountId, 80)
     || !isSafeText(input.upstreamModelId, 512)
     || input.upstreamModelId.trim() !== input.upstreamModelId
@@ -739,7 +844,7 @@ function validateSetModelRouteTargetsInput(input: SetModelRouteTargetsInput): vo
     || input.targets.length > PROVIDER_ACCOUNT_MAX_ROWS
     || input.targets.some(target =>
       target.id !== undefined && !isSafeText(target.id, 80)
-      || target.providerId !== OPENAI_PROVIDER_ID
+      || !isProviderId(target.providerId)
       || !isSafeText(target.accountId, 80)
       || !isSafeText(target.upstreamModelId, 512)
       || target.upstreamModelId.trim() !== target.upstreamModelId
@@ -823,12 +928,21 @@ export function createModelPlaneStore(
     addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount {
       return addOAuthAccount(credential, userLabel);
     },
-    addApiKeyAccount(apiKey: string, userLabel: string): SafeProviderAccount {
+    addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount {
+      const apiBaseUrl = normalizedApiBaseUrl(input.apiBaseUrl);
       if (
-        !isSafeText(apiKey, 64 * 1024)
-        || apiKey.trim() !== apiKey
-        || !isSafeText(userLabel, 80)
-        || userLabel.trim() !== userLabel
+        !isProviderId(input.providerId)
+        || !isSafeText(input.providerDisplayName, 80)
+        || input.providerDisplayName.trim() !== input.providerDisplayName
+        || apiBaseUrl === null
+      ) {
+        throw new ModelPlaneError("invalid_provider");
+      }
+      if (
+        !isSafeText(input.apiKey, 64 * 1024)
+        || input.apiKey.trim() !== input.apiKey
+        || !isSafeText(input.userLabel, 80)
+        || input.userLabel.trim() !== input.userLabel
       ) {
         throw new ModelPlaneError("invalid_api_key");
       }
@@ -836,9 +950,21 @@ export function createModelPlaneStore(
         throw new ModelPlaneError("account_limit_reached");
       }
       if (document.accounts.some(account =>
-        account.credential.kind === "apiKey" && account.credential.apiKey === apiKey
+        account.providerId === input.providerId
+        && account.credential.kind === "apiKey"
+        && account.credential.apiKey === input.apiKey
       )) {
         throw new ModelPlaneError("account_already_exists");
+      }
+      const existingProvider = document.providers.find(provider => provider.id === input.providerId);
+      if (existingProvider && (
+        existingProvider.displayName !== input.providerDisplayName
+        || existingProvider.apiBaseUrl !== apiBaseUrl
+      )) {
+        throw new ModelPlaneError("provider_conflict");
+      }
+      if (!existingProvider && document.providers.length >= PROVIDER_MAX_ROWS) {
+        throw new ModelPlaneError("account_limit_reached");
       }
       const id = createAccountId();
       if (!isSafeText(id, 80) || document.accounts.some(account => account.id === id)) {
@@ -846,14 +972,21 @@ export function createModelPlaneStore(
       }
       const account: StoredProviderAccount = {
         id,
-        providerId: OPENAI_PROVIDER_ID,
-        userLabel,
+        providerId: input.providerId,
+        userLabel: input.userLabel,
         credentialKind: "apiKey",
         status: "verificationRequired",
         addedAt: Math.floor(now() / 1000),
-        credential: { kind: "apiKey", apiKey },
+        credential: { kind: "apiKey", apiKey: input.apiKey },
       };
       const next = nextDocument(document, {
+        providers: existingProvider
+          ? document.providers
+          : [...document.providers, {
+              id: input.providerId,
+              displayName: input.providerDisplayName,
+              apiBaseUrl,
+            }],
         accounts: [...document.accounts, account],
         modelTags: document.modelTags,
         displayEntries: document.displayEntries,
@@ -996,9 +1129,16 @@ export function createModelPlaneStore(
       const display = document.displayEntries.find(candidate => candidate.modelTag === modelTag);
       if (!tag || !display || display.retired) return [];
       const accounts = new Map(document.accounts.map(account => [account.id, account]));
+      const providers = new Map(document.providers.map(provider => [provider.id, provider]));
       return tag.targets.flatMap(target => {
         const account = accounts.get(target.accountId);
-        if (!account || account.status === "reauthenticationRequired") return [];
+        const provider = providers.get(target.providerId);
+        if (
+          !account
+          || !provider
+          || account.providerId !== provider.id
+          || account.status === "reauthenticationRequired"
+        ) return [];
         return [{
           modelTag: tag.id,
           semanticModel: tag.semanticModel,
@@ -1006,6 +1146,7 @@ export function createModelPlaneStore(
           providerId: target.providerId,
           accountId: target.accountId,
           upstreamModelId: target.upstreamModelId,
+          apiBaseUrl: provider.apiBaseUrl,
           priority: target.priority,
           credential: { ...account.credential },
         }];

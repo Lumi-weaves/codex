@@ -96,14 +96,17 @@ function executionCandidate(
   targetId: string,
   priority: number,
   credential: StoredProviderCredential,
+  providerId = "openai",
+  apiBaseUrl = "https://api.openai.com/v1",
 ): ModelExecutionCandidate {
   return {
     modelTag: "my-fast-model",
     semanticModel: "gpt-5.6-luna",
     targetId,
-    providerId: "openai",
+    providerId,
     accountId,
     upstreamModelId: "gpt-5.6-luna",
+    apiBaseUrl,
     priority,
     credential,
   };
@@ -366,6 +369,58 @@ describe("RichCodex private model data plane", () => {
     ]);
   });
 
+  test("falls through ordered targets across distinct API-key providers", async () => {
+    const calls: Array<{ url: string; authorization: string | null }> = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([
+        executionCandidate("alibaba-account", "alibaba-target", 0, {
+          kind: "apiKey",
+          apiKey: "private-alibaba-key",
+        }, "alibaba", "https://dashscope.aliyuncs.com/compatible-mode/v1"),
+        executionCandidate("openrouter-account", "openrouter-target", 1, {
+          kind: "apiKey",
+          apiKey: "private-openrouter-key",
+        }, "openrouter", "https://openrouter.ai/api/v1"),
+      ]),
+      fetch: (async (input, init) => {
+        calls.push({
+          url: String(input),
+          authorization: new Headers(init?.headers).get("authorization"),
+        });
+        return calls.length === 1
+          ? new Response("busy", { status: 429, headers: { "retry-after": "60" } })
+          : new Response('data: {"type":"response.completed"}\n\n', {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+      }) as typeof fetch,
+    });
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-richcodex-provider-id")).toBe("openrouter");
+    expect(response.headers.get("x-richcodex-route-attempt")).toBe("2");
+    expect(calls).toEqual([
+      {
+        url: "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
+        authorization: "Bearer private-alibaba-key",
+      },
+      {
+        url: "https://openrouter.ai/api/v1/responses",
+        authorization: "Bearer private-openrouter-key",
+      },
+    ]);
+  });
+
   test("prefers the soonest trustworthy quota reset and expires evidence back to declared order", async () => {
     let now = 1_000_000;
     const calls: string[] = [];
@@ -569,7 +624,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 7,
+      protocolVersion: 8,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -784,6 +839,9 @@ describe("RichCodex headless backend composition root", () => {
       `${JSON.stringify({
         type: "providerAccountAddApiKey",
         requestId: "add-api-key",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
         apiKey,
         userLabel: "OpenAI API",
       })}\n${JSON.stringify({ type: "providerAccountList", requestId: "list-api-key" })}\n`,
@@ -811,6 +869,70 @@ describe("RichCodex headless backend composition root", () => {
     if (process.platform !== "win32") {
       expect(statSync(join(stateRoot, "model-plane.json")).mode & 0o777).toBe(0o600);
     }
+  });
+
+  test("persists a distinct compatible provider and binds it to a stable model tag", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-compatible-provider-"));
+    const stateRoot = join(root, "backend-state");
+    const apiKey = "private-dashscope-key";
+    const added = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-dashscope",
+        providerId: "alibaba",
+        providerDisplayName: "Alibaba Model Studio",
+        apiBaseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        apiKey,
+        userLabel: "Alibaba Primary",
+      })}\n`,
+      stateRoot,
+    );
+    const accountId = (added.lines[1] as { account: { id: string } }).account.id;
+    const created = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteCreate",
+        requestId: "create-cross-provider-route",
+        expectedRevision: 1,
+        modelTag: "qwen-coder",
+        displayName: "Qwen Coder",
+        semanticModel: "gpt-5.6-luna",
+        providerId: "alibaba",
+        accountId,
+        upstreamModelId: "qwen3-coder-plus",
+      })}\n`,
+      stateRoot,
+    );
+
+    expect(added.lines[0]).toMatchObject({
+      providers: [{ id: "openai", status: "needsAccount" }],
+    });
+    expect(added.lines[1]).toMatchObject({
+      account: {
+        providerId: "alibaba",
+        userLabel: "Alibaba Primary",
+        credentialKind: "apiKey",
+      },
+    });
+    expect(created.lines[0]).toMatchObject({
+      providers: [
+        { id: "openai", accountCount: 0, status: "needsAccount" },
+        { id: "alibaba", displayName: "Alibaba Model Studio", accountCount: 1, status: "ready" },
+      ],
+    });
+    expect(created.lines[1]).toMatchObject({
+      type: "modelRouteCreateResult",
+      route: {
+        modelTag: "qwen-coder",
+        targets: [{
+          providerId: "alibaba",
+          accountId,
+          upstreamModelId: "qwen3-coder-plus",
+        }],
+      },
+    });
+    const safeOutput = JSON.stringify([...added.lines, ...created.lines]);
+    expect(safeOutput).not.toContain(apiKey);
+    expect(safeOutput).not.toContain("dashscope.aliyuncs.com");
   });
 
   test("creates, reads, retires, and restores one account-bound model route", async () => {
@@ -1018,6 +1140,62 @@ describe("RichCodex headless backend composition root", () => {
     coordinator.shutdown();
   });
 
+  test("keeps two OAuth accounts across restart and fails them independently", () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-multiple-oauth-"));
+    const stateRoot = join(root, "backend-state");
+    const now = 1_000_000;
+    const accountIds = ["oauth-account-a", "oauth-account-b"];
+    const store = createModelPlaneStore(stateRoot, {
+      now: () => now,
+      createAccountId: () => accountIds.shift()!,
+    });
+    store.addOAuthAccount({
+      kind: "oauth",
+      accessToken: "private-access-a",
+      refreshToken: "private-refresh-a",
+      chatgptAccountId: "private-workspace-a",
+      expiresAt: now + 3_600_000,
+    }, "Codex A");
+    store.addOAuthAccount({
+      kind: "oauth",
+      accessToken: "private-access-b",
+      refreshToken: "private-refresh-b",
+      chatgptAccountId: "private-workspace-b",
+      expiresAt: now + 3_600_000,
+    }, "Codex B");
+    store.markAccountStatus("oauth-account-a", "reauthenticationRequired");
+
+    const restored = createModelPlaneStore(stateRoot, { now: () => now }).snapshot();
+    expect(restored.accounts).toEqual([
+      {
+        id: "oauth-account-a",
+        providerId: "openai",
+        userLabel: "Codex A",
+        credentialKind: "oauth",
+        status: "reauthenticationRequired",
+        addedAt: 1_000,
+      },
+      {
+        id: "oauth-account-b",
+        providerId: "openai",
+        userLabel: "Codex B",
+        credentialKind: "oauth",
+        status: "verificationRequired",
+        addedAt: 1_000,
+      },
+    ]);
+    expect(restored.providers).toEqual([{
+      id: "openai",
+      displayName: "OpenAI",
+      accountCount: 2,
+      status: "ready",
+    }]);
+    const safeSnapshot = JSON.stringify(restored);
+    expect(safeSnapshot).not.toContain("private-access");
+    expect(safeSnapshot).not.toContain("private-refresh");
+    expect(safeSnapshot).not.toContain("private-workspace");
+  });
+
   test("cancels a pending device OAuth flow without publishing private state", async () => {
     const root = mkdtempSync(join(tmpdir(), "richcodex-device-oauth-cancel-"));
     const modelPlaneStore = createModelPlaneStore(join(root, "backend-state"));
@@ -1063,11 +1241,17 @@ describe("RichCodex headless backend composition root", () => {
       `${JSON.stringify({
         type: "providerAccountAddApiKey",
         requestId: "add-primary-account",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
         apiKey: "sk-primary-target",
         userLabel: "Primary API",
       })}\n${JSON.stringify({
         type: "providerAccountAddApiKey",
         requestId: "add-secondary-account",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
         apiKey: "sk-secondary-target",
         userLabel: "Secondary API",
       })}\n`,
