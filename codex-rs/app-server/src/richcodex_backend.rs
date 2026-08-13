@@ -12,11 +12,13 @@ use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
-use tokio::process::Child;
-use tokio::process::ChildStdin;
-use tokio::process::ChildStdout;
 use tokio::process::Command;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+#[path = "richcodex_backend_client.rs"]
+mod client;
+use client::RichCodexBackendClient;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_PROTOCOL_VERSION: u32 = 2;
@@ -117,10 +119,9 @@ enum AppServerMessage<'a> {
 }
 
 pub(crate) struct RichCodexBackend {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
     snapshot: BackendSnapshot,
+    client: RichCodexBackendClient,
+    actor: JoinHandle<io::Result<()>>,
 }
 
 impl RichCodexBackend {
@@ -162,11 +163,12 @@ impl RichCodexBackend {
             }
         };
 
+        let (client, actor) = RichCodexBackendClient::spawn(child, stdin, stdout);
+
         Ok(Some(Self {
-            child,
-            stdin,
-            stdout,
             snapshot,
+            client,
+            actor,
         }))
     }
 
@@ -174,20 +176,14 @@ impl RichCodexBackend {
         &self.snapshot
     }
 
-    pub(crate) async fn shutdown(mut self) -> io::Result<()> {
-        let request_id = "app-server-shutdown";
-        write_message(&mut self.stdin, &AppServerMessage::Shutdown { request_id }).await?;
-        read_shutdown_complete(&mut self.stdout, request_id, SHUTDOWN_TIMEOUT).await?;
-        drop(self.stdin);
-        let status = timeout(SHUTDOWN_TIMEOUT, self.child.wait())
+    pub(crate) async fn shutdown(self) -> io::Result<()> {
+        let shutdown_result = self.client.shutdown().await;
+        drop(self.client);
+        let actor_result = self
+            .actor
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "model backend did not exit"))??;
-        if !status.success() {
-            return Err(io::Error::other(format!(
-                "model backend exited with {status}"
-            )));
-        }
-        Ok(())
+            .map_err(|_| io::Error::other("RichCodex model backend actor failed"))?;
+        shutdown_result.and(actor_result)
     }
 }
 
