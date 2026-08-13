@@ -1081,9 +1081,8 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
-        let client_setup = self.current_client_setup().await?;
+        self.current_client_setup().await?;
         let mut request = self.build_responses_request(
-            &client_setup.api_provider,
             prompt,
             model_info,
             effort,
