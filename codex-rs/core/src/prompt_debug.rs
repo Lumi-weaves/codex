@@ -8,6 +8,7 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -20,7 +21,12 @@ use tokio_util::sync::CancellationToken;
 
 use crate::TurnContext;
 use crate::client_common::Prompt;
+use crate::cockpit_operating_contract::CockpitContractRole;
+use crate::cockpit_operating_contract::CockpitOperatingContractDescriptor;
+use crate::cockpit_operating_contract::descriptor as cockpit_contract_descriptor;
 use crate::config::Config;
+use crate::context::CockpitOperatingContract;
+use crate::context::ContextualUserFragment;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
@@ -34,7 +40,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 3;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 4;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -49,6 +55,7 @@ pub struct PromptRequestReceipt {
     provider: PromptRequestProvider,
     provenance: PromptReceiptProvenance,
     context_inheritance: PromptInheritanceProvenance,
+    cockpit_contract: CockpitContractReceipt,
     summary: PromptReceiptSummary,
     bounds: PromptReceiptBounds,
     request: ResponsesApiRequest,
@@ -76,6 +83,7 @@ pub struct RenderedPromptRequestReceipt<'a> {
     provider: &'a PromptRequestProvider,
     provenance: &'a PromptReceiptProvenance,
     context_inheritance: &'a PromptInheritanceProvenance,
+    cockpit_contract: &'a CockpitContractReceipt,
     summary: &'a PromptReceiptSummary,
     bounds: &'a PromptReceiptBounds,
     redaction: PromptReceiptRedaction,
@@ -91,6 +99,7 @@ impl PromptRequestReceipt {
         use_responses_lite: bool,
         request: ResponsesApiRequest,
         context_inheritance: PromptInheritanceProvenance,
+        cockpit_contract_role: Option<CockpitContractRole>,
     ) -> CodexResult<Self> {
         let lowering = if use_responses_lite {
             PromptRequestLowering::ResponsesLite
@@ -103,6 +112,7 @@ impl PromptRequestReceipt {
             PromptClientNormalization::NonOpenAiSanitized
         };
         let summary = build_receipt_summary(&request)?;
+        let cockpit_contract = CockpitContractReceipt::inspect(cockpit_contract_role, &request)?;
 
         Ok(Self {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
@@ -123,6 +133,7 @@ impl PromptRequestReceipt {
                 provider_processing: "provider_owned_unknown",
             },
             context_inheritance,
+            cockpit_contract,
             summary,
             bounds: PromptReceiptBounds {
                 receipt_content_truncated: false,
@@ -143,6 +154,7 @@ impl PromptRequestReceipt {
             provider: &self.provider,
             provenance: &self.provenance,
             context_inheritance: &self.context_inheritance,
+            cockpit_contract: &self.cockpit_contract,
             summary: &self.summary,
             bounds: &self.bounds,
             redaction: PromptReceiptRedaction {
@@ -161,6 +173,81 @@ impl PromptRequestReceipt {
     pub fn request(&self) -> &ResponsesApiRequest {
         &self.request
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum CockpitContractReceiptStatus {
+    Included,
+    Excluded,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CockpitContractReceipt {
+    status: CockpitContractReceiptStatus,
+    expected_copy_count: usize,
+    effective_copy_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    descriptor: Option<CockpitOperatingContractDescriptor>,
+}
+
+impl CockpitContractReceipt {
+    fn inspect(
+        expected_role: Option<CockpitContractRole>,
+        request: &ResponsesApiRequest,
+    ) -> CodexResult<Self> {
+        let effective_contracts = cockpit_contract_texts(request);
+        let effective_copy_count = effective_contracts.len();
+        let expected_copy_count = usize::from(expected_role.is_some());
+        if effective_copy_count != expected_copy_count {
+            return Err(CodexErr::Fatal(format!(
+                "cockpit operating contract conformance failed: expected {expected_copy_count} effective copies, found {effective_copy_count}"
+            )));
+        }
+        if let Some(expected_role) = expected_role {
+            let expected_contract =
+                crate::cockpit_operating_contract::rendered_contract(expected_role);
+            let effective_role_copy_count = effective_contracts
+                .iter()
+                .filter(|contract| **contract == expected_contract.as_str())
+                .count();
+            if effective_role_copy_count != 1 {
+                return Err(CodexErr::Fatal(format!(
+                    "cockpit operating contract role conformance failed: expected one {} contract, found {effective_role_copy_count}",
+                    expected_role.as_str()
+                )));
+            }
+        }
+
+        Ok(Self {
+            status: if expected_role.is_some() {
+                CockpitContractReceiptStatus::Included
+            } else {
+                CockpitContractReceiptStatus::Excluded
+            },
+            expected_copy_count,
+            effective_copy_count,
+            descriptor: expected_role.map(cockpit_contract_descriptor),
+        })
+    }
+}
+
+fn cockpit_contract_texts(request: &ResponsesApiRequest) -> Vec<&str> {
+    request
+        .input
+        .iter()
+        .filter_map(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            let [ContentItem::InputText { text }] = content.as_slice() else {
+                return None;
+            };
+            (role == "developer" && CockpitOperatingContract::matches_text(text))
+                .then_some(text.as_str())
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -247,6 +334,7 @@ pub struct PromptReceiptRedaction {
 const INPUT_CONTRIBUTIONS: &[PromptContributionKind] = &[
     PromptContributionKind::BaseInstructions,
     PromptContributionKind::WorldStateDeveloperContext,
+    PromptContributionKind::CockpitOperatingContract,
     PromptContributionKind::WorldStateContextualUserContext,
     PromptContributionKind::ConversationHistory,
     PromptContributionKind::InvocationInput,
@@ -443,6 +531,13 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
         turn_context.model_info.use_responses_lite,
         request,
         sess.prompt_context.provenance(),
+        (turn_context.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2)
+            .then(|| {
+                crate::cockpit_operating_contract::role_for_session_source(
+                    &turn_context.session_source,
+                )
+            })
+            .flatten(),
     )
 }
 
@@ -555,3 +650,7 @@ fn canonicalize_json(value: Value) -> Value {
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+#[cfg(test)]
+#[path = "prompt_debug_tests.rs"]
+mod tests;

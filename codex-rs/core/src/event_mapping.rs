@@ -32,6 +32,7 @@ use codex_protocol::user_input::UserInput;
 use tracing::warn;
 use uuid::Uuid;
 
+use crate::cockpit_operating_contract::COCKPIT_OPERATING_CONTRACT_OPEN_TAG;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
 use crate::context::is_contextual_user_fragment;
 use crate::context::parse_visible_hook_prompt_message;
@@ -42,6 +43,7 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX,
     "<model_switch>",
     APPS_INSTRUCTIONS_OPEN_TAG,
+    COCKPIT_OPERATING_CONTRACT_OPEN_TAG,
     COLLABORATION_MODE_OPEN_TAG,
     MULTI_AGENT_MODE_OPEN_TAG,
     ENVIRONMENTS_INSTRUCTIONS_OPEN_TAG,

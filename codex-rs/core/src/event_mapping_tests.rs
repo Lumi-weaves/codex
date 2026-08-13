@@ -1,6 +1,8 @@
 use super::has_non_contextual_dev_message_content;
 use super::is_contextual_dev_message_content;
 use super::parse_turn_item;
+use crate::CockpitContractRole;
+use crate::cockpit_operating_contract::rendered_contract;
 use crate::context::ContextualUserFragment;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
@@ -32,6 +34,16 @@ fn recognizes_skills_instructions_as_contextual_developer_content() {
             text: format!("{SKILLS_INSTRUCTIONS_OPEN_TAG}\n## Skills"),
         },
     ]));
+}
+
+#[test]
+fn recognizes_cockpit_contract_as_contextual_developer_content() {
+    let content = vec![ContentItem::InputText {
+        text: rendered_contract(CockpitContractRole::Root),
+    }];
+
+    assert!(is_contextual_dev_message_content(&content));
+    assert!(!has_non_contextual_dev_message_content(&content));
 }
 
 #[test]

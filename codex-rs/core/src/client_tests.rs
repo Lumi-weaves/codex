@@ -381,6 +381,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
                 None,
             )
             .provenance(),
+            None,
         )?;
 
         let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
@@ -396,6 +397,8 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
             metadata["contextInheritance"]["contextInheritanceGrantsAuthority"],
             false
         );
+        assert_eq!(metadata["cockpitContract"]["status"], "excluded");
+        assert_eq!(metadata["cockpitContract"]["effectiveCopyCount"], 0);
         assert!(metadata.get("request").is_none());
 
         let mut stream = client

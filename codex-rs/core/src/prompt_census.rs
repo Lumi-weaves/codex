@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::guardian::is_guardian_reviewer_source;
 
-pub(crate) const PROMPT_CENSUS_SCHEMA_VERSION: u32 = 1;
+pub(crate) const PROMPT_CENSUS_SCHEMA_VERSION: u32 = 2;
 
 /// Stable identity for every client-owned model invocation family known to the prompt plane.
 ///
@@ -77,7 +77,8 @@ impl PromptInvocationKind {
 
     pub(crate) const fn contributions(self) -> &'static [PromptContributionKind] {
         match self {
-            Self::Turn | Self::Review | Self::Guardian => TURN_CONTRIBUTIONS,
+            Self::Turn => TURN_CONTRIBUTIONS,
+            Self::Review | Self::Guardian => SPECIALIZED_TURN_CONTRIBUTIONS,
             Self::StartupPrewarm => PREWARM_CONTRIBUTIONS,
             Self::LocalCompaction | Self::RemoteCompaction => COMPACTION_CONTRIBUTIONS,
             Self::Realtime => REALTIME_CONTRIBUTIONS,
@@ -99,6 +100,7 @@ impl fmt::Display for PromptInvocationKind {
 pub enum PromptContributionKind {
     BaseInstructions,
     WorldStateDeveloperContext,
+    CockpitOperatingContract,
     WorldStateContextualUserContext,
     ConversationHistory,
     InvocationInput,
@@ -112,9 +114,10 @@ pub enum PromptContributionKind {
 }
 
 impl PromptContributionKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::BaseInstructions,
         Self::WorldStateDeveloperContext,
+        Self::CockpitOperatingContract,
         Self::WorldStateContextualUserContext,
         Self::ConversationHistory,
         Self::InvocationInput,
@@ -131,6 +134,7 @@ impl PromptContributionKind {
         match self {
             Self::BaseInstructions => "base_instructions",
             Self::WorldStateDeveloperContext => "world_state_developer_context",
+            Self::CockpitOperatingContract => "cockpit_operating_contract",
             Self::WorldStateContextualUserContext => "world_state_contextual_user_context",
             Self::ConversationHistory => "conversation_history",
             Self::InvocationInput => "invocation_input",
@@ -203,6 +207,19 @@ pub struct PromptContributionDefinition {
 }
 
 const TURN_CONTRIBUTIONS: &[PromptContributionKind] = &[
+    PromptContributionKind::BaseInstructions,
+    PromptContributionKind::WorldStateDeveloperContext,
+    PromptContributionKind::CockpitOperatingContract,
+    PromptContributionKind::WorldStateContextualUserContext,
+    PromptContributionKind::ConversationHistory,
+    PromptContributionKind::InvocationInput,
+    PromptContributionKind::ToolSpecifications,
+    PromptContributionKind::OutputSchema,
+    PromptContributionKind::ProviderLowering,
+    PromptContributionKind::ProviderProcessing,
+];
+
+const SPECIALIZED_TURN_CONTRIBUTIONS: &[PromptContributionKind] = &[
     PromptContributionKind::BaseInstructions,
     PromptContributionKind::WorldStateDeveloperContext,
     PromptContributionKind::WorldStateContextualUserContext,
@@ -445,6 +462,18 @@ fn contribution_definition(id: PromptContributionKind) -> PromptContributionDefi
             sensitivity: "may contain paths, policies, environment facts, and extension content",
             completeness: CensusCompleteness::Incomplete,
         },
+        PromptContributionKind::CockpitOperatingContract => PromptContributionDefinition {
+            id,
+            owner: "Lumi Prompt / Context Plane",
+            placement: "one marked standalone developer message before generic multi-agent hints",
+            provenance: "stable contract id, revision, role, hash, bounds, and governance are emitted by prompt-receipt",
+            availability: "runtime-enumerable with exact effective copy count in prompt-receipt; static manifest is available through debug prompt-contract",
+            hard_bound: "4096 UTF-8 bytes",
+            governance: "versioned built-in contract with prompt-plane conformance review",
+            inheritance: "root fresh receives root; full, bounded, and fresh role shadows receive exactly one shadow copy; non-owning internal agents receive zero",
+            sensitivity: "static public operating semantics; contains no runtime state or user content",
+            completeness: CensusCompleteness::RuntimeEnumerable,
+        },
         PromptContributionKind::WorldStateContextualUserContext => PromptContributionDefinition {
             id,
             owner: "session::world_state contextual user fragments",
@@ -577,6 +606,7 @@ mod tests {
     use codex_protocol::protocol::SubAgentSource;
 
     use super::CensusCompleteness;
+    use super::PROMPT_CENSUS_SCHEMA_VERSION;
     use super::PromptContributionKind;
     use super::PromptInvocationKind;
     use super::prompt_context_census;
@@ -584,7 +614,7 @@ mod tests {
     #[test]
     fn census_registers_every_known_invocation_and_contribution_once() {
         let census = prompt_context_census();
-        assert_eq!(census.schema_version, 1);
+        assert_eq!(census.schema_version, PROMPT_CENSUS_SCHEMA_VERSION);
         assert_eq!(census.invocations.len(), PromptInvocationKind::ALL.len());
         assert_eq!(
             census.contributions.len(),
