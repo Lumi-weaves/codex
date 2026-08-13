@@ -4,7 +4,9 @@
 
 use anyhow::Result;
 use codex_features::Feature;
+use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
@@ -138,6 +140,26 @@ fn request_contains_assistant_text(body: &Value, text: &str) -> bool {
         })
 }
 
+fn request_contains_combined_assistant_text(body: &Value, text: &str) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                if item.get("role").and_then(Value::as_str) != Some("assistant") {
+                    return false;
+                }
+                let combined = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>();
+                combined == text
+            })
+        })
+}
+
 fn request_contains_marker(body: &Value, marker: &str) -> bool {
     let Some(input) = body.get("input").and_then(Value::as_array) else {
         return false;
@@ -200,12 +222,13 @@ async fn wait_for_raw_response_completed(test: &TestCodex, response_id: &str) {
     .await;
 }
 
-async fn wait_for_raw_response_without_agent_message(
+async fn wait_for_merged_commentary(
     test: &TestCodex,
     response_id: &str,
-    forbidden_item_id: &str,
-    forbidden_message: &str,
+    expected_item_id: &str,
+    expected_message: &str,
 ) {
+    let mut completed_count = 0;
     loop {
         let event = test
             .codex
@@ -213,29 +236,31 @@ async fn wait_for_raw_response_without_agent_message(
             .await
             .expect("event stream should remain open");
         match event.msg {
-            EventMsg::AgentMessage(event) if event.message == forbidden_message => {
-                panic!("no-finish response leaked a final agent message")
+            EventMsg::AgentMessageContentDelta(_) => {
+                panic!("constrained assistant text must be held until its phase is final")
             }
-            EventMsg::AgentMessageContentDelta(event) if event.delta == forbidden_message => {
-                panic!("no-finish response streamed a final agent message delta")
+            EventMsg::ItemCompleted(event) => {
+                if let TurnItem::AgentMessage(item) = event.item {
+                    let combined = item
+                        .content
+                        .iter()
+                        .map(|content| match content {
+                            AgentMessageContent::Text { text } => text.as_str(),
+                        })
+                        .collect::<String>();
+                    assert_eq!(item.id, expected_item_id);
+                    assert_eq!(item.phase, Some(MessagePhase::Commentary));
+                    assert_eq!(combined, expected_message);
+                    completed_count += 1;
+                }
             }
-            EventMsg::ItemStarted(event)
-                if matches!(
-                    event.item,
-                    TurnItem::AgentMessage(ref item) if item.id == forbidden_item_id
-                ) =>
-            {
-                panic!("no-finish response emitted a final agent message item")
+            EventMsg::RawResponseCompleted(event) if event.response_id == response_id => {
+                assert_eq!(
+                    completed_count, 1,
+                    "deliver exactly one merged commentary item"
+                );
+                return;
             }
-            EventMsg::ItemCompleted(event)
-                if matches!(
-                    event.item,
-                    TurnItem::AgentMessage(ref item) if item.id == forbidden_item_id
-                ) =>
-            {
-                panic!("no-finish response emitted a final agent message item")
-            }
-            EventMsg::RawResponseCompleted(event) if event.response_id == response_id => return,
             _ => {}
         }
     }
@@ -530,6 +555,11 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
         ]),
         sse(vec![
             ev_response_created("resp-2"),
+            ev_assistant_message_with_phase(
+                "msg-commentary",
+                "I am still waiting for the resource.",
+                "commentary",
+            ),
             // The completed phase is authoritative even if the added item was mislabeled.
             ev_assistant_message_added_with_phase("msg-1", "commentary"),
             ev_output_text_delta("This final is premature."),
@@ -550,11 +580,11 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
     submit_turn(&test, "start the command and do not finish early").await?;
 
     wait_for_exec_command_begin(&test, call_id).await;
-    wait_for_raw_response_without_agent_message(
+    wait_for_merged_commentary(
         &test,
         "resp-2",
-        "msg-1",
-        "This final is premature.",
+        "msg-commentary",
+        "I am still waiting for the resource.\n\nThis final is premature.",
     )
     .await;
     assert_no_turn_complete_for(&test, Duration::from_millis(500)).await;
@@ -578,8 +608,11 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
         "the completion request must not retain the transient constraint"
     );
     assert!(
-        !request_contains_assistant_text(&requests[2].body_json(), "This final is premature."),
-        "a final answer emitted under no-finish must not enter history"
+        request_contains_combined_assistant_text(
+            &requests[2].body_json(),
+            "I am still waiting for the resource.\n\nThis final is premature."
+        ),
+        "useful commentary and final-answer text must survive as one commentary history item"
     );
     Ok(())
 }
@@ -785,7 +818,7 @@ async fn interactive_exit_during_attention_debounce_emits_completion_only() -> R
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clean_background_terminals_allows_final_after_rejected_finish() -> Result<()> {
+async fn clean_background_terminals_allows_final_after_downgraded_finish() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -824,10 +857,10 @@ async fn clean_background_terminals_allows_final_after_rejected_finish() -> Resu
     submit_turn(&test, "start the long command").await?;
 
     wait_for_exec_command_begin(&test, call_id).await;
-    wait_for_raw_response_without_agent_message(&test, "resp-2", "msg-1", "done").await;
+    wait_for_merged_commentary(&test, "resp-2", "msg-1", "done").await;
     assert_no_turn_complete_for(&test, Duration::from_millis(500)).await;
     // Explicitly clean up all background terminals (feature enabled). The
-    // rejected finish leaves an obligation to sample an accepted final after closure.
+    // downgraded finish leaves an obligation to sample an accepted final after closure.
     test.codex
         .submit(Op::CleanBackgroundTerminals)
         .await
@@ -855,8 +888,8 @@ async fn clean_background_terminals_allows_final_after_rejected_finish() -> Resu
     assert_eq!(no_finish_message_count(&requests[1].body_json()), 1);
     assert_eq!(no_finish_message_count(&requests[2].body_json()), 0);
     assert!(
-        !request_contains_assistant_text(&requests[2].body_json(), "done"),
-        "the rejected untagged finish must not enter history"
+        request_contains_assistant_text(&requests[2].body_json(), "done"),
+        "the downgraded untagged answer must survive as commentary history"
     );
     Ok(())
 }

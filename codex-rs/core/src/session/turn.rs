@@ -12,6 +12,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ActiveResourceNoFinish;
+use crate::context::ActiveResourceNoFinishBuffer;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
@@ -385,7 +386,7 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
-                    finish_rejected,
+                    finish_downgraded,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -447,7 +448,7 @@ pub(crate) async fn run_turn(
                     );
                 }
 
-                let should_roll_over = (needs_follow_up || finish_rejected)
+                let should_roll_over = (needs_follow_up || finish_downgraded)
                     && (sess.take_new_context_window_request().await || token_limit_reached);
                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
@@ -514,7 +515,7 @@ pub(crate) async fn run_turn(
                     // A constrained response tried to finish, but direct cleanup can close the
                     // resource without queuing model-visible completion input. Sample once more
                     // after closure so the model can produce the task's accepted final answer.
-                    if finish_rejected {
+                    if finish_downgraded {
                         continue;
                     }
                     last_agent_message = sampling_request_last_agent_message;
@@ -1632,7 +1633,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
-    finish_rejected: bool,
+    finish_downgraded: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2172,6 +2173,50 @@ async fn handle_assistant_item_done_in_plan_mode(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn deliver_active_resource_commentary(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    turn_store: &Arc<codex_extension_api::ExtensionData>,
+    tool_runtime: &ToolCallRuntime,
+    cancellation_token: &CancellationToken,
+    plan_mode_state: Option<&mut PlanModeStreamState>,
+    buffer: &mut ActiveResourceNoFinishBuffer,
+    last_agent_message: &mut Option<String>,
+) -> CodexResult<bool> {
+    let downgraded_finish = buffer.downgraded_finish();
+    let Some(commentary) = buffer.take_commentary() else {
+        return Ok(downgraded_finish);
+    };
+
+    if let Some(state) = plan_mode_state {
+        handle_assistant_item_done_in_plan_mode(
+            sess,
+            turn_context,
+            turn_store.as_ref(),
+            &commentary,
+            state,
+            /*previously_active_item*/ None,
+            last_agent_message,
+        )
+        .await;
+    } else {
+        let mut ctx = HandleOutputCtx {
+            sess: Arc::clone(sess),
+            turn_context: Arc::clone(turn_context),
+            turn_store: Arc::clone(turn_store),
+            tool_runtime: tool_runtime.clone(),
+            cancellation_token: cancellation_token.child_token(),
+        };
+        let output_result =
+            handle_output_item_done(&mut ctx, commentary, /*previously_active_item*/ None).await?;
+        if let Some(agent_message) = output_result.last_agent_message {
+            *last_agent_message = Some(agent_message);
+        }
+    }
+    Ok(downgraded_finish)
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
     in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
@@ -2212,21 +2257,6 @@ fn assign_missing_streamed_response_item_id(
         .filter(|item_id| !item_id.is_empty());
     item.set_id(active_item_id);
     Session::assign_missing_response_item_id(item);
-}
-
-fn active_resource_no_finish_rejects(
-    constraint: Option<ActiveResourceNoFinish>,
-    item: &ResponseItem,
-) -> bool {
-    constraint.is_some()
-        && matches!(
-            item,
-            ResponseItem::Message {
-                role,
-                phase,
-                ..
-            } if role == "assistant" && !matches!(phase, Some(MessagePhase::Commentary))
-        )
 }
 
 fn active_resource_no_finish_defers_assistant_message(
@@ -2298,7 +2328,8 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
-    let mut finish_rejected = false;
+    let mut finish_downgraded = false;
+    let mut active_resource_assistant_buffer = ActiveResourceNoFinishBuffer::default();
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2404,12 +2435,56 @@ async fn try_run_sampling_request(
                     )
                     .await;
                 }
-                if active_resource_no_finish_rejects(active_resource_no_finish, &item) {
-                    // The request was sampled while the task still owned a live resource. Do not
-                    // record or complete a final answer that violates the request's no-finish
-                    // constraint; the resource wake will drive the next sampling request.
-                    finish_rejected = true;
-                    continue;
+                if active_resource_no_finish.is_some() {
+                    let preempt_for_buffered_commentary =
+                        matches!(
+                            &item,
+                            ResponseItem::Message {
+                                role,
+                                phase: Some(MessagePhase::Commentary),
+                                ..
+                            } if role == "assistant"
+                        ) && sess.input_queue.has_pending_session_inputs().await;
+                    item = match active_resource_assistant_buffer.push_if_assistant(item) {
+                        Ok(()) => {
+                            if preempt_for_buffered_commentary {
+                                finish_downgraded |= deliver_active_resource_commentary(
+                                    &sess,
+                                    &turn_context,
+                                    &turn_store,
+                                    &tool_runtime,
+                                    &cancellation_token,
+                                    plan_mode_state.as_mut(),
+                                    &mut active_resource_assistant_buffer,
+                                    &mut last_agent_message,
+                                )
+                                .await?;
+                                break Ok(SamplingRequestResult {
+                                    needs_follow_up: true,
+                                    last_agent_message,
+                                    finish_downgraded,
+                                });
+                            }
+                            // Completed phases are authoritative. Hold useful commentary and
+                            // final-answer text alike; response completion merges them into one
+                            // commentary item.
+                            continue;
+                        }
+                        Err(item) => {
+                            finish_downgraded |= deliver_active_resource_commentary(
+                                &sess,
+                                &turn_context,
+                                &turn_store,
+                                &tool_runtime,
+                                &cancellation_token,
+                                plan_mode_state.as_mut(),
+                                &mut active_resource_assistant_buffer,
+                                &mut last_agent_message,
+                            )
+                            .await?;
+                            item
+                        }
+                    };
                 }
                 if let Some(state) = plan_mode_state.as_mut()
                     && handle_assistant_item_done_in_plan_mode(
@@ -2476,7 +2551,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
-                        finish_rejected,
+                        finish_downgraded,
                     });
                 }
             }
@@ -2626,6 +2701,17 @@ async fn try_run_sampling_request(
                 token_usage,
                 end_turn,
             } => {
+                finish_downgraded |= deliver_active_resource_commentary(
+                    &sess,
+                    &turn_context,
+                    &turn_store,
+                    &tool_runtime,
+                    &cancellation_token,
+                    plan_mode_state.as_mut(),
+                    &mut active_resource_assistant_buffer,
+                    &mut last_agent_message,
+                )
+                .await?;
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -2665,7 +2751,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
-                    finish_rejected,
+                    finish_downgraded,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
