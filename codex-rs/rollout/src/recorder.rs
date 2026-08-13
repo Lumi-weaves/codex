@@ -17,6 +17,7 @@ use chrono::SecondsFormat;
 use codex_protocol::RolloutId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::agent::AgentSelection;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -108,6 +109,7 @@ pub enum RolloutRecorderParams {
         source: Box<SessionSource>,
         thread_source: Option<ThreadSource>,
         originator: String,
+        agent_selection: Option<AgentSelection>,
         base_instructions: BaseInstructions,
         prompt_compiler_revision: String,
         prompt_context_origin: String,
@@ -206,6 +208,7 @@ impl RolloutRecorderParams {
             source: Box::new(source),
             thread_source,
             originator,
+            agent_selection: None,
             base_instructions,
             prompt_compiler_revision: String::new(),
             prompt_context_origin: String::new(),
@@ -222,6 +225,17 @@ impl RolloutRecorderParams {
     pub fn with_session_id(mut self, session_id: SessionId) -> Self {
         if let Self::Create { session_id: id, .. } = &mut self {
             *id = session_id;
+        }
+        self
+    }
+
+    pub fn with_agent_selection(mut self, agent_selection: Option<AgentSelection>) -> Self {
+        if let Self::Create {
+            agent_selection: selection,
+            ..
+        } = &mut self
+        {
+            *selection = agent_selection;
         }
         self
     }
@@ -851,6 +865,7 @@ impl RolloutRecorder {
                 source,
                 thread_source,
                 originator,
+                agent_selection,
                 base_instructions,
                 prompt_compiler_revision,
                 prompt_context_origin,
@@ -887,6 +902,7 @@ impl RolloutRecorder {
                     agent_nickname: source.get_nickname(),
                     agent_role: source.get_agent_role(),
                     agent_path: source.get_agent_path().map(Into::into),
+                    agent_selection,
                     source: *source,
                     thread_source,
                     model_provider: Some(config.model_provider_id().to_string()),

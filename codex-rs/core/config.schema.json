@@ -4938,6 +4938,10 @@
   },
   "description": "Base config deserialized from ~/.codex/config.toml.",
   "properties": {
+    "agent": {
+      "description": "Optional Agent Definition selector. This is independent of model selection.",
+      "type": "string"
+    },
     "agents": {
       "allOf": [
         {

@@ -374,6 +374,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
             .await?;
         let receipt = PromptRequestReceipt::from_lowered_request(
             PromptInvocationKind::Turn,
+            /*agent_selection*/ None,
             provider_name,
             client.provider_info(),
             use_responses_lite,

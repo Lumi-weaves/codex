@@ -4423,6 +4423,14 @@ async fn includes_timed_out_message() {
 #[tokio::test]
 async fn turn_context_with_model_updates_model_fields() {
     let (session, mut turn_context) = make_session_and_context().await;
+    let agent_selection = codex_protocol::agent::AgentSelection {
+        agent: codex_protocol::agent::AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+        origin: codex_protocol::agent::AgentSelectionOrigin::Cli,
+    };
+    Arc::make_mut(&mut turn_context.config).agent = Some(agent_selection.clone());
     turn_context.reasoning_effort = Some(ReasoningEffortConfig::Minimal);
     let updated = turn_context
         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
@@ -4437,6 +4445,7 @@ async fn turn_context_with_model_updates_model_fields() {
         .await;
 
     assert_eq!(updated.config.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(updated.config.agent, Some(agent_selection));
     assert_eq!(updated.collaboration_mode().model(), "gpt-5.4");
     assert_eq!(updated.model_info, expected_model_info);
     assert_eq!(
@@ -4562,6 +4571,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),
@@ -7479,6 +7489,7 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),
@@ -7592,6 +7603,7 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),
@@ -11071,6 +11083,7 @@ async fn attach_in_memory_thread_store(
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),

@@ -2255,6 +2255,7 @@ async fn create_paginated_subagent_thread(
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),

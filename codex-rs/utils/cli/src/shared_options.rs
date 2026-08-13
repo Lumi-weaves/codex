@@ -18,6 +18,10 @@ pub struct SharedCliOptions {
     )]
     pub images: Vec<PathBuf>,
 
+    /// Agent Definition to run. This selection is independent of the model.
+    #[arg(long, value_name = "AGENT")]
+    pub agent: Option<String>,
+
     /// Model the agent should use.
     #[arg(long, short = 'm')]
     pub model: Option<String>,
@@ -94,6 +98,7 @@ impl SharedCliOptions {
             || self.dangerously_bypass_approvals_and_sandbox;
         let Self {
             images,
+            agent,
             model,
             oss,
             oss_provider,
@@ -107,6 +112,7 @@ impl SharedCliOptions {
         } = self;
         let Self {
             images: root_images,
+            agent: root_agent,
             model: root_model,
             oss: root_oss,
             oss_provider: root_oss_provider,
@@ -119,6 +125,9 @@ impl SharedCliOptions {
             add_dir: root_add_dir,
         } = root;
 
+        if agent.is_none() {
+            agent.clone_from(root_agent);
+        }
         if model.is_none() {
             model.clone_from(root_model);
         }
@@ -161,6 +170,7 @@ impl SharedCliOptions {
             || subcommand.dangerously_bypass_approvals_and_sandbox;
         let Self {
             images,
+            agent,
             model,
             oss,
             oss_provider,
@@ -173,6 +183,9 @@ impl SharedCliOptions {
             add_dir,
         } = subcommand;
 
+        if let Some(agent) = agent {
+            self.agent = Some(agent);
+        }
         if let Some(model) = model {
             self.model = Some(model);
         }

@@ -133,7 +133,8 @@ impl FromArgMatches for ExecSharedCliOptions {
 }
 
 fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
-    cmd.mut_arg("model", |arg| arg.global(true))
+    cmd.mut_arg("agent", |arg| arg.global(true))
+        .mut_arg("model", |arg| arg.global(true))
         .mut_arg("dangerously_bypass_approvals_and_sandbox", |arg| {
             arg.global(true)
         })

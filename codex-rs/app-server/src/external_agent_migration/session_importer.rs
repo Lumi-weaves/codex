@@ -463,6 +463,7 @@ impl ExternalAgentSessionImporter {
             source: source.clone(),
             thread_source: None,
             originator: codex_login::default_client::originator().value,
+            agent_selection: None,
             base_instructions: BaseInstructions {
                 text: config
                     .base_instructions

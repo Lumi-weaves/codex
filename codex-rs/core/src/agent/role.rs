@@ -147,6 +147,12 @@ async fn load_role_layer_toml(
         (role_config_toml, role_config_base)
     };
 
+    if role_config_toml.get("agent").is_some() {
+        return Err(anyhow!(
+            "agent role `{role_name}` cannot set the root `agent` identity"
+        ));
+    }
+
     deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)?;
     Ok(resolve_relative_paths_in_config_toml(
         role_config_toml,
@@ -228,6 +234,7 @@ mod reload {
                     config.base_instructions_provenance.clone();
             }
         }
+        next_config.agent.clone_from(&config.agent);
         Ok(next_config)
     }
 

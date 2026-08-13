@@ -134,6 +134,7 @@ mod tests {
                     source: SessionSource::Exec,
                     thread_source: None,
                     originator: "test_originator".to_string(),
+                    agent_selection: None,
                     base_instructions: BaseInstructions::default(),
                     prompt_compiler_revision: "test_compiler_v1".to_string(),
                     prompt_context_origin: "root_fresh".to_string(),
@@ -413,6 +414,33 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn create_persists_optional_agent_selection() {
+        let store = InMemoryThreadStore::default();
+        let thread_id = ThreadId::new();
+        let mut params = create_thread_params(thread_id, ThreadHistoryMode::Legacy);
+        let selection = codex_protocol::agent::AgentSelection {
+            agent: codex_protocol::agent::AgentDefinitionRef {
+                id: "codex".to_string(),
+                revision: 1,
+            },
+            origin: codex_protocol::agent::AgentSelectionOrigin::Cli,
+        };
+        params.agent_selection = Some(selection.clone());
+
+        store.create_thread(params).await.expect("create thread");
+
+        let state = store.state.lock().await;
+        let Some(RolloutItem::SessionMeta(meta)) = state
+            .histories
+            .get(&thread_id)
+            .and_then(|history| history.first())
+        else {
+            panic!("session metadata should be persisted");
+        };
+        assert_eq!(meta.meta.agent_selection, Some(selection));
+    }
+
     fn create_thread_params(
         thread_id: ThreadId,
         history_mode: ThreadHistoryMode,
@@ -426,6 +454,7 @@ mod tests {
             source: SessionSource::Exec,
             thread_source: None,
             originator: "test_originator".to_string(),
+            agent_selection: None,
             base_instructions: BaseInstructions::default(),
             prompt_compiler_revision: "test_compiler_v1".to_string(),
             prompt_context_origin: "root_fresh".to_string(),
@@ -544,6 +573,7 @@ impl InMemoryThreadStore {
             agent_nickname: params.source.get_nickname(),
             agent_role: params.source.get_agent_role(),
             agent_path: params.source.get_agent_path().map(Into::into),
+            agent_selection: params.agent_selection.clone(),
             originator: params.originator.clone(),
             source: params.source.clone(),
             thread_source: params.thread_source.clone(),

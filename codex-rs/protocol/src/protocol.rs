@@ -18,6 +18,7 @@ use crate::AgentPath;
 use crate::ResponseItemId;
 use crate::SessionId;
 use crate::ThreadId;
+use crate::agent::AgentSelection;
 use crate::approvals::ElicitationRequestEvent;
 use crate::capabilities::SelectedCapabilityRoot;
 use crate::config_types::ApprovalsReviewer;
@@ -2883,6 +2884,9 @@ pub struct SessionMeta {
     /// Optional canonical agent path assigned to an AgentControl-spawned sub-agent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_path: Option<String>,
+    /// Optional root Agent identity. This is distinct from subagent role/path metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_selection: Option<AgentSelection>,
     pub model_provider: Option<String>,
     /// base_instructions for the session. This *should* always be present when creating a new session,
     /// but may be missing for older sessions. If not present, fall back to rendering the base_instructions
@@ -2941,6 +2945,7 @@ impl Default for SessionMeta {
             agent_nickname: None,
             agent_role: None,
             agent_path: None,
+            agent_selection: None,
             model_provider: None,
             base_instructions: None,
             prompt_compiler_revision: None,

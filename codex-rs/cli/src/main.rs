@@ -2223,6 +2223,7 @@ async fn run_debug_prompt_command(
         shared.sandbox_mode.map(Into::into)
     };
     let overrides = ConfigOverrides {
+        agent: shared.agent,
         model: shared.model,
         approval_policy,
         sandbox_mode,

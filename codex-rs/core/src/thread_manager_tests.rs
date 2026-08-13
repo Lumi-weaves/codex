@@ -46,6 +46,148 @@ use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+fn history_with_agent_selection(origin: AgentSelectionOrigin) -> InitialHistory {
+    let thread_id = ThreadId::new();
+    InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                agent_selection: Some(codex_protocol::agent::AgentSelection {
+                    agent: codex_protocol::agent::AgentDefinitionRef {
+                        id: "codex".to_string(),
+                        revision: 1,
+                    },
+                    origin,
+                }),
+                ..Default::default()
+            },
+            git: None,
+        })]),
+        rollout_path: None,
+    })
+}
+
+#[tokio::test]
+async fn resume_and_fork_inherit_agent_unless_explicitly_overridden() {
+    let history = history_with_agent_selection(AgentSelectionOrigin::Cli);
+    let mut resumed = test_config().await;
+    inherit_agent_selection(&mut resumed, &history, AgentSelectionOrigin::Resume);
+    assert_eq!(
+        resumed.agent.as_ref().map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Resume)
+    );
+
+    let mut forked = test_config().await;
+    inherit_agent_selection(&mut forked, &history, AgentSelectionOrigin::Fork);
+    assert_eq!(
+        forked.agent.as_ref().map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Fork)
+    );
+
+    let explicit = resumed.agent.clone().expect("inherited selection");
+    forked.agent = Some(explicit.clone());
+    inherit_agent_selection(&mut forked, &history, AgentSelectionOrigin::Fork);
+    assert_eq!(forked.agent, Some(explicit));
+}
+
+#[tokio::test]
+async fn agent_selection_round_trips_through_rollout_resume_and_fork() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.agent = Some(codex_protocol::agent::AgentSelection {
+        agent: codex_protocol::agent::AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+        origin: AgentSelectionOrigin::Cli,
+    });
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+
+    let source = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start source thread");
+    source.thread.ensure_rollout_materialized().await;
+    source.thread.flush_rollout().await.expect("flush source");
+    let rollout_path = source.thread.rollout_path().expect("source rollout path");
+    let persisted = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read source rollout");
+    assert_eq!(
+        persisted
+            .get_agent_selection()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Cli)
+    );
+    source
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source");
+    let _ = manager.remove_thread(&source.thread_id).await;
+
+    let mut inherited_config = config.clone();
+    inherited_config.agent = None;
+    let resumed = manager
+        .resume_thread_from_rollout(
+            inherited_config.clone(),
+            rollout_path.clone(),
+            Arc::clone(&manager.state.auth_manager),
+            None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("resume source");
+    assert_eq!(
+        resumed
+            .thread
+            .session
+            .get_config()
+            .await
+            .agent
+            .as_ref()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Resume)
+    );
+
+    let forked = manager
+        .fork_thread(
+            ForkSnapshot::Interrupted,
+            inherited_config,
+            rollout_path,
+            None,
+            None,
+        )
+        .await
+        .expect("fork source");
+    assert_eq!(
+        forked
+            .thread
+            .session
+            .get_config()
+            .await
+            .agent
+            .as_ref()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Fork)
+    );
+
+    let report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+    assert_eq!(report.completed.len(), 2);
+}
+
 /// Controls without a custom allocation policy still produce distinct thread identifiers.
 #[test]
 fn thread_id_generator_defaults_to_standard_ids() {

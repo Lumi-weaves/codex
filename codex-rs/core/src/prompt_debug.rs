@@ -6,6 +6,7 @@ use codex_exec_server::ExecServerRuntimePaths;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::UserInstructionsProvider;
 use codex_login::AuthManager;
+use codex_protocol::agent::AgentSelection;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
@@ -43,7 +44,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 5;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 6;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -53,6 +54,7 @@ const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 5;
 pub struct PromptRequestReceipt {
     schema_version: u32,
     compiler_revision: String,
+    agent_selection: Option<AgentSelection>,
     invocation_kind: PromptInvocationKind,
     request_form: PromptRequestForm,
     provider: PromptRequestProvider,
@@ -82,6 +84,8 @@ pub enum PromptReceiptView {
 pub struct RenderedPromptRequestReceipt<'a> {
     schema_version: u32,
     compiler_revision: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_selection: Option<&'a AgentSelection>,
     invocation_kind: PromptInvocationKind,
     request_form: &'a PromptRequestForm,
     provider: &'a PromptRequestProvider,
@@ -97,8 +101,10 @@ pub struct RenderedPromptRequestReceipt<'a> {
 }
 
 impl PromptRequestReceipt {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_lowered_request(
         invocation_kind: PromptInvocationKind,
+        agent_selection: Option<AgentSelection>,
         provider_id: String,
         provider_info: &codex_model_provider_info::ModelProviderInfo,
         use_responses_lite: bool,
@@ -127,6 +133,7 @@ impl PromptRequestReceipt {
         Ok(Self {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
             compiler_revision: context_inheritance.compiler_revision.clone(),
+            agent_selection,
             invocation_kind,
             request_form: PromptRequestForm::LogicalFull,
             provider: PromptRequestProvider {
@@ -160,6 +167,7 @@ impl PromptRequestReceipt {
         RenderedPromptRequestReceipt {
             schema_version: self.schema_version,
             compiler_revision: &self.compiler_revision,
+            agent_selection: self.agent_selection.as_ref(),
             invocation_kind: self.invocation_kind,
             request_form: &self.request_form,
             provider: &self.provider,
@@ -534,8 +542,10 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
         .await?;
     let multi_agent_v2_projection =
         crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context.as_ref());
+    let agent_selection = sess.get_config().await.agent.clone();
     PromptRequestReceipt::from_lowered_request(
         PromptInvocationKind::Turn,
+        agent_selection,
         turn_context.config.model_provider_id.clone(),
         turn_context.provider.info(),
         turn_context.model_info.use_responses_lite,

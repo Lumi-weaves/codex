@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use codex_protocol::agent::AgentDefinitionRef;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use serde::Serialize;
@@ -17,14 +18,6 @@ pub const CODEX_AGENT_REVISION: u32 = 1;
 pub const CODEX_SOL_PRESET_ID: &str = "codex-5.6-sol";
 pub const CODEX_SOL_PRESET_REVISION: u32 = 1;
 pub const CODEX_SOL_MODEL_TARGET: &str = "gpt-5.6-sol";
-
-/// A stable reference to one immutable Agent Definition revision.
-#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentDefinitionRef {
-    pub id: String,
-    pub revision: u32,
-}
 
 /// A stable reference to one prompt capability revision.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
@@ -348,11 +341,15 @@ fn codex_agent_definition() -> AgentDefinition {
         source_navigation: PromptResourceSourceNavigation {
             modules: vec![
                 "codex-rs/core/src/agent_manifest.rs".to_string(),
+                "codex-rs/core/src/agent_selection.rs".to_string(),
+                "codex-rs/protocol/src/agent.rs".to_string(),
                 "codex-rs/core/src/prompt_resource_definitions.rs".to_string(),
                 "codex-rs/models-manager/models.json".to_string(),
             ],
             symbols: vec![
                 "codex_agent_definition".to_string(),
+                "resolve_agent_selector".to_string(),
+                "AgentDefinitionRef".to_string(),
                 "CodexAgentBaseInstructions".to_string(),
                 "gpt-5.6-sol".to_string(),
             ],
@@ -361,7 +358,10 @@ fn codex_agent_definition() -> AgentDefinition {
                 "legacy model catalog template".to_string(),
                 "model-neutral behavior".to_string(),
             ],
-            tests: vec!["codex-rs/core/src/agent_manifest_tests.rs".to_string()],
+            tests: vec![
+                "codex-rs/core/src/agent_manifest_tests.rs".to_string(),
+                "codex-rs/core/src/agent_selection_tests.rs".to_string(),
+            ],
         },
     }
 }

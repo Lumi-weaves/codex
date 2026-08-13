@@ -1067,6 +1067,7 @@ pub async fn run_main(
     let additional_dirs = cli.add_dir.clone();
 
     let overrides = ConfigOverrides {
+        agent: cli.agent.clone(),
         model,
         approval_policy,
         sandbox_mode,
@@ -2041,6 +2042,7 @@ mod tests {
             originator: "codex".to_string(),
             cli_version: "0.0.0".to_string(),
             source: codex_protocol::protocol::SessionSource::Cli,
+            agent_selection: None,
             model_provider: Some(model_provider.to_string()),
             ..Default::default()
         };

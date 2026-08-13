@@ -1891,6 +1891,7 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
                     agent_nickname: Some(format!("child-{index}")),
                     agent_role: Some("worker".to_string()),
                 }),
+                agent_selection: None,
                 model_provider: Some(app.config.model_provider_id.clone()),
                 multi_agent_version: Some(multi_agent_version),
                 ..SessionMeta::default()
