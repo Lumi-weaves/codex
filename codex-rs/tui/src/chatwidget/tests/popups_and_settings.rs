@@ -6,6 +6,9 @@ use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::MarketplaceLoadErrorInfo;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
+use codex_app_server_protocol::ModelRoute;
+use codex_app_server_protocol::ModelRouteTarget;
+use codex_app_server_protocol::ModelRouteTargetStatus;
 use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
@@ -3239,6 +3242,61 @@ async fn model_picker_d_opens_non_cascading_retire_confirmation() {
 }
 
 #[tokio::test]
+async fn model_picker_e_opens_ordered_target_editor_without_rendering_account_handles() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('e')));
+    let model_tag = match rx.try_recv() {
+        Ok(AppEvent::BeginModelRouteTargetManage { model_tag }) => model_tag,
+        other => panic!("expected BeginModelRouteTargetManage, got {other:?}"),
+    };
+    assert_eq!(model_tag, "gpt-5.4");
+
+    chat.show_model_route_target_editor(model_route_target_editor_fixture());
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("opaque-primary"));
+    assert!(!popup.contains("opaque-secondary"));
+    assert_chatwidget_snapshot!("model_route_target_editor", popup);
+}
+
+#[tokio::test]
+async fn model_route_target_editor_reorders_the_complete_target_set() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let editor = model_route_target_editor_fixture();
+    chat.show_model_route_target_editor(editor);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (editor, target_index) = match rx.try_recv() {
+        Ok(AppEvent::OpenModelRouteTargetActions {
+            editor,
+            target_index,
+        }) => (editor, target_index),
+        other => panic!("expected OpenModelRouteTargetActions, got {other:?}"),
+    };
+    assert_eq!(target_index, 0);
+
+    chat.show_model_route_target_actions(editor, target_index);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let targets = match rx.try_recv() {
+        Ok(AppEvent::SubmitModelRouteTargets { targets, .. }) => targets,
+        other => panic!("expected SubmitModelRouteTargets, got {other:?}"),
+    };
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("target-secondary"), Some("target-primary")]
+    );
+}
+
+#[tokio::test]
 async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.thread_id = Some(ThreadId::new());
@@ -3371,6 +3429,54 @@ async fn model_route_account_picker_exposes_only_safe_account_labels() {
     assert!(!popup.contains("opaque-primary"));
     assert!(!popup.contains("opaque-expired"));
     assert_chatwidget_snapshot!("model_route_account_picker", popup);
+}
+
+fn model_route_target_editor_fixture() -> crate::app_event::ModelRouteTargetEditorState {
+    crate::app_event::ModelRouteTargetEditorState {
+        expected_revision: "revision-7".to_string(),
+        route: ModelRoute {
+            model_tag: "gpt-5.4".to_string(),
+            display_name: "GPT-5.4 Routed".to_string(),
+            retired: false,
+            semantic_model: "gpt-5.4".to_string(),
+            targets: vec![
+                ModelRouteTarget {
+                    id: "target-primary".to_string(),
+                    provider_id: "openai".to_string(),
+                    account_id: "opaque-primary".to_string(),
+                    upstream_model_id: "gpt-5.4".to_string(),
+                    priority: 1,
+                    status: ModelRouteTargetStatus::Unverified,
+                },
+                ModelRouteTarget {
+                    id: "target-secondary".to_string(),
+                    provider_id: "openai".to_string(),
+                    account_id: "opaque-secondary".to_string(),
+                    upstream_model_id: "gpt-5.4-fast".to_string(),
+                    priority: 2,
+                    status: ModelRouteTargetStatus::ReauthenticationRequired,
+                },
+            ],
+        },
+        accounts: vec![
+            ProviderAccount {
+                id: "opaque-primary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Primary Codex".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
+                status: ProviderAccountStatus::Ready,
+                added_at: 1,
+            },
+            ProviderAccount {
+                id: "opaque-secondary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Secondary API".to_string(),
+                credential_kind: ProviderAccountCredentialKind::ApiKey,
+                status: ProviderAccountStatus::Ready,
+                added_at: 2,
+            },
+        ],
+    }
 }
 
 #[tokio::test]

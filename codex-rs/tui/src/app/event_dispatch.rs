@@ -1363,6 +1363,46 @@ impl App {
             AppEvent::ModelRouteRetireCompleted { result } => {
                 self.chat_widget.finish_model_route_retire(result);
             }
+            AppEvent::BeginModelRouteTargetManage { model_tag } => {
+                self.begin_model_route_target_manage(app_server, model_tag);
+            }
+            AppEvent::ModelRouteTargetEditorLoaded { result } => match result {
+                Ok(editor) => self.chat_widget.show_model_route_target_editor(editor),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not load model targets: {error}")),
+            },
+            AppEvent::OpenModelRouteTargetActions {
+                editor,
+                target_index,
+            } => {
+                self.chat_widget
+                    .show_model_route_target_actions(editor, target_index);
+            }
+            AppEvent::OpenModelRouteTargetAccountChoices {
+                editor,
+                replace_index,
+            } => {
+                self.chat_widget
+                    .show_model_route_target_account_choices(editor, replace_index);
+            }
+            AppEvent::OpenModelRouteTargetUpstreamPrompt {
+                editor,
+                replace_index,
+                account,
+            } => {
+                self.chat_widget.open_model_route_target_upstream_prompt(
+                    editor,
+                    replace_index,
+                    account,
+                );
+            }
+            AppEvent::SubmitModelRouteTargets { editor, targets } => {
+                self.submit_model_route_targets(app_server, editor, targets);
+            }
+            AppEvent::ModelRouteTargetsCompleted { result } => {
+                self.chat_widget.finish_model_route_targets(result);
+            }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
                 return_to_permissions,

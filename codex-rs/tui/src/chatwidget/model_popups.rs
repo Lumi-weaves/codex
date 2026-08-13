@@ -245,7 +245,7 @@ impl ChatWidget {
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(ALL_MODELS_POPUP_VIEW_ID),
             footer_hint: Some(Line::from(
-                "Enter select  ·  p providers  ·  i add route  ·  d retire  ·  Esc close".dim(),
+                "Enter select · p providers · i add · e targets · d retire · Esc close".dim(),
             )),
             items,
             header,

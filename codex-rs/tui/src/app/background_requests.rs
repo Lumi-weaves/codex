@@ -25,6 +25,8 @@ use codex_app_server_protocol::ModelRouteReadParams;
 use codex_app_server_protocol::ModelRouteReadResponse;
 use codex_app_server_protocol::ModelRouteRetireParams;
 use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ModelRouteSetTargetsParams;
+use codex_app_server_protocol::ModelRouteSetTargetsResponse;
 use codex_app_server_protocol::ProviderAccountAddApiKeyParams;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListParams;
@@ -142,6 +144,45 @@ impl App {
         tokio::spawn(async move {
             let result = retire_model_route(request_handle, model_tag).await;
             app_event_tx.send(AppEvent::ModelRouteRetireCompleted { result });
+        });
+    }
+
+    pub(super) fn begin_model_route_target_manage(
+        &mut self,
+        app_server: &AppServerSession,
+        model_tag: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_model_route_target_editor(request_handle, &model_tag).await;
+            app_event_tx.send(AppEvent::ModelRouteTargetEditorLoaded { result });
+        });
+    }
+
+    pub(super) fn submit_model_route_targets(
+        &mut self,
+        app_server: &AppServerSession,
+        editor: crate::app_event::ModelRouteTargetEditorState,
+        targets: Vec<codex_app_server_protocol::ModelRouteTargetInput>,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("model-route-targets-set-{}", Uuid::new_v4()));
+            let result: Result<ModelRouteSetTargetsResponse, String> = request_handle
+                .request_typed(ClientRequest::ModelRouteSetTargets {
+                    request_id,
+                    params: ModelRouteSetTargetsParams {
+                        expected_revision: editor.expected_revision,
+                        model_tag: editor.route.model_tag,
+                        targets,
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ModelRouteTargetsCompleted { result });
         });
     }
 
@@ -875,6 +916,48 @@ async fn fetch_model_route_account_choices(
         expected_revision: routes.desired_state_revision,
         semantic_model,
         upstream_model_id,
+        accounts: accounts.data,
+    })
+}
+
+async fn fetch_model_route_target_editor(
+    request_handle: AppServerRequestHandle,
+    model_tag: &str,
+) -> Result<crate::app_event::ModelRouteTargetEditorState, String> {
+    let accounts_request_id =
+        RequestId::String(format!("provider-account-list-{}", Uuid::new_v4()));
+    let accounts: ProviderAccountListResponse = request_handle
+        .request_typed(ClientRequest::ProviderAccountList {
+            request_id: accounts_request_id,
+            params: ProviderAccountListParams {
+                cursor: None,
+                limit: Some(100),
+            },
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let routes_request_id = RequestId::String(format!("model-route-read-{}", Uuid::new_v4()));
+    let routes: ModelRouteReadResponse = request_handle
+        .request_typed(ClientRequest::ModelRouteRead {
+            request_id: routes_request_id,
+            params: ModelRouteReadParams::default(),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(route) = routes
+        .data
+        .into_iter()
+        .find(|route| route.model_tag == model_tag && !route.retired)
+    else {
+        return Err(format!(
+            "`{model_tag}` is not an active managed RichCodex model route"
+        ));
+    };
+
+    Ok(crate::app_event::ModelRouteTargetEditorState {
+        expected_revision: routes.desired_state_revision,
+        route,
         accounts: accounts.data,
     })
 }

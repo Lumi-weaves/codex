@@ -15,6 +15,27 @@ impl ChatWidget {
         if matches!(
             key_event,
             KeyEvent {
+                code: KeyCode::Char('e'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            }
+        ) {
+            let Some(selected_model) = self.selected_all_models_preset() else {
+                return false;
+            };
+            self.bottom_pane
+                .dismiss_active_view_if_id(ALL_MODELS_POPUP_VIEW_ID);
+            self.app_event_tx
+                .send(AppEvent::BeginModelRouteTargetManage {
+                    model_tag: selected_model.model,
+                });
+            return true;
+        }
+
+        if matches!(
+            key_event,
+            KeyEvent {
                 code: KeyCode::Char('p'),
                 modifiers: KeyModifiers::NONE,
                 kind: KeyEventKind::Press,

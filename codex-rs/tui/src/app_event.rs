@@ -23,8 +23,11 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::ModelRoute;
 use codex_app_server_protocol::ModelRouteCreateResponse;
 use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ModelRouteSetTargetsResponse;
+use codex_app_server_protocol::ModelRouteTargetInput;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
@@ -207,6 +210,13 @@ pub(crate) struct ModelRouteAccountChoices {
     pub(crate) expected_revision: String,
     pub(crate) semantic_model: String,
     pub(crate) upstream_model_id: String,
+    pub(crate) accounts: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteTargetEditorState {
+    pub(crate) expected_revision: String,
+    pub(crate) route: ModelRoute,
     pub(crate) accounts: Vec<ProviderAccount>,
 }
 
@@ -923,6 +933,46 @@ pub(crate) enum AppEvent {
     /// Report the safe account projection returned after API-key persistence.
     ProviderApiKeyAddCompleted {
         result: Result<ProviderAccountAddApiKeyResponse, String>,
+    },
+
+    /// Load one managed route plus safe provider accounts for target editing.
+    BeginModelRouteTargetManage {
+        model_tag: String,
+    },
+
+    /// Present an ordered target editor after the model plane has been read.
+    ModelRouteTargetEditorLoaded {
+        result: Result<ModelRouteTargetEditorState, String>,
+    },
+
+    /// Present actions for one existing target.
+    OpenModelRouteTargetActions {
+        editor: ModelRouteTargetEditorState,
+        target_index: usize,
+    },
+
+    /// Choose an account for a new target or for replacing one existing binding.
+    OpenModelRouteTargetAccountChoices {
+        editor: ModelRouteTargetEditorState,
+        replace_index: Option<usize>,
+    },
+
+    /// Collect the upstream model ID for the selected account binding.
+    OpenModelRouteTargetUpstreamPrompt {
+        editor: ModelRouteTargetEditorState,
+        replace_index: Option<usize>,
+        account: ProviderAccount,
+    },
+
+    /// Atomically replace a route's complete ordered target list.
+    SubmitModelRouteTargets {
+        editor: ModelRouteTargetEditorState,
+        targets: Vec<ModelRouteTargetInput>,
+    },
+
+    /// Report target mutation completion after catalog publication.
+    ModelRouteTargetsCompleted {
+        result: Result<ModelRouteSetTargetsResponse, String>,
     },
 
     /// Continue the RichCodex route wizard after the display name is accepted.

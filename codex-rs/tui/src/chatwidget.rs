@@ -383,6 +383,7 @@ use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
+mod model_route_targets;
 mod model_routes;
 mod notifications;
 mod provider_accounts;
