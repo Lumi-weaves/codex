@@ -284,6 +284,9 @@ export type { ModelProviderCapabilitiesReadParams } from "./ModelProviderCapabil
 export type { ModelProviderCapabilitiesReadResponse } from "./ModelProviderCapabilitiesReadResponse";
 export type { ModelRerouteReason } from "./ModelRerouteReason";
 export type { ModelReroutedNotification } from "./ModelReroutedNotification";
+export type { ModelRoute } from "./ModelRoute";
+export type { ModelRouteTarget } from "./ModelRouteTarget";
+export type { ModelRouteTargetStatus } from "./ModelRouteTargetStatus";
 export type { ModelSafetyBufferingUpdatedNotification } from "./ModelSafetyBufferingUpdatedNotification";
 export type { ModelServiceTier } from "./ModelServiceTier";
 export type { ModelUpgradeInfo } from "./ModelUpgradeInfo";

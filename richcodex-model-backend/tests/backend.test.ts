@@ -108,7 +108,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 2,
+      protocolVersion: 3,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,

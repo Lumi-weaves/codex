@@ -119,13 +119,13 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":2,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":3,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
     *'"type":"providerAccountImport"'*)
       printf '%s\n' "$line" > "$state_root/provider-account-import.json"
-      printf '{"type":"providerAccountImportResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":3,"account":{"id":"local-secondary","providerId":"openai","userLabel":"Secondary","status":"verificationRequired","addedAt":123000}}\n' "$request_id"
+      printf '{"type":"providerAccountImportResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":3,"account":{"id":"local-secondary","providerId":"openai","userLabel":"Secondary","status":"verificationRequired","addedAt":123}}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

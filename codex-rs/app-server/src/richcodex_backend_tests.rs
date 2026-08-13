@@ -7,7 +7,7 @@ const TEST_WAIT: Duration = Duration::from_millis(100);
 
 #[tokio::test]
 async fn reads_bounded_ready_snapshot() {
-    let input = br#"{"type":"ready","protocolVersion":2,"instanceId":"backend-1","desiredStateRevision":3,"catalogRevision":7,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"ready"}],"models":[{"tag":"gpt-5.6-luna","displayName":"Luna","available":true,"capabilities":["tools"]}]}
+    let input = br#"{"type":"ready","protocolVersion":3,"instanceId":"backend-1","desiredStateRevision":3,"catalogRevision":7,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"ready"}],"models":[{"modelTag":"gpt-5.6-luna","displayName":"Luna","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-1","providerId":"openai","accountId":"account-1","upstreamModelId":"gpt-5.6-luna","priority":0,"status":"unverified"}]}]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 
@@ -27,10 +27,18 @@ async fn reads_bounded_ready_snapshot() {
                 status: "ready".to_string(),
             }],
             models: vec![ModelSummary {
-                tag: "gpt-5.6-luna".to_string(),
+                model_tag: "gpt-5.6-luna".to_string(),
                 display_name: "Luna".to_string(),
-                available: true,
-                capabilities: vec!["tools".to_string()],
+                retired: false,
+                semantic_model: "gpt-5.6-luna".to_string(),
+                targets: vec![ModelTargetSummary {
+                    id: "target-1".to_string(),
+                    provider_id: "openai".to_string(),
+                    account_id: "account-1".to_string(),
+                    upstream_model_id: "gpt-5.6-luna".to_string(),
+                    priority: 0,
+                    status: "unverified".to_string(),
+                }],
             }],
         }
     );
@@ -38,7 +46,7 @@ async fn reads_bounded_ready_snapshot() {
 
 #[tokio::test]
 async fn rejects_a_kernel_provenance_mismatch() {
-    let input = br#"{"type":"ready","protocolVersion":2,"instanceId":"backend-1","desiredStateRevision":0,"catalogRevision":0,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","selectionDigest":"sha256:untrusted-selection","compositionVersion":2},"providers":[],"models":[]}
+    let input = br#"{"type":"ready","protocolVersion":3,"instanceId":"backend-1","desiredStateRevision":0,"catalogRevision":0,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","selectionDigest":"sha256:untrusted-selection","compositionVersion":2},"providers":[],"models":[]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 
@@ -208,6 +216,97 @@ async fn provider_account_response_rejects_mismatched_correlation_or_secret_fiel
             request_provider_account_list(&mut writer, &mut reader, "request-10", None, None)
                 .await
                 .unwrap_err();
+
+        assert_eq!(error, RichCodexBackendClientError::Unavailable);
+    }
+}
+
+#[tokio::test]
+async fn model_route_create_is_correlated_and_secret_free() {
+    let (mut app_side, backend_side) = tokio::io::duplex(4096);
+    let (backend_read, mut backend_write) = tokio::io::split(backend_side);
+    let mut backend_read = BufReader::new(backend_read);
+    let backend = tokio::spawn(async move {
+        let mut request = String::new();
+        backend_read.read_line(&mut request).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request).unwrap(),
+            serde_json::json!({
+                "type": "modelRouteCreate",
+                "requestId": "request-11",
+                "expectedRevision": 4,
+                "modelTag": "gpt-primary",
+                "displayName": "GPT Primary",
+                "semanticModel": "openai/gpt-primary",
+                "providerId": "openai",
+                "accountId": "account-local",
+                "upstreamModelId": "gpt-primary-2026-08-13"
+            })
+        );
+        backend_write
+            .write_all(br#"{"type":"modelRouteCreateResult","requestId":"request-11","desiredStateRevision":5,"catalogRevision":5,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"openai/gpt-primary","targets":[{"id":"target-1","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}
+"#)
+            .await
+            .unwrap();
+    });
+
+    let (app_read, mut app_write) = tokio::io::split(&mut app_side);
+    let mut app_read = BufReader::new(app_read);
+    let result = request_model_route_create(
+        &mut app_write,
+        &mut app_read,
+        "request-11",
+        &ModelRouteCreateRequest {
+            expected_revision: 4,
+            model_tag: "gpt-primary".to_string(),
+            display_name: "GPT Primary".to_string(),
+            semantic_model: "openai/gpt-primary".to_string(),
+            provider_id: "openai".to_string(),
+            account_id: "account-local".to_string(),
+            upstream_model_id: "gpt-primary-2026-08-13".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.desired_state_revision, 5);
+    assert_eq!(result.catalog_revision, 5);
+    assert_eq!(result.route.model_tag, "gpt-primary");
+    assert_eq!(result.route.targets[0].account_id, "account-local");
+    backend.await.unwrap();
+}
+
+#[tokio::test]
+async fn model_route_retire_maps_revision_conflict() {
+    let input = br#"{"type":"operationError","requestId":"request-12","code":"revision_conflict","message":"must-not-be-reflected"}
+"#;
+    let mut reader = BufReader::new(&input[..]);
+    let mut writer = tokio::io::sink();
+
+    let error =
+        request_model_route_retire(&mut writer, &mut reader, "request-12", 3, "gpt-primary")
+            .await
+            .unwrap_err();
+
+    assert_eq!(error, RichCodexBackendClientError::RevisionConflict);
+}
+
+#[tokio::test]
+async fn model_route_response_rejects_secret_fields_and_invalid_priorities() {
+    for input in [
+        br#"{"type":"modelRouteReadResult","requestId":"request-13","desiredStateRevision":1,"catalogRevision":1,"data":[{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"openai/gpt-primary","targets":[{"id":"target-1","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary","priority":0,"status":"unverified","accessToken":"must-not-cross"}]}]}
+"#
+        .as_slice(),
+        br#"{"type":"modelRouteReadResult","requestId":"request-13","desiredStateRevision":1,"catalogRevision":1,"data":[{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"openai/gpt-primary","targets":[{"id":"target-1","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary","priority":1,"status":"unverified"}]}]}
+"#
+        .as_slice(),
+    ] {
+        let mut reader = BufReader::new(input);
+        let mut writer = tokio::io::sink();
+
+        let error = request_model_route_read(&mut writer, &mut reader, "request-13")
+            .await
+            .unwrap_err();
 
         assert_eq!(error, RichCodexBackendClientError::Unavailable);
     }

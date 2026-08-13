@@ -932,14 +932,32 @@ client_request_definitions! {
     #[experimental("providerAccount/list")]
     ProviderAccountList => "providerAccount/list" {
         params: v2::ProviderAccountListParams,
-        serialization: global_shared_read("richcodex-provider-accounts"),
+        serialization: global_shared_read("richcodex-model-plane"),
         response: v2::ProviderAccountListResponse,
     },
     #[experimental("providerAccount/import")]
     ProviderAccountImport => "providerAccount/import" {
         params: v2::ProviderAccountImportParams,
-        serialization: global("richcodex-provider-accounts"),
+        serialization: global("richcodex-model-plane"),
         response: v2::ProviderAccountImportResponse,
+    },
+    #[experimental("modelRoute/read")]
+    ModelRouteRead => "modelRoute/read" {
+        params: v2::ModelRouteReadParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ModelRouteReadResponse,
+    },
+    #[experimental("modelRoute/create")]
+    ModelRouteCreate => "modelRoute/create" {
+        params: v2::ModelRouteCreateParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteCreateResponse,
+    },
+    #[experimental("modelRoute/retire")]
+    ModelRouteRetire => "modelRoute/retire" {
+        params: v2::ModelRouteRetireParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteRetireResponse,
     },
     ExperimentalFeatureList => "experimentalFeature/list" {
         params: v2::ExperimentalFeatureListParams,
@@ -4015,7 +4033,7 @@ mod tests {
         assert_eq!(
             list.serialization_scope(),
             Some(ClientRequestSerializationScope::GlobalSharedRead(
-                "richcodex-provider-accounts"
+                "richcodex-model-plane"
             ))
         );
 
@@ -4033,7 +4051,7 @@ mod tests {
         assert_eq!(
             import.serialization_scope(),
             Some(ClientRequestSerializationScope::Global(
-                "richcodex-provider-accounts"
+                "richcodex-model-plane"
             ))
         );
         assert_eq!(
@@ -4044,6 +4062,45 @@ mod tests {
                 "params": {
                     "authJsonPath": absolute_path_string("selected/auth.json"),
                     "userLabel": "Secondary"
+                }
+            })
+        );
+
+        let create = ClientRequest::ModelRouteCreate {
+            request_id: request_id(),
+            params: v2::ModelRouteCreateParams {
+                expected_revision: "7".to_string(),
+                model_tag: "gpt-primary".to_string(),
+                display_name: "GPT Primary".to_string(),
+                semantic_model: "openai/gpt-primary".to_string(),
+                provider_id: "openai".to_string(),
+                account_id: "account-local".to_string(),
+                upstream_model_id: "gpt-primary-2026-08-13".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&create),
+            Some("modelRoute/create")
+        );
+        assert_eq!(
+            create.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(create).unwrap(),
+            json!({
+                "id": 1,
+                "method": "modelRoute/create",
+                "params": {
+                    "expectedRevision": "7",
+                    "modelTag": "gpt-primary",
+                    "displayName": "GPT Primary",
+                    "semanticModel": "openai/gpt-primary",
+                    "providerId": "openai",
+                    "accountId": "account-local",
+                    "upstreamModelId": "gpt-primary-2026-08-13"
                 }
             })
         );

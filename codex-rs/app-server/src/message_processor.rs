@@ -33,6 +33,7 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::ModelRouteRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
 use crate::request_processors::ProviderAccountRequestProcessor;
@@ -112,6 +113,7 @@ pub(crate) struct MessageProcessor {
     command_exec_processor: CommandExecRequestProcessor,
     process_exec_processor: ProcessExecRequestProcessor,
     provider_account_processor: ProviderAccountRequestProcessor,
+    model_route_processor: ModelRouteRequestProcessor,
     config_processor: ConfigRequestProcessor,
     environment_processor: EnvironmentRequestProcessor,
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
@@ -439,7 +441,9 @@ impl MessageProcessor {
             on_effective_plugins_changed,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
-        let provider_account_processor = ProviderAccountRequestProcessor::new(richcodex_backend);
+        let provider_account_processor =
+            ProviderAccountRequestProcessor::new(richcodex_backend.clone());
+        let model_route_processor = ModelRouteRequestProcessor::new(richcodex_backend);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -526,6 +530,7 @@ impl MessageProcessor {
             command_exec_processor,
             process_exec_processor,
             provider_account_processor,
+            model_route_processor,
             config_processor,
             environment_processor,
             external_agent_config_processor,
@@ -1310,6 +1315,15 @@ impl MessageProcessor {
             }
             ClientRequest::ProviderAccountImport { params, .. } => {
                 self.provider_account_processor.import(params).await
+            }
+            ClientRequest::ModelRouteRead { params, .. } => {
+                self.model_route_processor.read(params).await
+            }
+            ClientRequest::ModelRouteCreate { params, .. } => {
+                self.model_route_processor.create(params).await
+            }
+            ClientRequest::ModelRouteRetire { params, .. } => {
+                self.model_route_processor.retire(params).await
             }
             ClientRequest::ExperimentalFeatureList { params, .. } => {
                 self.catalog_processor

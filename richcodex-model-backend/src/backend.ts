@@ -13,7 +13,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 2 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 3 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.

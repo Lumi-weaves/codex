@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
@@ -19,18 +20,27 @@ use tokio::time::timeout;
 #[path = "richcodex_backend_client.rs"]
 mod client;
 use client::BackendOperationErrorCode;
+pub(crate) use client::ModelRouteCreateRequest;
+pub(crate) use client::ModelRouteMutationResult;
+pub(crate) use client::ModelRouteReadResult;
 pub(crate) use client::ProviderAccountImportResult;
 pub(crate) use client::ProviderAccountListResult;
 pub(crate) use client::ProviderAccountSummary;
 pub(crate) use client::RichCodexBackendClient;
 pub(crate) use client::RichCodexBackendClientError;
 #[cfg(test)]
+use client::request_model_route_create;
+#[cfg(test)]
+use client::request_model_route_read;
+#[cfg(test)]
+use client::request_model_route_retire;
+#[cfg(test)]
 use client::request_provider_account_import;
 #[cfg(test)]
 use client::request_provider_account_list;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
-const BACKEND_PROTOCOL_VERSION: u32 = 2;
+const BACKEND_PROTOCOL_VERSION: u32 = 3;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,10 +60,22 @@ pub(crate) struct ProviderSummary {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ModelSummary {
-    pub tag: String,
+    pub model_tag: String,
     pub display_name: String,
-    pub available: bool,
-    pub capabilities: Vec<String>,
+    pub retired: bool,
+    pub semantic_model: String,
+    pub targets: Vec<ModelTargetSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ModelTargetSummary {
+    pub id: String,
+    pub provider_id: String,
+    pub account_id: String,
+    pub upstream_model_id: String,
+    pub priority: u32,
+    pub status: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
@@ -126,6 +148,24 @@ enum BackendMessage {
         catalog_revision: u64,
         account: ProviderAccountSummary,
     },
+    ModelRouteReadResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        data: Vec<ModelSummary>,
+    },
+    ModelRouteCreateResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        route: ModelSummary,
+    },
+    ModelRouteRetireResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        route: ModelSummary,
+    },
     OperationError {
         request_id: String,
         code: BackendOperationErrorCode,
@@ -157,6 +197,24 @@ enum AppServerMessage<'a> {
         request_id: &'a str,
         auth_json_path: &'a str,
         user_label: &'a str,
+    },
+    ModelRouteRead {
+        request_id: &'a str,
+    },
+    ModelRouteCreate {
+        request_id: &'a str,
+        expected_revision: u64,
+        model_tag: &'a str,
+        display_name: &'a str,
+        semantic_model: &'a str,
+        provider_id: &'a str,
+        account_id: &'a str,
+        upstream_model_id: &'a str,
+    },
+    ModelRouteRetire {
+        request_id: &'a str,
+        expected_revision: u64,
+        model_tag: &'a str,
     },
 }
 
@@ -342,6 +400,9 @@ where
         | BackendMessage::Ready { .. }
         | BackendMessage::ProviderAccountListResult { .. }
         | BackendMessage::ProviderAccountImportResult { .. }
+        | BackendMessage::ModelRouteReadResult { .. }
+        | BackendMessage::ModelRouteCreateResult { .. }
+        | BackendMessage::ModelRouteRetireResult { .. }
         | BackendMessage::OperationError { .. } => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "model backend sent an invalid shutdown acknowledgement",
@@ -423,21 +484,41 @@ fn validate_snapshot(
             "model backend snapshot exceeded its item limit",
         ));
     }
-    for value in providers
-        .iter()
-        .flat_map(|provider| [&provider.id, &provider.display_name, &provider.status])
-        .chain(
-            models
-                .iter()
-                .flat_map(|model| [&model.tag, &model.display_name]),
-        )
-        .chain(models.iter().flat_map(|model| model.capabilities.iter()))
-    {
-        if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+    for provider in providers {
+        client::validate_provider(provider)?;
+    }
+    let mut model_tags = HashSet::with_capacity(models.len());
+    let mut target_ids = HashSet::new();
+    let mut target_count = 0usize;
+    for model in models {
+        client::validate_model_route(model)?;
+        if !model_tags.insert(model.model_tag.as_str()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                "model backend snapshot contained an invalid safe-display value",
+                "model backend snapshot contained a duplicate model tag",
             ));
+        }
+        target_count = target_count
+            .checked_add(model.targets.len())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "model backend snapshot exceeded its target limit",
+                )
+            })?;
+        if target_count > MAX_SNAPSHOT_ITEMS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model backend snapshot exceeded its target limit",
+            ));
+        }
+        for target in &model.targets {
+            if !target_ids.insert(target.id.as_str()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "model backend snapshot contained a duplicate target id",
+                ));
+            }
         }
     }
     Ok(())

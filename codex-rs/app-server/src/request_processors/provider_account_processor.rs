@@ -100,7 +100,7 @@ fn provider_account(account: ProviderAccountSummary) -> ProviderAccount {
             "reauthenticationRequired" => ProviderAccountStatus::ReauthenticationRequired,
             _ => unreachable!("backend response status is validated by the client actor"),
         },
-        added_at: (account.added_at / 1000) as i64,
+        added_at: account.added_at as i64,
     }
 }
 
@@ -148,5 +148,11 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
             internal_error("RichCodex provider account store is unavailable")
         }
         RichCodexBackendClientError::Unavailable => backend_unavailable(),
+        RichCodexBackendClientError::RevisionConflict
+        | RichCodexBackendClientError::ModelTagExists
+        | RichCodexBackendClientError::ModelTagNotFound
+        | RichCodexBackendClientError::AccountUnavailable => {
+            internal_error("RichCodex provider account backend returned an invalid operation error")
+        }
     }
 }
