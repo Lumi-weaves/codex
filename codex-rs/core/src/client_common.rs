@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// API request payload for a single model turn
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {
     /// Conversation context input items.
     pub input: Vec<ResponseItem>,

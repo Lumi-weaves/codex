@@ -90,6 +90,7 @@ pub use prompt_debug::PromptReceiptView;
 pub use prompt_debug::PromptRequestReceipt;
 pub use prompt_debug::build_prompt_input;
 pub use prompt_debug::build_prompt_request_receipt;
+mod prompt_compiler;
 mod prompt_inheritance;
 pub use prompt_inheritance::PromptInheritanceMatrix;
 pub use prompt_inheritance::PromptInheritanceProvenance;
