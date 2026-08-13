@@ -18,6 +18,8 @@ use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemovalTarget;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
@@ -3414,13 +3416,106 @@ async fn provider_plane_collects_a_compatible_provider_without_exposing_its_key(
 }
 
 #[tokio::test]
+async fn provider_plane_reauthenticates_an_api_key_without_changing_its_handle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_app_server_protocol::ProviderAccount {
+        id: "opaque-alibaba-account".to_string(),
+        provider_id: "alibaba".to_string(),
+        user_label: "Alibaba Primary".to_string(),
+        credential_kind: codex_app_server_protocol::ProviderAccountCredentialKind::ApiKey,
+        status: codex_app_server_protocol::ProviderAccountStatus::ReauthenticationRequired,
+        added_at: 1,
+    };
+    chat.open_provider_account_actions(account.clone(), "7".to_string());
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("provider_account_actions", popup);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (selected, expected_revision) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeyReplacementPrompt {
+            account,
+            expected_revision,
+        }) => (account, expected_revision),
+        other => panic!("expected API-key replacement prompt, got {other:?}"),
+    };
+    assert_eq!(selected.id, account.id);
+    assert_eq!(expected_revision, "7");
+
+    chat.open_provider_api_key_replacement_prompt(selected, expected_revision);
+    let secret = "sk-replacement-secret-canary";
+    chat.handle_paste(secret.to_string());
+    let secret_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!secret_popup.contains(secret));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    match rx.try_recv() {
+        Ok(AppEvent::SubmitProviderApiKeyReplacement {
+            account_id,
+            expected_revision,
+            api_key,
+        }) => {
+            assert_eq!(account_id, "opaque-alibaba-account");
+            assert_eq!(expected_revision, "7");
+            assert_eq!(api_key.into_inner(), secret);
+        }
+        other => panic!("expected replacement submission, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn provider_plane_previews_account_removal_without_implicit_target_rewrites() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = ProviderAccount {
+        id: "opaque-alibaba-account".to_string(),
+        provider_id: "alibaba".to_string(),
+        user_label: "Alibaba Primary".to_string(),
+        credential_kind: ProviderAccountCredentialKind::ApiKey,
+        status: ProviderAccountStatus::Ready,
+        added_at: 1,
+    };
+    chat.show_provider_account_removal_preview(Ok(ProviderAccountRemovalPreviewResponse {
+        account: account.clone(),
+        affected_targets: vec![ProviderAccountRemovalTarget {
+            model_tag: "reviewer".to_string(),
+            display_name: "Independent Reviewer".to_string(),
+            retired: false,
+            target_id: "opaque-target".to_string(),
+            upstream_model_id: "qwen3-coder".to_string(),
+            priority: 0,
+        }],
+        can_remove: false,
+        desired_state_revision: "7".to_string(),
+        catalog_revision: "11".to_string(),
+    }));
+    let blocked = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(&blocked[0]);
+    assert!(rendered.contains("Independent Reviewer → qwen3-coder"));
+    assert!(!rendered.contains("opaque-target"));
+
+    chat.show_provider_account_removal_preview(Ok(ProviderAccountRemovalPreviewResponse {
+        account,
+        affected_targets: Vec::new(),
+        can_remove: true,
+        desired_state_revision: "8".to_string(),
+        catalog_revision: "12".to_string(),
+    }));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitProviderAccountRemoval {
+            account_id,
+            expected_revision,
+        }) if account_id == "opaque-alibaba-account" && expected_revision == "8"
+    ));
+}
+
+#[tokio::test]
 async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.open_provider_oauth_label_prompt();
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),
-        Ok(AppEvent::SubmitProviderOAuthLogin { user_label }) if user_label == "OpenAI Codex"
+        Ok(AppEvent::SubmitProviderOAuthLogin { user_label, account_id })
+            if user_label == "OpenAI Codex" && account_id.is_none()
     ));
 
     chat.show_provider_oauth_login(Ok(ProviderAccountLogin {

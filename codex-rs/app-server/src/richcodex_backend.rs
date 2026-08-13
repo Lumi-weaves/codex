@@ -32,6 +32,9 @@ pub(crate) use client::ProviderAccountAddApiKeyRequest;
 pub(crate) use client::ProviderAccountAddApiKeyResult;
 pub(crate) use client::ProviderAccountImportResult;
 pub(crate) use client::ProviderAccountListResult;
+pub(crate) use client::ProviderAccountMutationResult;
+pub(crate) use client::ProviderAccountRemovalPreviewResult;
+pub(crate) use client::ProviderAccountRemovalTargetSummary;
 pub(crate) use client::ProviderAccountSummary;
 pub(crate) use client::RichCodexBackendClient;
 pub(crate) use client::RichCodexBackendClientError;
@@ -53,7 +56,7 @@ use provider_login::request_provider_account_login_start;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 8;
+const BACKEND_PROTOCOL_VERSION: u32 = 9;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -169,6 +172,26 @@ enum BackendMessage {
         catalog_revision: u64,
         account: ProviderAccountSummary,
     },
+    ProviderAccountReplaceApiKeyResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+    },
+    ProviderAccountRemovalPreviewResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+        affected_targets: Vec<ProviderAccountRemovalTargetSummary>,
+        can_remove: bool,
+    },
+    ProviderAccountRemoveResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+    },
     ProviderAccountLoginStartResult {
         request_id: String,
         login_id: String,
@@ -272,6 +295,22 @@ enum AppServerMessage<'a> {
     ProviderAccountLoginStart {
         request_id: &'a str,
         user_label: &'a str,
+        account_id: Option<&'a str>,
+    },
+    ProviderAccountReplaceApiKey {
+        request_id: &'a str,
+        expected_revision: u64,
+        account_id: &'a str,
+        api_key: &'a str,
+    },
+    ProviderAccountRemovalPreview {
+        request_id: &'a str,
+        account_id: &'a str,
+    },
+    ProviderAccountRemove {
+        request_id: &'a str,
+        expected_revision: u64,
+        account_id: &'a str,
     },
     ProviderAccountLoginStatus {
         request_id: &'a str,
@@ -518,6 +557,9 @@ where
         | BackendMessage::ProviderAccountListResult { .. }
         | BackendMessage::ProviderAccountImportResult { .. }
         | BackendMessage::ProviderAccountAddApiKeyResult { .. }
+        | BackendMessage::ProviderAccountReplaceApiKeyResult { .. }
+        | BackendMessage::ProviderAccountRemovalPreviewResult { .. }
+        | BackendMessage::ProviderAccountRemoveResult { .. }
         | BackendMessage::ProviderAccountLoginStartResult { .. }
         | BackendMessage::ProviderAccountLoginStatusResult { .. }
         | BackendMessage::ProviderAccountLoginCancelResult { .. }

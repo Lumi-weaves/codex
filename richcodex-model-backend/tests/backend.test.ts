@@ -33,6 +33,12 @@ import type {
 
 const TEST_DATA_PLANE_CAPABILITY = "richcodex-test-capability-0123456789abcdef";
 
+function executionReceipt(response: Response): Record<string, unknown> {
+  const encoded = response.headers.get("x-richcodex-execution-receipt");
+  if (!encoded) throw new Error("missing RichCodex execution receipt");
+  return JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+}
+
 function inputOf(text: string): AsyncIterable<Uint8Array> {
   return (async function* (): AsyncGenerator<Uint8Array> {
     yield new TextEncoder().encode(text);
@@ -132,6 +138,10 @@ function executionStore(
     importCodexAuthJson: () => { throw new Error("not used"); },
     addOAuthAccount: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
+    previewAccountRemoval: () => { throw new Error("not used"); },
+    removeAccount: () => { throw new Error("not used"); },
+    replaceApiKeyCredential: () => { throw new Error("not used"); },
+    reauthenticateOAuthAccount: () => { throw new Error("not used"); },
     createModelRoute: () => { throw new Error("not used"); },
     setModelRouteTargets: () => { throw new Error("not used"); },
     retireModelRoute: () => { throw new Error("not used"); },
@@ -162,10 +172,14 @@ describe("RichCodex private model data plane", () => {
       now: () => now,
       fetch: (async (input, init) => {
         calls.push({ url: String(input), init });
-        return new Response('data: {"type":"response.completed"}\n\n', {
+        return new Response(
+          'data: {"type":"response.created","response":{"id":"resp-1"}}\n\n'
+            + 'data: {"type":"response.completed"}\n\n',
+          {
           status: 200,
           headers: { "content-type": "text/event-stream" },
-        });
+          },
+        );
       }) as typeof fetch,
     });
 
@@ -189,6 +203,14 @@ describe("RichCodex private model data plane", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-richcodex-model-tag")).toBe("my-fast-model");
     expect(response.headers.get("x-richcodex-account-id")).toBe("account-1");
+    expect(executionReceipt(response)).toEqual({
+      modelTag: "my-fast-model",
+      resolvedModel: "gpt-5.6-luna",
+      providerId: "openai",
+      accountId: "account-1",
+      targetId: "target-1",
+      attempt: 1,
+    });
     expect(await response.text()).toContain("response.completed");
     expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
@@ -624,7 +646,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 8,
+      protocolVersion: 9,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -1194,6 +1216,158 @@ describe("RichCodex headless backend composition root", () => {
     expect(safeSnapshot).not.toContain("private-access");
     expect(safeSnapshot).not.toContain("private-refresh");
     expect(safeSnapshot).not.toContain("private-workspace");
+  });
+
+  test("previews account removal, refuses referenced accounts, and reauthenticates in place", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-account-lifecycle-"));
+    const stateRoot = join(root, "backend-state");
+    const added = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-bound",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-bound-old",
+        userLabel: "Bound API",
+      })}\n${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-unused",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-unused",
+        userLabel: "Unused API",
+      })}\n`,
+      stateRoot,
+    );
+    const boundId = (added.lines[1] as { account: { id: string } }).account.id;
+    const unusedId = (added.lines[2] as { account: { id: string } }).account.id;
+    await runBackend(`${JSON.stringify({
+      type: "modelRouteCreate",
+      requestId: "create-bound-route",
+      expectedRevision: 2,
+      modelTag: "bound-model",
+      displayName: "Bound Model",
+      semanticModel: "gpt-5.4",
+      providerId: "openai",
+      accountId: boundId,
+      upstreamModelId: "gpt-5.4",
+    })}\n`, stateRoot);
+
+    const lifecycle = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountRemovalPreview",
+        requestId: "preview-bound",
+        accountId: boundId,
+      })}\n${JSON.stringify({
+        type: "providerAccountRemove",
+        requestId: "remove-bound",
+        expectedRevision: 3,
+        accountId: boundId,
+      })}\n${JSON.stringify({
+        type: "providerAccountReplaceApiKey",
+        requestId: "replace-bound-key",
+        expectedRevision: 3,
+        accountId: boundId,
+        apiKey: "sk-bound-new",
+      })}\n${JSON.stringify({
+        type: "providerAccountRemovalPreview",
+        requestId: "preview-unused",
+        accountId: unusedId,
+      })}\n${JSON.stringify({
+        type: "providerAccountRemove",
+        requestId: "remove-unused",
+        expectedRevision: 4,
+        accountId: unusedId,
+      })}\n${JSON.stringify({ type: "providerAccountList", requestId: "list-after" })}\n`,
+      stateRoot,
+    );
+
+    expect(lifecycle.lines[1]).toMatchObject({
+      type: "providerAccountRemovalPreviewResult",
+      desiredStateRevision: 3,
+      canRemove: false,
+      affectedTargets: [{ modelTag: "bound-model", upstreamModelId: "gpt-5.4" }],
+    });
+    expect(lifecycle.lines[2]).toMatchObject({ type: "operationError", code: "account_in_use" });
+    expect(lifecycle.lines[3]).toMatchObject({
+      type: "providerAccountReplaceApiKeyResult",
+      desiredStateRevision: 4,
+      account: { id: boundId, status: "verificationRequired" },
+    });
+    expect(lifecycle.lines[4]).toMatchObject({ canRemove: true, affectedTargets: [] });
+    expect(lifecycle.lines[5]).toMatchObject({
+      type: "providerAccountRemoveResult",
+      desiredStateRevision: 5,
+      account: { id: unusedId },
+    });
+    expect(lifecycle.lines[6]).toMatchObject({
+      desiredStateRevision: 5,
+      data: [{ id: boundId }],
+    });
+    expect(JSON.stringify(lifecycle.lines)).not.toContain("sk-bound");
+    expect(JSON.stringify(lifecycle.lines)).not.toContain("sk-unused");
+  });
+
+  test("OAuth reauthentication preserves the opaque handle and upstream identity", () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-oauth-reauth-"));
+    const now = 1_000_000;
+    const store = createModelPlaneStore(join(root, "backend-state"), {
+      now: () => now,
+      createAccountId: () => "oauth-stable-handle",
+    });
+    const original = store.addOAuthAccount({
+      kind: "oauth",
+      accessToken: "private-old-access",
+      refreshToken: "private-old-refresh",
+      chatgptAccountId: "private-upstream-account",
+      expiresAt: now + 3_600_000,
+    }, "Codex Primary");
+    const replaced = store.reauthenticateOAuthAccount(original.id, {
+      kind: "oauth",
+      accessToken: "private-new-access",
+      refreshToken: "private-new-refresh",
+      chatgptAccountId: "private-upstream-account",
+      expiresAt: now + 7_200_000,
+    });
+    expect(replaced).toEqual({ ...original, status: "verificationRequired" });
+    expect(store.snapshot().desiredStateRevision).toBe(2);
+    expect(() => store.reauthenticateOAuthAccount(original.id, {
+      kind: "oauth",
+      accessToken: "private-other-access",
+      refreshToken: "private-other-refresh",
+      chatgptAccountId: "different-private-account",
+      expiresAt: now + 7_200_000,
+    })).toThrow("account_identity_mismatch");
+  });
+
+  test("device OAuth reauthentication rejects a non-OAuth handle before contacting OpenAI", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-oauth-reauth-preflight-"));
+    const modelPlaneStore = createModelPlaneStore(join(root, "backend-state"), {
+      createAccountId: () => "api-key-handle",
+    });
+    const account = modelPlaneStore.addApiKeyAccount({
+      providerId: "openai",
+      providerDisplayName: "OpenAI",
+      apiBaseUrl: "https://api.openai.com/v1",
+      apiKey: "private-api-key",
+      userLabel: "API key",
+    });
+    let contactedOpenAi = false;
+    const coordinator = createDeviceOAuthCoordinator({
+      modelPlaneStore,
+      fetch: async () => {
+        contactedOpenAi = true;
+        return new Response("", { status: 500 });
+      },
+    });
+
+    await expect(coordinator.start("API key", account.id)).rejects.toThrow(
+      "credential_kind_mismatch",
+    );
+    expect(contactedOpenAi).toBe(false);
+    coordinator.shutdown();
   });
 
   test("cancels a pending device OAuth flow without publishing private state", async () => {

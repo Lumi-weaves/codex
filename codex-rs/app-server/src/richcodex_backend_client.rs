@@ -61,6 +61,27 @@ pub(crate) struct ProviderAccountImportResult {
 }
 
 pub(crate) type ProviderAccountAddApiKeyResult = ProviderAccountImportResult;
+pub(crate) type ProviderAccountMutationResult = ProviderAccountImportResult;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProviderAccountRemovalTargetSummary {
+    pub model_tag: String,
+    pub display_name: String,
+    pub retired: bool,
+    pub target_id: String,
+    pub upstream_model_id: String,
+    pub priority: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProviderAccountRemovalPreviewResult {
+    pub desired_state_revision: u64,
+    pub catalog_revision: u64,
+    pub account: ProviderAccountSummary,
+    pub affected_targets: Vec<ProviderAccountRemovalTargetSummary>,
+    pub can_remove: bool,
+}
 
 pub(crate) struct ProviderAccountAddApiKeyRequest {
     pub provider_id: String,
@@ -127,6 +148,10 @@ pub(super) enum BackendOperationErrorCode {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    AccountNotFound,
+    AccountInUse,
+    CredentialKindMismatch,
+    AccountIdentityMismatch,
     InvalidProvider,
     ProviderConflict,
     InvalidApiKey,
@@ -150,6 +175,10 @@ pub(crate) enum RichCodexBackendClientError {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    AccountNotFound,
+    AccountInUse,
+    CredentialKindMismatch,
+    AccountIdentityMismatch,
     InvalidProvider,
     ProviderConflict,
     InvalidApiKey,
@@ -173,6 +202,10 @@ impl From<BackendOperationErrorCode> for RichCodexBackendClientError {
             BackendOperationErrorCode::CredentialExpired => Self::CredentialExpired,
             BackendOperationErrorCode::AccountAlreadyExists => Self::AccountAlreadyExists,
             BackendOperationErrorCode::AccountLimitReached => Self::AccountLimitReached,
+            BackendOperationErrorCode::AccountNotFound => Self::AccountNotFound,
+            BackendOperationErrorCode::AccountInUse => Self::AccountInUse,
+            BackendOperationErrorCode::CredentialKindMismatch => Self::CredentialKindMismatch,
+            BackendOperationErrorCode::AccountIdentityMismatch => Self::AccountIdentityMismatch,
             BackendOperationErrorCode::InvalidProvider => Self::InvalidProvider,
             BackendOperationErrorCode::ProviderConflict => Self::ProviderConflict,
             BackendOperationErrorCode::InvalidApiKey => Self::InvalidApiKey,
@@ -208,9 +241,32 @@ enum BackendCommand {
         response:
             oneshot::Sender<Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>>,
     },
+    ReplaceApiKey {
+        request_id: String,
+        expected_revision: u64,
+        account_id: String,
+        api_key: String,
+        response:
+            oneshot::Sender<Result<ProviderAccountMutationResult, RichCodexBackendClientError>>,
+    },
+    PreviewRemoval {
+        request_id: String,
+        account_id: String,
+        response: oneshot::Sender<
+            Result<ProviderAccountRemovalPreviewResult, RichCodexBackendClientError>,
+        >,
+    },
+    RemoveAccount {
+        request_id: String,
+        expected_revision: u64,
+        account_id: String,
+        response:
+            oneshot::Sender<Result<ProviderAccountMutationResult, RichCodexBackendClientError>>,
+    },
     StartLogin {
         request_id: String,
         user_label: String,
+        account_id: Option<String>,
         response: oneshot::Sender<Result<ProviderAccountLoginResult, RichCodexBackendClientError>>,
     },
     ReadLogin {
@@ -338,12 +394,74 @@ impl RichCodexBackendClient {
     pub(crate) async fn start_provider_account_login(
         &self,
         user_label: String,
+        account_id: Option<String>,
     ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError> {
         let (response, received) = oneshot::channel();
         self.commands
             .send(BackendCommand::StartLogin {
                 request_id: self.request_id(),
                 user_label,
+                account_id,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn replace_api_key_provider_account(
+        &self,
+        expected_revision: u64,
+        account_id: String,
+        api_key: String,
+    ) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::ReplaceApiKey {
+                request_id: self.request_id(),
+                expected_revision,
+                account_id,
+                api_key,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn preview_provider_account_removal(
+        &self,
+        account_id: String,
+    ) -> Result<ProviderAccountRemovalPreviewResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::PreviewRemoval {
+                request_id: self.request_id(),
+                account_id,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn remove_provider_account(
+        &self,
+        expected_revision: u64,
+        account_id: String,
+    ) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::RemoveAccount {
+                request_id: self.request_id(),
+                expected_revision,
+                account_id,
                 response,
             })
             .await
@@ -553,9 +671,79 @@ async fn run_backend_actor(
                     ));
                 }
             }
+            BackendCommand::ReplaceApiKey {
+                request_id,
+                expected_revision,
+                account_id,
+                api_key,
+                response,
+            } => {
+                let result = request_provider_account_replace_api_key(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    expected_revision,
+                    &account_id,
+                    &api_key,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::PreviewRemoval {
+                request_id,
+                account_id,
+                response,
+            } => {
+                let result = request_provider_account_removal_preview(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    &account_id,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::RemoveAccount {
+                request_id,
+                expected_revision,
+                account_id,
+                response,
+            } => {
+                let result = request_provider_account_remove(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    expected_revision,
+                    &account_id,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
             BackendCommand::StartLogin {
                 request_id,
                 user_label,
+                account_id,
                 response,
             } => {
                 let result = request_provider_account_login_start(
@@ -563,6 +751,7 @@ async fn run_backend_actor(
                     &mut stdout,
                     &request_id,
                     &user_label,
+                    account_id.as_deref(),
                 )
                 .await;
                 let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
@@ -884,6 +1073,165 @@ where
             code,
             ..
         } if returned_request_id == request_id => Err(code.into()),
+        _ => Err(RichCodexBackendClientError::Unavailable),
+    }
+}
+
+async fn request_provider_account_replace_api_key<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    expected_revision: u64,
+    account_id: &str,
+    api_key: &str,
+) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ProviderAccountReplaceApiKey {
+            request_id,
+            expected_revision,
+            account_id,
+            api_key,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    match read_message(reader, REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| RichCodexBackendClientError::Unavailable)?
+    {
+        BackendMessage::ProviderAccountReplaceApiKeyResult {
+            request_id: returned,
+            desired_state_revision,
+            catalog_revision,
+            account,
+        } if returned == request_id => {
+            validate_provider_account(&account)
+                .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+            Ok(ProviderAccountMutationResult {
+                desired_state_revision,
+                catalog_revision,
+                account,
+            })
+        }
+        BackendMessage::OperationError {
+            request_id: returned,
+            code,
+            ..
+        } if returned == request_id => Err(code.into()),
+        _ => Err(RichCodexBackendClientError::Unavailable),
+    }
+}
+
+async fn request_provider_account_removal_preview<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    account_id: &str,
+) -> Result<ProviderAccountRemovalPreviewResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ProviderAccountRemovalPreview {
+            request_id,
+            account_id,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    match read_message(reader, REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| RichCodexBackendClientError::Unavailable)?
+    {
+        BackendMessage::ProviderAccountRemovalPreviewResult {
+            request_id: returned,
+            desired_state_revision,
+            catalog_revision,
+            account,
+            affected_targets,
+            can_remove,
+        } if returned == request_id => {
+            validate_provider_account(&account)
+                .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+            if affected_targets.len() > MAX_SNAPSHOT_ITEMS
+                || affected_targets.iter().any(|target| {
+                    validate_safe_text(&target.model_tag, 80).is_err()
+                        || validate_safe_text(&target.display_name, 80).is_err()
+                        || validate_safe_text(&target.target_id, 80).is_err()
+                        || validate_safe_text(&target.upstream_model_id, 512).is_err()
+                })
+                || can_remove != affected_targets.is_empty()
+            {
+                return Err(RichCodexBackendClientError::Unavailable);
+            }
+            Ok(ProviderAccountRemovalPreviewResult {
+                desired_state_revision,
+                catalog_revision,
+                account,
+                affected_targets,
+                can_remove,
+            })
+        }
+        BackendMessage::OperationError {
+            request_id: returned,
+            code,
+            ..
+        } if returned == request_id => Err(code.into()),
+        _ => Err(RichCodexBackendClientError::Unavailable),
+    }
+}
+
+async fn request_provider_account_remove<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    expected_revision: u64,
+    account_id: &str,
+) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ProviderAccountRemove {
+            request_id,
+            expected_revision,
+            account_id,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    match read_message(reader, REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| RichCodexBackendClientError::Unavailable)?
+    {
+        BackendMessage::ProviderAccountRemoveResult {
+            request_id: returned,
+            desired_state_revision,
+            catalog_revision,
+            account,
+        } if returned == request_id => {
+            validate_provider_account(&account)
+                .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+            Ok(ProviderAccountMutationResult {
+                desired_state_revision,
+                catalog_revision,
+                account,
+            })
+        }
+        BackendMessage::OperationError {
+            request_id: returned,
+            code,
+            ..
+        } if returned == request_id => Err(code.into()),
         _ => Err(RichCodexBackendClientError::Unavailable),
     }
 }

@@ -175,6 +175,21 @@ pub struct ModelReroutedNotification {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct RichCodexExecutionReceiptNotification {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub model_tag: String,
+    pub resolved_model: String,
+    pub provider_id: String,
+    /// Opaque RichCodex-owned account handle, never an upstream account identity.
+    pub account_id: String,
+    pub target_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct ModelVerificationNotification {
     pub thread_id: String,
     pub turn_id: String,

@@ -52,6 +52,45 @@ pub struct ProviderAccountAddApiKeyParams {
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountLoginStartParams {
     pub user_label: String,
+    /// Existing OAuth account to reauthenticate in place. Omit to add an account.
+    #[ts(optional = nullable)]
+    pub account_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountReplaceApiKeyParams {
+    pub account_id: String,
+    pub expected_revision: String,
+    /// Write-only replacement credential; never returned publicly.
+    pub api_key: String,
+}
+
+impl std::fmt::Debug for ProviderAccountReplaceApiKeyParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderAccountReplaceApiKeyParams")
+            .field("account_id", &self.account_id)
+            .field("expected_revision", &self.expected_revision)
+            .field("api_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRemovalPreviewParams {
+    pub account_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRemoveParams {
+    pub account_id: String,
+    pub expected_revision: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -126,6 +165,9 @@ pub enum ProviderAccountLoginFailure {
     InvalidCredential,
     AccountAlreadyExists,
     AccountLimitReached,
+    AccountNotFound,
+    CredentialKindMismatch,
+    AccountIdentityMismatch,
     StoreUnavailable,
 }
 
@@ -160,6 +202,18 @@ pub struct ProviderAccountLogin {
     pub account: Option<ProviderAccount>,
     pub desired_state_revision: String,
     pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRemovalTarget {
+    pub model_tag: String,
+    pub display_name: String,
+    pub retired: bool,
+    pub target_id: String,
+    pub upstream_model_id: String,
+    pub priority: u32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -207,6 +261,35 @@ pub struct ProviderAccountImportResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountAddApiKeyResponse {
+    pub account: ProviderAccount,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountReplaceApiKeyResponse {
+    pub account: ProviderAccount,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRemovalPreviewResponse {
+    pub account: ProviderAccount,
+    pub affected_targets: Vec<ProviderAccountRemovalTarget>,
+    pub can_remove: bool,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRemoveResponse {
     pub account: ProviderAccount,
     pub desired_state_revision: String,
     pub catalog_revision: String,

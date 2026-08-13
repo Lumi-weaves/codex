@@ -187,6 +187,17 @@ function responseHeaders(
   return headers;
 }
 
+function safeReceipt(candidate: ModelExecutionCandidate, attempt: number): string {
+  return Buffer.from(JSON.stringify({
+    modelTag: candidate.modelTag,
+    resolvedModel: candidate.upstreamModelId,
+    providerId: candidate.providerId,
+    accountId: candidate.accountId,
+    targetId: candidate.targetId,
+    attempt,
+  }), "utf8").toString("base64url");
+}
+
 function validCapability(value: string): boolean {
   return value.length >= 32 && value.length <= 512 && /^[A-Za-z0-9._~-]+$/.test(value);
 }
@@ -321,10 +332,12 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       options.modelPlaneStore.markAccountStatus(candidate.accountId, "ready");
     }
     runtime.set(candidate.accountId, state);
+    const headers = responseHeaders(upstream, candidate, attempt);
+    headers.set("x-richcodex-execution-receipt", safeReceipt(candidate, attempt));
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
-      headers: responseHeaders(upstream, candidate, attempt),
+      headers,
     });
   };
 

@@ -103,6 +103,7 @@ use codex_protocol::protocol::PlanDeltaEvent;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::ReasoningContentDeltaEvent;
 use codex_protocol::protocol::ReasoningRawContentDeltaEvent;
+use codex_protocol::protocol::RichCodexExecutionReceiptEvent;
 use codex_protocol::protocol::SafetyBufferingEvent;
 use codex_protocol::protocol::TurnDiffEvent;
 use codex_protocol::protocol::WarningEvent;
@@ -1792,6 +1793,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
         | EventMsg::RealtimeConversationRealtime(_)
         | EventMsg::RealtimeConversationClosed(_)
         | EventMsg::ModelReroute(_)
+        | EventMsg::RichCodexExecutionReceipt(_)
         | EventMsg::ModelVerification(_)
         | EventMsg::TurnModerationMetadata(_)
         | EventMsg::SafetyBuffering(_)
@@ -2505,6 +2507,20 @@ async fn try_run_sampling_request(
                         .server_model_warning_emitted
                         .store(true, Ordering::Relaxed);
                 }
+            }
+            ResponseEvent::RichCodexExecutionReceipt(receipt) => {
+                sess.send_event(
+                    &turn_context,
+                    EventMsg::RichCodexExecutionReceipt(RichCodexExecutionReceiptEvent {
+                        model_tag: receipt.model_tag,
+                        resolved_model: receipt.resolved_model,
+                        provider_id: receipt.provider_id,
+                        account_id: receipt.account_id,
+                        target_id: receipt.target_id,
+                        attempt: receipt.attempt,
+                    }),
+                )
+                .await;
             }
             ResponseEvent::ModelVerifications(verifications) => {
                 if !turn_context

@@ -1,0 +1,44 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "accountId": {
+      "description": "Opaque RichCodex-owned account handle, never an upstream account identity.",
+      "type": "string"
+    },
+    "attempt": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "modelTag": {
+      "type": "string"
+    },
+    "providerId": {
+      "type": "string"
+    },
+    "resolvedModel": {
+      "type": "string"
+    },
+    "targetId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "accountId",
+    "attempt",
+    "modelTag",
+    "providerId",
+    "resolvedModel",
+    "targetId",
+    "threadId",
+    "turnId"
+  ],
+  "title": "RichCodexExecutionReceiptNotification",
+  "type": "object"
+}

@@ -8,6 +8,9 @@ use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
 use codex_app_server_protocol::ProviderAccountLoginStartResponse;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_app_server_protocol::RequestId;
 use pretty_assertions::assert_eq;
@@ -172,6 +175,45 @@ async fn provider_account_api_key_add_returns_only_safe_account_state() -> Resul
         recorded["apiBaseUrl"],
         "https://dashscope.aliyuncs.com/compatible-mode/v1"
     );
+    let replacement = "sk-replacement-canary-must-not-return";
+    let replace_id = server
+        .send_raw_request(
+            "providerAccount/apiKey/replace",
+            Some(serde_json::json!({
+                "accountId": response.account.id,
+                "expectedRevision": response.desired_state_revision,
+                "apiKey": replacement,
+            })),
+        )
+        .await?;
+    let replaced: ProviderAccountReplaceApiKeyResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(replace_id)).await??;
+    assert_eq!(replaced.account.id, response.account.id);
+    assert!(!serde_json::to_string(&replaced)?.contains(replacement));
+
+    let preview_id = server
+        .send_raw_request(
+            "providerAccount/removalPreview",
+            Some(serde_json::json!({ "accountId": response.account.id })),
+        )
+        .await?;
+    let preview: ProviderAccountRemovalPreviewResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(preview_id)).await??;
+    assert!(preview.can_remove);
+    assert!(preview.affected_targets.is_empty());
+
+    let remove_id = server
+        .send_raw_request(
+            "providerAccount/remove",
+            Some(serde_json::json!({
+                "accountId": response.account.id,
+                "expectedRevision": preview.desired_state_revision,
+            })),
+        )
+        .await?;
+    let removed: ProviderAccountRemoveResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(remove_id)).await??;
+    assert_eq!(removed.account.id, response.account.id);
     assert!(server.shutdown_gracefully().await?.success());
     Ok(())
 }
@@ -260,7 +302,7 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":8,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":9,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -271,6 +313,15 @@ while IFS= read -r line; do
     *'"type":"providerAccountAddApiKey"'*'sk-api-key-canary-must-not-return'*)
       printf '%s\n' "$line" > "$state_root/provider-api-key-add.json"
       printf '{"type":"providerAccountAddApiKeyResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountReplaceApiKey"'*'sk-replacement-canary-must-not-return'*)
+      printf '{"type":"providerAccountReplaceApiKeyResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountRemovalPreview"'*)
+      printf '{"type":"providerAccountRemovalPreviewResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124},"affectedTargets":[],"canRemove":true}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountRemove"'*)
+      printf '{"type":"providerAccountRemoveResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
       ;;
     *'"type":"providerAccountLoginStart"'*)
       printf '{"type":"providerAccountLoginStartResult","requestId":"%s","loginId":"login-safe-handle","status":"awaitingUser","verificationUrl":"https://auth.openai.com/codex/device","userCode":"SAFE-CODE","expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":1,"catalogRevision":1}\n' "$request_id"

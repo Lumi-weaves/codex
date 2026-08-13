@@ -144,6 +144,19 @@ impl ChatWidget {
                 self.refresh_skills_for_current_cwd(/*force_reload*/ true);
             }
             ServerNotification::ModelRerouted(_) => {}
+            ServerNotification::RichCodexExecutionReceipt(notification) => {
+                self.add_info_message(
+                    format!(
+                        "RichCodex route: {} → {}/{} · account {} · attempt {}",
+                        notification.model_tag,
+                        notification.provider_id,
+                        notification.resolved_model,
+                        notification.account_id,
+                        notification.attempt,
+                    ),
+                    None,
+                );
+            }
             ServerNotification::ModelVerification(notification) => {
                 self.on_app_server_model_verification(&notification.verifications)
             }

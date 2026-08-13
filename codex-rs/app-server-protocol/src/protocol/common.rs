@@ -947,6 +947,24 @@ client_request_definitions! {
         serialization: global("richcodex-model-plane"),
         response: v2::ProviderAccountAddApiKeyResponse,
     },
+    #[experimental("providerAccount/apiKey/replace")]
+    ProviderAccountReplaceApiKey => "providerAccount/apiKey/replace" {
+        params: v2::ProviderAccountReplaceApiKeyParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountReplaceApiKeyResponse,
+    },
+    #[experimental("providerAccount/removalPreview")]
+    ProviderAccountRemovalPreview => "providerAccount/removalPreview" {
+        params: v2::ProviderAccountRemovalPreviewParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ProviderAccountRemovalPreviewResponse,
+    },
+    #[experimental("providerAccount/remove")]
+    ProviderAccountRemove => "providerAccount/remove" {
+        params: v2::ProviderAccountRemoveParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountRemoveResponse,
+    },
     #[experimental("providerAccount/login/start")]
     ProviderAccountLoginStart => "providerAccount/login/start" {
         params: v2::ProviderAccountLoginStartParams,
@@ -1817,6 +1835,8 @@ server_notification_definitions! {
     /// Deprecated: Use `ContextCompaction` item type instead.
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
+    #[experimental("model/executionReceipt")]
+    RichCodexExecutionReceipt => "model/executionReceipt" (v2::RichCodexExecutionReceiptNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
     #[experimental("turn/moderationMetadata")]
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),

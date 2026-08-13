@@ -13,13 +13,14 @@ import {
   type ModelPlaneStore,
   type ModelRouteMutationCode,
   type ProviderAccountImportCode,
+  type AccountRemovalPreview,
   type SafeProviderAccount,
   type SafeModelRoute,
   type SafeProviderSummary,
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 8 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 9 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -152,11 +153,22 @@ export type HeadlessProviderAccountListResultMessage = {
 };
 
 export type HeadlessProviderAccountImportResultMessage = {
-  readonly type: "providerAccountImportResult" | "providerAccountAddApiKeyResult";
+  readonly type:
+    | "providerAccountImportResult"
+    | "providerAccountAddApiKeyResult"
+    | "providerAccountReplaceApiKeyResult"
+    | "providerAccountRemoveResult";
   readonly requestId: string;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
   readonly account: SafeProviderAccount;
+};
+
+export type HeadlessProviderAccountRemovalPreviewResultMessage = AccountRemovalPreview & {
+  readonly type: "providerAccountRemovalPreviewResult";
+  readonly requestId: string;
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
 };
 
 export type HeadlessProviderAccountLoginResultMessage = SafeProviderLogin & {
@@ -217,6 +229,25 @@ type HeadlessInboundMessage =
     readonly type: "providerAccountLoginStart";
     readonly requestId: string;
     readonly userLabel: string;
+    readonly accountId: string | null;
+  }
+  | {
+    readonly type: "providerAccountReplaceApiKey";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly accountId: string;
+    readonly apiKey: string;
+  }
+  | {
+    readonly type: "providerAccountRemovalPreview";
+    readonly requestId: string;
+    readonly accountId: string;
+  }
+  | {
+    readonly type: "providerAccountRemove";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly accountId: string;
   }
   | {
     readonly type: "providerAccountLoginStatus";
@@ -351,6 +382,7 @@ function encodeMessage(message:
   | HeadlessProtocolErrorMessage
   | HeadlessProviderAccountListResultMessage
   | HeadlessProviderAccountImportResultMessage
+  | HeadlessProviderAccountRemovalPreviewResultMessage
   | HeadlessProviderAccountLoginResultMessage
   | HeadlessModelRouteReadResultMessage
   | HeadlessModelRouteMutationResultMessage
@@ -516,17 +548,79 @@ function parseInboundMessage(text: string):
   }
   if (record.type === "providerAccountLoginStart") {
     const requestId = parseRequestId(record.requestId);
+    const accountId = record.accountId === undefined || record.accountId === null
+      ? null
+      : record.accountId;
     if (
-      !hasExactlyKeys(record, ["type", "requestId", "userLabel"])
+      ownKeys(record).some(key => !["type", "requestId", "userLabel", "accountId"].includes(key))
       || !requestId
       || !isBoundedOpaqueText(record.userLabel, 80)
       || record.userLabel.trim() !== record.userLabel
+      || accountId !== null && !isBoundedOpaqueText(accountId, 80)
     ) {
       return { ok: false, error: protocolError("malformed_message") };
     }
     return {
       ok: true,
-      message: { type: "providerAccountLoginStart", requestId, userLabel: record.userLabel },
+      message: {
+        type: "providerAccountLoginStart",
+        requestId,
+        userLabel: record.userLabel,
+        accountId,
+      },
+    };
+  }
+  if (record.type === "providerAccountReplaceApiKey") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "accountId", "apiKey"])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.accountId, 80)
+      || !isBoundedOpaqueText(record.apiKey, 64 * 1024)
+      || record.apiKey.trim() !== record.apiKey
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountReplaceApiKey",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        accountId: record.accountId,
+        apiKey: record.apiKey,
+      },
+    };
+  }
+  if (record.type === "providerAccountRemovalPreview") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "accountId"])
+      || !requestId
+      || !isBoundedOpaqueText(record.accountId, 80)
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: { type: "providerAccountRemovalPreview", requestId, accountId: record.accountId },
+    };
+  }
+  if (record.type === "providerAccountRemove") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "accountId"])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.accountId, 80)
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountRemove",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        accountId: record.accountId,
+      },
     };
   }
   if (
@@ -785,6 +879,10 @@ function operationErrorForCode(
     credential_expired: "selected Codex login has expired",
     account_already_exists: "this provider account is already configured",
     account_limit_reached: "provider account limit reached",
+    account_not_found: "provider account does not exist",
+    account_in_use: "provider account is still referenced by model targets",
+    credential_kind_mismatch: "provider account credential kind does not match",
+    account_identity_mismatch: "reauthentication returned a different upstream account",
     invalid_provider: "provider configuration is invalid",
     provider_conflict: "provider ID is already configured differently",
     invalid_api_key: "API key is invalid",
@@ -862,6 +960,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             | HeadlessProtocolErrorMessage
             | HeadlessProviderAccountListResultMessage
             | HeadlessProviderAccountImportResultMessage
+            | HeadlessProviderAccountRemovalPreviewResultMessage
             | HeadlessProviderAccountLoginResultMessage
             | HeadlessModelRouteReadResultMessage
             | HeadlessModelRouteMutationResultMessage
@@ -974,11 +1073,57 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 continue;
               }
               if (parsed.message.type === "providerAccountLoginStart") {
-                const login = await deviceOAuth.start(parsed.message.userLabel);
+                const login = await deviceOAuth.start(
+                  parsed.message.userLabel,
+                  parsed.message.accountId ?? undefined,
+                );
                 if (!await write({
                   type: "providerAccountLoginStartResult",
                   requestId: parsed.message.requestId,
                   ...login,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountReplaceApiKey") {
+                const account = modelPlaneStore.replaceApiKeyCredential(
+                  parsed.message.accountId,
+                  parsed.message.expectedRevision,
+                  parsed.message.apiKey,
+                );
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountReplaceApiKeyResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountRemovalPreview") {
+                const preview = modelPlaneStore.previewAccountRemoval(parsed.message.accountId);
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountRemovalPreviewResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  ...preview,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountRemove") {
+                const account = modelPlaneStore.removeAccount(
+                  parsed.message.accountId,
+                  parsed.message.expectedRevision,
+                );
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountRemoveResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
                 })) return { exitCode: 1, reason: "output_error" };
                 continue;
               }

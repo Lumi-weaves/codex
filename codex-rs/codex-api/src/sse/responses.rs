@@ -29,6 +29,7 @@ const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const REQUEST_ID_HEADER: &str = "x-request-id";
+const RICHCODEX_EXECUTION_RECEIPT_HEADER: &str = "x-richcodex-execution-receipt";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
 
 pub fn spawn_response_stream(
@@ -57,6 +58,11 @@ pub fn spawn_response_stream(
         .get(REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let richcodex_receipt = stream_response
+        .headers
+        .get(RICHCODEX_EXECUTION_RECEIPT_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_richcodex_receipt);
     let safety_buffering_treatment =
         treatment_from_headers(&stream_response.headers).unwrap_or_default();
     if let Some(turn_state) = turn_state.as_ref()
@@ -69,6 +75,11 @@ pub fn spawn_response_stream(
     }
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
+        if let Some(receipt) = richcodex_receipt {
+            let _ = tx_event
+                .send(Ok(ResponseEvent::RichCodexExecutionReceipt(receipt)))
+                .await;
+        }
         if let Some(model) = server_model {
             let _ = tx_event.send(Ok(ResponseEvent::ServerModel(model))).await;
         }
@@ -97,6 +108,39 @@ pub fn spawn_response_stream(
         rx_event,
         upstream_request_id,
     }
+}
+
+fn parse_richcodex_receipt(value: &str) -> Option<crate::common::RichCodexExecutionReceipt> {
+    use base64::Engine;
+    if value.len() > 2048
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .ok()?;
+    if bytes.len() > 1536 {
+        return None;
+    }
+    let receipt: crate::common::RichCodexExecutionReceipt = serde_json::from_slice(&bytes).ok()?;
+    if !valid_richcodex_receipt_text(&receipt.model_tag, 80)
+        || !valid_richcodex_receipt_text(&receipt.resolved_model, 512)
+        || !valid_richcodex_receipt_text(&receipt.provider_id, 64)
+        || !valid_richcodex_receipt_text(&receipt.account_id, 80)
+        || !valid_richcodex_receipt_text(&receipt.target_id, 80)
+        || receipt.attempt == 0
+        || receipt.attempt > 1_024
+    {
+        return None;
+    }
+    Some(receipt)
+}
+
+fn valid_richcodex_receipt_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1320,6 +1364,92 @@ mod tests {
             }
             other => panic!("expected server model event, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn spawn_response_stream_emits_a_safe_richcodex_receipt() {
+        use base64::Engine;
+        let receipt = serde_json::json!({
+            "modelTag": "reviewer",
+            "resolvedModel": "qwen3-coder",
+            "providerId": "alibaba",
+            "accountId": "account-opaque",
+            "targetId": "target-opaque",
+            "attempt": 2,
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&receipt).unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RICHCODEX_EXECUTION_RECEIPT_HEADER,
+            HeaderValue::from_str(&encoded).unwrap(),
+        );
+        let stream_response = StreamResponse {
+            status: StatusCode::OK,
+            headers,
+            bytes: Box::pin(stream::iter(Vec::<Result<Bytes, TransportError>>::new())),
+        };
+        let mut stream = spawn_response_stream(
+            stream_response,
+            idle_timeout(),
+            /*telemetry*/ None,
+            /*turn_state*/ None,
+        );
+        assert_matches!(
+            stream.rx_event.recv().await.unwrap().unwrap(),
+            ResponseEvent::RichCodexExecutionReceipt(receipt)
+                if receipt.model_tag == "reviewer"
+                    && receipt.provider_id == "alibaba"
+                    && receipt.account_id == "account-opaque"
+                    && receipt.attempt == 2
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_response_stream_ignores_unsafe_richcodex_receipt() {
+        use base64::Engine;
+        let receipt = serde_json::json!({
+            "modelTag": "reviewer\nforged status",
+            "resolvedModel": "qwen3-coder",
+            "providerId": "alibaba",
+            "accountId": "account-opaque",
+            "targetId": "target-opaque",
+            "attempt": 2,
+        });
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&receipt).unwrap());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            RICHCODEX_EXECUTION_RECEIPT_HEADER,
+            HeaderValue::from_str(&encoded).unwrap(),
+        );
+        let stream_response = StreamResponse {
+            status: StatusCode::OK,
+            headers,
+            bytes: Box::pin(stream::iter(Vec::<Result<Bytes, TransportError>>::new())),
+        };
+        let mut stream = spawn_response_stream(
+            stream_response,
+            idle_timeout(),
+            /*telemetry*/ None,
+            /*turn_state*/ None,
+        );
+
+        let mut saw_stream_close = false;
+        while let Some(event) = stream.rx_event.recv().await {
+            match event {
+                Ok(ResponseEvent::RichCodexExecutionReceipt(receipt)) => {
+                    panic!("unsafe receipt was accepted: {receipt:?}")
+                }
+                Err(ApiError::Stream(message)) => {
+                    assert_eq!(message, "stream closed before response.completed");
+                    saw_stream_close = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_stream_close);
     }
 
     #[tokio::test]

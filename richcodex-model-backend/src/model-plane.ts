@@ -116,6 +116,10 @@ export type ProviderAccountImportCode =
   | "credential_expired"
   | "account_already_exists"
   | "account_limit_reached"
+  | "account_not_found"
+  | "account_in_use"
+  | "credential_kind_mismatch"
+  | "account_identity_mismatch"
   | "invalid_provider"
   | "provider_conflict"
   | "invalid_api_key"
@@ -200,11 +204,37 @@ export interface AddApiKeyAccountInput {
   readonly userLabel: string;
 }
 
+export interface SafeAccountRemovalTarget {
+  readonly modelTag: string;
+  readonly displayName: string;
+  readonly retired: boolean;
+  readonly targetId: string;
+  readonly upstreamModelId: string;
+  readonly priority: number;
+}
+
+export interface AccountRemovalPreview {
+  readonly account: SafeProviderAccount;
+  readonly affectedTargets: readonly SafeAccountRemovalTarget[];
+  readonly canRemove: boolean;
+}
+
 export interface ModelPlaneStore {
   snapshot(): ProviderAccountSnapshot;
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount;
   addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
+  previewAccountRemoval(accountId: string): AccountRemovalPreview;
+  removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
+  replaceApiKeyCredential(
+    accountId: string,
+    expectedRevision: number,
+    apiKey: string,
+  ): SafeProviderAccount;
+  reauthenticateOAuthAccount(
+    accountId: string,
+    credential: StoredOAuthCredential,
+  ): SafeProviderAccount;
   createModelRoute(input: CreateModelRouteInput): SafeModelRoute;
   setModelRouteTargets(input: SetModelRouteTargetsInput): SafeModelRoute;
   retireModelRoute(modelTag: string, expectedRevision: number): SafeModelRoute;
@@ -994,6 +1024,128 @@ export function createModelPlaneStore(
       persistDocument(stateRoot, path, next);
       document = next;
       return safeAccount(account, now());
+    },
+    previewAccountRemoval(accountId: string): AccountRemovalPreview {
+      if (!isSafeText(accountId, 80)) throw new ModelPlaneError("invalid_request");
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      const entries = new Map(document.displayEntries.map(entry => [entry.modelTag, entry]));
+      const affectedTargets = document.modelTags.flatMap(tag => {
+        const entry = entries.get(tag.id);
+        if (!entry) throw new ModelPlaneError("store_unavailable");
+        return tag.targets
+          .filter(target => target.accountId === accountId)
+          .map(target => ({
+            modelTag: tag.id,
+            displayName: entry.displayName,
+            retired: entry.retired,
+            targetId: target.id,
+            upstreamModelId: target.upstreamModelId,
+            priority: target.priority,
+          }));
+      });
+      return {
+        account: safeAccount(account, now()),
+        affectedTargets,
+        canRemove: affectedTargets.length === 0,
+      };
+    },
+    removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount {
+      if (
+        !isSafeText(accountId, 80)
+        || !Number.isSafeInteger(expectedRevision)
+        || expectedRevision < 0
+      ) throw new ModelPlaneError("invalid_request");
+      if (expectedRevision !== document.desiredStateRevision) {
+        throw new ModelPlaneError("revision_conflict");
+      }
+      const preview = this.previewAccountRemoval(accountId);
+      if (!preview.canRemove) throw new ModelPlaneError("account_in_use");
+      const next = nextDocument(document, {
+        accounts: document.accounts.filter(account => account.id !== accountId),
+        modelTags: document.modelTags,
+        displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return preview.account;
+    },
+    replaceApiKeyCredential(
+      accountId: string,
+      expectedRevision: number,
+      apiKey: string,
+    ): SafeProviderAccount {
+      if (
+        !isSafeText(accountId, 80)
+        || !Number.isSafeInteger(expectedRevision)
+        || expectedRevision < 0
+        || !isSafeText(apiKey, 64 * 1024)
+        || apiKey.trim() !== apiKey
+      ) throw new ModelPlaneError("invalid_request");
+      if (expectedRevision !== document.desiredStateRevision) {
+        throw new ModelPlaneError("revision_conflict");
+      }
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      if (account.credential.kind !== "apiKey") {
+        throw new ModelPlaneError("credential_kind_mismatch");
+      }
+      if (document.accounts.some(candidate =>
+        candidate.id !== accountId
+        && candidate.providerId === account.providerId
+        && candidate.credential.kind === "apiKey"
+        && candidate.credential.apiKey === apiKey
+      )) throw new ModelPlaneError("account_already_exists");
+      const nextAccount: StoredProviderAccount = {
+        ...account,
+        status: "verificationRequired",
+        credential: { kind: "apiKey", apiKey },
+      };
+      const next = nextDocument(document, {
+        accounts: document.accounts.map(candidate =>
+          candidate.id === accountId ? nextAccount : candidate
+        ),
+        modelTags: document.modelTags,
+        displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeAccount(nextAccount, now());
+    },
+    reauthenticateOAuthAccount(
+      accountId: string,
+      credential: StoredOAuthCredential,
+    ): SafeProviderAccount {
+      if (!isSafeText(accountId, 80)) throw new ModelPlaneError("invalid_request");
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      if (account.credential.kind !== "oauth") {
+        throw new ModelPlaneError("credential_kind_mismatch");
+      }
+      if (account.credential.chatgptAccountId !== credential.chatgptAccountId) {
+        throw new ModelPlaneError("account_identity_mismatch");
+      }
+      if (
+        !isSafeText(credential.accessToken, 64 * 1024)
+        || !isSafeText(credential.refreshToken, 64 * 1024)
+        || !Number.isSafeInteger(credential.expiresAt)
+        || credential.expiresAt <= now()
+      ) throw new ModelPlaneError("invalid_auth_document");
+      const nextAccount: StoredProviderAccount = {
+        ...account,
+        status: "verificationRequired",
+        credential,
+      };
+      const next = nextDocument(document, {
+        accounts: document.accounts.map(candidate =>
+          candidate.id === accountId ? nextAccount : candidate
+        ),
+        modelTags: document.modelTags,
+        displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeAccount(nextAccount, now());
     },
     createModelRoute(input: CreateModelRouteInput): SafeModelRoute {
       validateCreateModelRouteInput(input);

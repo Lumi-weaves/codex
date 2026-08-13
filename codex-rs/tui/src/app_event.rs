@@ -38,6 +38,9 @@ use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -924,6 +927,43 @@ pub(crate) enum AppEvent {
         result: Result<ProviderAccountListResponse, String>,
     },
 
+    OpenProviderAccountActions {
+        account: ProviderAccount,
+        expected_revision: String,
+    },
+
+    OpenProviderApiKeyReplacementPrompt {
+        account: ProviderAccount,
+        expected_revision: String,
+    },
+
+    SubmitProviderApiKeyReplacement {
+        account_id: String,
+        expected_revision: String,
+        api_key: ProviderApiKey,
+    },
+
+    ProviderApiKeyReplacementCompleted {
+        result: Result<ProviderAccountReplaceApiKeyResponse, String>,
+    },
+
+    PreviewProviderAccountRemoval {
+        account_id: String,
+    },
+
+    ProviderAccountRemovalPreviewCompleted {
+        result: Result<ProviderAccountRemovalPreviewResponse, String>,
+    },
+
+    SubmitProviderAccountRemoval {
+        account_id: String,
+        expected_revision: String,
+    },
+
+    ProviderAccountRemovalCompleted {
+        result: Result<ProviderAccountRemoveResponse, String>,
+    },
+
     /// Start the compatible-provider wizard by collecting a stable provider ID.
     OpenCompatibleProviderIdPrompt,
 
@@ -967,6 +1007,7 @@ pub(crate) enum AppEvent {
     /// Submit the user-owned label for a new OpenAI OAuth account.
     SubmitProviderOAuthLogin {
         user_label: String,
+        account_id: Option<String>,
     },
 
     /// Present the safe verification URL and device code returned by the backend.

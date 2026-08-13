@@ -6,11 +6,15 @@
 use super::*;
 use crate::app_event::ProviderApiKey;
 use crate::app_event::ProviderApiKeyConfig;
+use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::ProviderAccountLoginFailure;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 
 const PROVIDER_OAUTH_LOGIN_VIEW_ID: &str = "provider-oauth-login";
@@ -66,13 +70,18 @@ impl ChatWidget {
                 ProviderAccountStatus::VerificationRequired => "verification pending",
                 ProviderAccountStatus::ReauthenticationRequired => "sign-in required",
             };
+            let action_account = account.clone();
+            let expected_revision = response.desired_state_revision.clone();
             items.push(SelectionItem {
                 name: account.user_label,
                 description: Some(format!("{credential} · {status}")),
-                is_disabled: true,
-                disabled_reason: Some(
-                    "Account details are read-only in this first provider-plane slice.".to_string(),
-                ),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::OpenProviderAccountActions {
+                        account: action_account.clone(),
+                        expected_revision: expected_revision.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
                 ..Default::default()
             });
         }
@@ -88,6 +97,164 @@ impl ChatWidget {
             is_searchable: false,
             ..Default::default()
         });
+    }
+
+    pub(crate) fn open_provider_account_actions(
+        &mut self,
+        account: ProviderAccount,
+        expected_revision: String,
+    ) {
+        let reauth_account = account.clone();
+        let reauth_revision = expected_revision;
+        let remove_account_id = account.id.clone();
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some(account.user_label.clone()),
+            subtitle: Some(format!("{} · opaque account handle", account.provider_id)),
+            footer_hint: Some(standard_popup_hint_line()),
+            items: vec![
+                SelectionItem {
+                    name: "Reauthenticate".to_string(),
+                    description: Some(
+                        "Replace credentials without changing model targets".to_string(),
+                    ),
+                    actions: vec![Box::new(move |tx| match reauth_account.credential_kind {
+                        ProviderAccountCredentialKind::OAuth => {
+                            tx.send(AppEvent::SubmitProviderOAuthLogin {
+                                user_label: reauth_account.user_label.clone(),
+                                account_id: Some(reauth_account.id.clone()),
+                            })
+                        }
+                        ProviderAccountCredentialKind::ApiKey => {
+                            tx.send(AppEvent::OpenProviderApiKeyReplacementPrompt {
+                                account: reauth_account.clone(),
+                                expected_revision: reauth_revision.clone(),
+                            })
+                        }
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Remove account".to_string(),
+                    description: Some("Preview every affected model target first".to_string()),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::PreviewProviderAccountRemoval {
+                            account_id: remove_account_id.clone(),
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
+            is_searchable: false,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_provider_api_key_replacement_prompt(
+        &mut self,
+        account: ProviderAccount,
+        expected_revision: String,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let account_id = account.id;
+        let view = CustomPromptView::new_secret(
+            format!("Reauthenticate {}", account.user_label),
+            "Paste replacement API key (input is hidden)".to_string(),
+            Some("The opaque account handle and every model target stay unchanged.".to_string()),
+            Box::new(move |api_key| {
+                tx.send(AppEvent::SubmitProviderApiKeyReplacement {
+                    account_id: account_id.clone(),
+                    expected_revision: expected_revision.clone(),
+                    api_key: ProviderApiKey::new(api_key),
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn finish_provider_api_key_replacement(
+        &mut self,
+        result: Result<ProviderAccountReplaceApiKeyResponse, String>,
+    ) {
+        match result {
+            Ok(response) => self.add_info_message(
+                format!(
+                    "Reauthenticated provider account: {} · model targets unchanged",
+                    response.account.user_label
+                ),
+                None,
+            ),
+            Err(error) => {
+                self.add_error_message(format!("Could not replace provider API key: {error}"))
+            }
+        }
+    }
+
+    pub(crate) fn show_provider_account_removal_preview(
+        &mut self,
+        result: Result<ProviderAccountRemovalPreviewResponse, String>,
+    ) {
+        let preview = match result {
+            Ok(preview) => preview,
+            Err(error) => {
+                self.add_error_message(format!(
+                    "Could not preview provider account removal: {error}"
+                ));
+                return;
+            }
+        };
+        if !preview.can_remove {
+            let affected = preview
+                .affected_targets
+                .iter()
+                .map(|target| format!("{} → {}", target.display_name, target.upstream_model_id))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.add_error_message(format!(
+                "Cannot remove {}: update these model targets first: {affected}",
+                preview.account.user_label,
+            ));
+            return;
+        }
+        let account_id = preview.account.id.clone();
+        let expected_revision = preview.desired_state_revision.clone();
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some(format!("Remove {}?", preview.account.user_label)),
+            subtitle: Some(
+                "No model targets reference this account. Credentials will be deleted.".to_string(),
+            ),
+            footer_hint: Some(standard_popup_hint_line()),
+            items: vec![SelectionItem {
+                name: "Remove account".to_string(),
+                description: Some("This cannot be undone".to_string()),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SubmitProviderAccountRemoval {
+                        account_id: account_id.clone(),
+                        expected_revision: expected_revision.clone(),
+                    });
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            }],
+            is_searchable: false,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn finish_provider_account_removal(
+        &mut self,
+        result: Result<ProviderAccountRemoveResponse, String>,
+    ) {
+        match result {
+            Ok(response) => self.add_info_message(
+                format!("Removed provider account: {}", response.account.user_label),
+                None,
+            ),
+            Err(error) => {
+                self.add_error_message(format!("Could not remove provider account: {error}"))
+            }
+        }
     }
 
     pub(crate) fn open_compatible_provider_id_prompt(&mut self) {
@@ -173,7 +340,10 @@ impl ChatWidget {
             "OpenAI Codex".to_string(),
             Some("Device authorization opens on the next screen.".to_string()),
             Box::new(move |user_label| {
-                tx.send(AppEvent::SubmitProviderOAuthLogin { user_label });
+                tx.send(AppEvent::SubmitProviderOAuthLogin {
+                    user_label,
+                    account_id: None,
+                });
             }),
         );
         self.bottom_pane.show_view(Box::new(view));
@@ -324,6 +494,13 @@ fn provider_login_failure_label(failure: Option<ProviderAccountLoginFailure>) ->
             "that OpenAI account is already configured"
         }
         Some(ProviderAccountLoginFailure::AccountLimitReached) => "provider account limit reached",
+        Some(ProviderAccountLoginFailure::AccountNotFound) => "provider account no longer exists",
+        Some(ProviderAccountLoginFailure::CredentialKindMismatch) => {
+            "provider account cannot use OpenAI device login"
+        }
+        Some(ProviderAccountLoginFailure::AccountIdentityMismatch) => {
+            "signed-in OpenAI account does not match this account"
+        }
         Some(ProviderAccountLoginFailure::StoreUnavailable) => {
             "the RichCodex credential store is unavailable"
         }

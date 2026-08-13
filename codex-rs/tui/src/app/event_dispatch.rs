@@ -1313,6 +1313,46 @@ impl App {
                     .chat_widget
                     .add_error_message(format!("Could not load provider accounts: {error}")),
             },
+            AppEvent::OpenProviderAccountActions {
+                account,
+                expected_revision,
+            } => {
+                self.chat_widget
+                    .open_provider_account_actions(account, expected_revision);
+            }
+            AppEvent::OpenProviderApiKeyReplacementPrompt {
+                account,
+                expected_revision,
+            } => {
+                self.chat_widget
+                    .open_provider_api_key_replacement_prompt(account, expected_revision);
+            }
+            AppEvent::SubmitProviderApiKeyReplacement {
+                account_id,
+                expected_revision,
+                api_key,
+            } => {
+                self.replace_provider_api_key(app_server, account_id, expected_revision, api_key);
+            }
+            AppEvent::ProviderApiKeyReplacementCompleted { result } => {
+                self.chat_widget.finish_provider_api_key_replacement(result);
+            }
+            AppEvent::PreviewProviderAccountRemoval { account_id } => {
+                self.preview_provider_account_removal(app_server, account_id);
+            }
+            AppEvent::ProviderAccountRemovalPreviewCompleted { result } => {
+                self.chat_widget
+                    .show_provider_account_removal_preview(result);
+            }
+            AppEvent::SubmitProviderAccountRemoval {
+                account_id,
+                expected_revision,
+            } => {
+                self.remove_provider_account(app_server, account_id, expected_revision);
+            }
+            AppEvent::ProviderAccountRemovalCompleted { result } => {
+                self.chat_widget.finish_provider_account_removal(result);
+            }
             AppEvent::OpenCompatibleProviderIdPrompt => {
                 self.chat_widget.open_compatible_provider_id_prompt();
             }
@@ -1347,8 +1387,11 @@ impl App {
             AppEvent::OpenProviderOAuthLabelPrompt => {
                 self.chat_widget.open_provider_oauth_label_prompt();
             }
-            AppEvent::SubmitProviderOAuthLogin { user_label } => {
-                self.submit_provider_oauth_login(app_server, user_label);
+            AppEvent::SubmitProviderOAuthLogin {
+                user_label,
+                account_id,
+            } => {
+                self.submit_provider_oauth_login(app_server, user_label, account_id);
             }
             AppEvent::ProviderOAuthLoginStarted { result } => {
                 self.chat_widget.show_provider_oauth_login(result);

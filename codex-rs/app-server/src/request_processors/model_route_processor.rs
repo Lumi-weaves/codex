@@ -355,6 +355,10 @@ fn model_route_error(error: RichCodexBackendClientError) -> JSONRPCErrorError {
         | RichCodexBackendClientError::CredentialExpired
         | RichCodexBackendClientError::AccountAlreadyExists
         | RichCodexBackendClientError::AccountLimitReached
+        | RichCodexBackendClientError::AccountNotFound
+        | RichCodexBackendClientError::AccountInUse
+        | RichCodexBackendClientError::CredentialKindMismatch
+        | RichCodexBackendClientError::AccountIdentityMismatch
         | RichCodexBackendClientError::InvalidProvider
         | RichCodexBackendClientError::ProviderConflict
         | RichCodexBackendClientError::InvalidApiKey

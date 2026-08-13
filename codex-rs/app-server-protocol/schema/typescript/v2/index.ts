@@ -372,6 +372,7 @@ export type { ProviderAccountLoginFailure } from "./ProviderAccountLoginFailure"
 export type { ProviderAccountLoginStatus } from "./ProviderAccountLoginStatus";
 export type { ProviderAccountProvider } from "./ProviderAccountProvider";
 export type { ProviderAccountProviderStatus } from "./ProviderAccountProviderStatus";
+export type { ProviderAccountRemovalTarget } from "./ProviderAccountRemovalTarget";
 export type { ProviderAccountStatus } from "./ProviderAccountStatus";
 export type { RateLimitReachedType } from "./RateLimitReachedType";
 export type { RateLimitResetCredit } from "./RateLimitResetCredit";
@@ -396,6 +397,7 @@ export type { ReviewDelivery } from "./ReviewDelivery";
 export type { ReviewStartParams } from "./ReviewStartParams";
 export type { ReviewStartResponse } from "./ReviewStartResponse";
 export type { ReviewTarget } from "./ReviewTarget";
+export type { RichCodexExecutionReceiptNotification } from "./RichCodexExecutionReceiptNotification";
 export type { SandboxMode } from "./SandboxMode";
 export type { SandboxPolicy } from "./SandboxPolicy";
 export type { SandboxWorkspaceWrite } from "./SandboxWorkspaceWrite";

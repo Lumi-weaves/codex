@@ -36,6 +36,7 @@ pub(super) async fn request_provider_account_login_start<W, R>(
     reader: &mut R,
     request_id: &str,
     user_label: &str,
+    account_id: Option<&str>,
 ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError>
 where
     W: AsyncWrite + Unpin,
@@ -46,6 +47,7 @@ where
         &AppServerMessage::ProviderAccountLoginStart {
             request_id,
             user_label,
+            account_id,
         },
     )
     .await
@@ -252,6 +254,9 @@ fn validate_provider_account_login(login: &ProviderAccountLoginResult) -> io::Re
                 | "invalidCredential"
                 | "accountAlreadyExists"
                 | "accountLimitReached"
+                | "accountNotFound"
+                | "credentialKindMismatch"
+                | "accountIdentityMismatch"
                 | "storeUnavailable"
         )
     {

@@ -717,6 +717,34 @@ async fn live_app_server_warning_notification_renders_message() {
 }
 
 #[tokio::test]
+async fn live_richcodex_execution_receipt_renders_safe_route() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.handle_server_notification(
+        ServerNotification::RichCodexExecutionReceipt(
+            codex_app_server_protocol::RichCodexExecutionReceiptNotification {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                model_tag: "reviewer".to_string(),
+                resolved_model: "qwen3-coder".to_string(),
+                provider_id: "alibaba".to_string(),
+                account_id: "account-opaque".to_string(),
+                target_id: "target-opaque".to_string(),
+                attempt: 2,
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1);
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(rendered.contains(
+        "RichCodex route: reviewer → alibaba/qwen3-coder · account account-opaque · attempt 2"
+    ));
+    assert!(!rendered.contains("target-opaque"));
+}
+
+#[tokio::test]
 async fn live_app_server_guardian_warning_notification_renders_message() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

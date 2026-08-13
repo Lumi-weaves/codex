@@ -38,6 +38,12 @@ use codex_app_server_protocol::ProviderAccountLoginStartResponse;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountLoginStatusParams;
 use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewParams;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemoveParams;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyParams;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 
 use codex_app_server_protocol::RequestId;
 
@@ -106,6 +112,7 @@ impl App {
         &mut self,
         app_server: &AppServerSession,
         user_label: String,
+        account_id: Option<String>,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
@@ -115,7 +122,10 @@ impl App {
             let started: Result<ProviderAccountLoginStartResponse, String> = request_handle
                 .request_typed(ClientRequest::ProviderAccountLoginStart {
                     request_id,
-                    params: ProviderAccountLoginStartParams { user_label },
+                    params: ProviderAccountLoginStartParams {
+                        user_label,
+                        account_id,
+                    },
                 })
                 .await
                 .map_err(|error| error.to_string());
@@ -166,6 +176,81 @@ impl App {
                     }
                 }
             }
+        });
+    }
+
+    pub(super) fn replace_provider_api_key(
+        &mut self,
+        app_server: &AppServerSession,
+        account_id: String,
+        expected_revision: String,
+        api_key: crate::app_event::ProviderApiKey,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-key-replace-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountReplaceApiKeyResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountReplaceApiKey {
+                    request_id,
+                    params: ProviderAccountReplaceApiKeyParams {
+                        account_id,
+                        expected_revision,
+                        api_key: api_key.into_inner(),
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderApiKeyReplacementCompleted { result });
+        });
+    }
+
+    pub(super) fn preview_provider_account_removal(
+        &mut self,
+        app_server: &AppServerSession,
+        account_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id = RequestId::String(format!(
+                "provider-account-removal-preview-{}",
+                Uuid::new_v4()
+            ));
+            let result: Result<ProviderAccountRemovalPreviewResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountRemovalPreview {
+                    request_id,
+                    params: ProviderAccountRemovalPreviewParams { account_id },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderAccountRemovalPreviewCompleted { result });
+        });
+    }
+
+    pub(super) fn remove_provider_account(
+        &mut self,
+        app_server: &AppServerSession,
+        account_id: String,
+        expected_revision: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-remove-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountRemoveResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountRemove {
+                    request_id,
+                    params: ProviderAccountRemoveParams {
+                        account_id,
+                        expected_revision,
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderAccountRemovalCompleted { result });
         });
     }
 

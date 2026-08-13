@@ -51,6 +51,7 @@ use codex_app_server_protocol::PermissionsRequestApprovalResponse;
 use codex_app_server_protocol::RawResponseCompletedNotification;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::RichCodexExecutionReceiptNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
@@ -365,6 +366,22 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::ModelRerouted(notification))
+                .await;
+        }
+        EventMsg::RichCodexExecutionReceipt(event) => {
+            outgoing
+                .send_server_notification(ServerNotification::RichCodexExecutionReceipt(
+                    RichCodexExecutionReceiptNotification {
+                        thread_id: conversation_id.to_string(),
+                        turn_id: event_turn_id.clone(),
+                        model_tag: event.model_tag,
+                        resolved_model: event.resolved_model,
+                        provider_id: event.provider_id,
+                        account_id: event.account_id,
+                        target_id: event.target_id,
+                        attempt: event.attempt,
+                    },
+                ))
                 .await;
         }
         EventMsg::ModelVerification(event) => {

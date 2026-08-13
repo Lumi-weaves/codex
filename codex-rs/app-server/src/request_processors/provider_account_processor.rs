@@ -5,6 +5,8 @@ use crate::richcodex_backend::ProviderAccountAddApiKeyResult;
 use crate::richcodex_backend::ProviderAccountImportResult;
 use crate::richcodex_backend::ProviderAccountListResult;
 use crate::richcodex_backend::ProviderAccountLoginResult;
+use crate::richcodex_backend::ProviderAccountMutationResult;
+use crate::richcodex_backend::ProviderAccountRemovalPreviewResult;
 use crate::richcodex_backend::ProviderAccountSummary;
 use crate::richcodex_backend::ProviderSummary;
 use crate::richcodex_backend::RichCodexBackendClient;
@@ -30,6 +32,13 @@ use codex_app_server_protocol::ProviderAccountLoginStatusParams;
 use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
 use codex_app_server_protocol::ProviderAccountProvider;
 use codex_app_server_protocol::ProviderAccountProviderStatus;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewParams;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemovalTarget;
+use codex_app_server_protocol::ProviderAccountRemoveParams;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyParams;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 
 #[derive(Clone)]
@@ -126,7 +135,7 @@ impl ProviderAccountRequestProcessor {
         }
         let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
         backend
-            .start_provider_account_login(params.user_label)
+            .start_provider_account_login(params.user_label, params.account_id)
             .await
             .map(|result| ProviderAccountLoginStartResponse {
                 login: provider_account_login(result),
@@ -170,6 +179,69 @@ impl ProviderAccountRequestProcessor {
             .map(|response| Some(response.into()))
             .map_err(provider_account_error)
     }
+
+    pub(crate) async fn replace_api_key(
+        &self,
+        params: ProviderAccountReplaceApiKeyParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let expected_revision = parse_revision(&params.expected_revision)?;
+        if !valid_safe_text(&params.account_id, 80)
+            || !valid_safe_text(&params.api_key, 64 * 1024)
+            || params.api_key.trim() != params.api_key
+        {
+            return Err(invalid_params("API-key replacement input is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .replace_api_key_provider_account(expected_revision, params.account_id, params.api_key)
+            .await
+            .map(|result| ProviderAccountReplaceApiKeyResponse {
+                account: provider_account(result.account),
+                desired_state_revision: result.desired_state_revision.to_string(),
+                catalog_revision: result.catalog_revision.to_string(),
+            })
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+
+    pub(crate) async fn removal_preview(
+        &self,
+        params: ProviderAccountRemovalPreviewParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !valid_safe_text(&params.account_id, 80) {
+            return Err(invalid_params("provider account ID is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .preview_provider_account_removal(params.account_id)
+            .await
+            .map(provider_account_removal_preview_response)
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+
+    pub(crate) async fn remove(
+        &self,
+        params: ProviderAccountRemoveParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let expected_revision = parse_revision(&params.expected_revision)?;
+        if !valid_safe_text(&params.account_id, 80) {
+            return Err(invalid_params("provider account ID is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .remove_provider_account(expected_revision, params.account_id)
+            .await
+            .map(provider_account_remove_response)
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+}
+
+fn parse_revision(value: &str) -> Result<u64, JSONRPCErrorError> {
+    value
+        .parse::<u64>()
+        .map_err(|_| invalid_params("expectedRevision is invalid"))
 }
 
 fn valid_safe_text(value: &str, max_bytes: usize) -> bool {
@@ -208,6 +280,39 @@ fn provider_account_add_api_key_response(
     }
 }
 
+fn provider_account_removal_preview_response(
+    result: ProviderAccountRemovalPreviewResult,
+) -> ProviderAccountRemovalPreviewResponse {
+    ProviderAccountRemovalPreviewResponse {
+        account: provider_account(result.account),
+        affected_targets: result
+            .affected_targets
+            .into_iter()
+            .map(|target| ProviderAccountRemovalTarget {
+                model_tag: target.model_tag,
+                display_name: target.display_name,
+                retired: target.retired,
+                target_id: target.target_id,
+                upstream_model_id: target.upstream_model_id,
+                priority: target.priority,
+            })
+            .collect(),
+        can_remove: result.can_remove,
+        desired_state_revision: result.desired_state_revision.to_string(),
+        catalog_revision: result.catalog_revision.to_string(),
+    }
+}
+
+fn provider_account_remove_response(
+    result: ProviderAccountMutationResult,
+) -> ProviderAccountRemoveResponse {
+    ProviderAccountRemoveResponse {
+        account: provider_account(result.account),
+        desired_state_revision: result.desired_state_revision.to_string(),
+        catalog_revision: result.catalog_revision.to_string(),
+    }
+}
+
 fn provider_account_login(result: ProviderAccountLoginResult) -> ProviderAccountLogin {
     ProviderAccountLogin {
         login_id: result.login_id,
@@ -228,6 +333,9 @@ fn provider_account_login(result: ProviderAccountLoginResult) -> ProviderAccount
             "invalidCredential" => ProviderAccountLoginFailure::InvalidCredential,
             "accountAlreadyExists" => ProviderAccountLoginFailure::AccountAlreadyExists,
             "accountLimitReached" => ProviderAccountLoginFailure::AccountLimitReached,
+            "accountNotFound" => ProviderAccountLoginFailure::AccountNotFound,
+            "credentialKindMismatch" => ProviderAccountLoginFailure::CredentialKindMismatch,
+            "accountIdentityMismatch" => ProviderAccountLoginFailure::AccountIdentityMismatch,
             "storeUnavailable" => ProviderAccountLoginFailure::StoreUnavailable,
             _ => unreachable!("backend response failure is validated by the client actor"),
         }),
@@ -296,6 +404,18 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
         }
         RichCodexBackendClientError::AccountLimitReached => {
             invalid_params("provider account limit reached")
+        }
+        RichCodexBackendClientError::AccountNotFound => {
+            invalid_params("provider account does not exist")
+        }
+        RichCodexBackendClientError::AccountInUse => {
+            invalid_params("provider account is still referenced by model targets")
+        }
+        RichCodexBackendClientError::CredentialKindMismatch => {
+            invalid_params("provider account credential kind does not match")
+        }
+        RichCodexBackendClientError::AccountIdentityMismatch => {
+            invalid_params("reauthentication returned a different upstream account")
         }
         RichCodexBackendClientError::InvalidProvider => {
             invalid_params("provider configuration is invalid")

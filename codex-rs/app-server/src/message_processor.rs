@@ -1331,6 +1331,19 @@ impl MessageProcessor {
             ClientRequest::ProviderAccountAddApiKey { params, .. } => {
                 self.provider_account_processor.add_api_key(params).await
             }
+            ClientRequest::ProviderAccountReplaceApiKey { params, .. } => {
+                self.provider_account_processor
+                    .replace_api_key(params)
+                    .await
+            }
+            ClientRequest::ProviderAccountRemovalPreview { params, .. } => {
+                self.provider_account_processor
+                    .removal_preview(params)
+                    .await
+            }
+            ClientRequest::ProviderAccountRemove { params, .. } => {
+                self.provider_account_processor.remove(params).await
+            }
             ClientRequest::ProviderAccountLoginStart { params, .. } => {
                 self.provider_account_processor.login_start(params).await
             }

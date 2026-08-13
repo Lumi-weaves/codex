@@ -32,6 +32,9 @@ export type ProviderLoginFailure =
   | "invalidCredential"
   | "accountAlreadyExists"
   | "accountLimitReached"
+  | "accountNotFound"
+  | "credentialKindMismatch"
+  | "accountIdentityMismatch"
   | "storeUnavailable";
 
 export interface SafeProviderLogin {
@@ -47,7 +50,7 @@ export interface SafeProviderLogin {
 }
 
 export interface DeviceOAuthCoordinator {
-  start(userLabel: string): Promise<SafeProviderLogin>;
+  start(userLabel: string, accountId?: string): Promise<SafeProviderLogin>;
   status(loginId: string): SafeProviderLogin;
   cancel(loginId: string): SafeProviderLogin;
   shutdown(): void;
@@ -56,6 +59,7 @@ export interface DeviceOAuthCoordinator {
 interface LoginFlow {
   readonly loginId: string;
   readonly userLabel: string;
+  readonly accountId: string | null;
   readonly expiresAt: number;
   readonly abort: AbortController;
   status: ProviderLoginStatus;
@@ -140,6 +144,9 @@ function loginFailure(error: unknown): ProviderLoginFailure {
     switch (error.code) {
       case "account_already_exists": return "accountAlreadyExists";
       case "account_limit_reached": return "accountLimitReached";
+      case "account_not_found": return "accountNotFound";
+      case "credential_kind_mismatch": return "credentialKindMismatch";
+      case "account_identity_mismatch": return "accountIdentityMismatch";
       case "invalid_auth_document":
       case "credential_expired": return "invalidCredential";
       case "store_unavailable": return "storeUnavailable";
@@ -264,7 +271,9 @@ export function createDeviceOAuthCoordinator(
           accessToken: tokens.access_token,
           refreshToken: tokens.refresh_token,
         }, now());
-        const account = modelPlaneStore.addOAuthAccount(credential, flow.userLabel);
+        const account = flow.accountId === null
+          ? modelPlaneStore.addOAuthAccount(credential, flow.userLabel)
+          : modelPlaneStore.reauthenticateOAuthAccount(flow.accountId, credential);
         finish(flow, "completed", null, account);
         return;
       }
@@ -295,13 +304,23 @@ export function createDeviceOAuthCoordinator(
   };
 
   return {
-    async start(userLabel: string): Promise<SafeProviderLogin> {
+    async start(userLabel: string, accountId?: string): Promise<SafeProviderLogin> {
       prune();
       if (
         !isBoundedText(userLabel, 80)
         || userLabel.trim() !== userLabel
+        || accountId !== undefined && !isBoundedText(accountId, 80)
       ) {
         throw new ModelPlaneError("login_unavailable");
+      }
+      if (accountId !== undefined) {
+        const account = modelPlaneStore.snapshot().accounts.find(candidate =>
+          candidate.id === accountId
+        );
+        if (!account) throw new ModelPlaneError("account_not_found");
+        if (account.credentialKind !== "oauth") {
+          throw new ModelPlaneError("credential_kind_mismatch");
+        }
       }
       const activeCount = [...flows.values()].filter(flow => flow.terminalAt === null).length;
       if (activeCount >= DEVICE_LOGIN_MAX_FLOWS) {
@@ -352,6 +371,7 @@ export function createDeviceOAuthCoordinator(
       const flow: LoginFlow = {
         loginId,
         userLabel,
+        accountId: accountId ?? null,
         expiresAt: now() + DEVICE_LOGIN_LIFETIME_MS,
         abort: new AbortController(),
         status: "awaitingUser",
