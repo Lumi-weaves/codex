@@ -384,7 +384,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
                 None,
             )
             .provenance(),
-            None,
+            /*multi_agent_v2_projection*/ None,
         )?;
 
         let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;

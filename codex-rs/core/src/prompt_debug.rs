@@ -27,6 +27,9 @@ use crate::cockpit_operating_contract::descriptor as cockpit_contract_descriptor
 use crate::config::Config;
 use crate::context::CockpitOperatingContract;
 use crate::context::ContextualUserFragment;
+use crate::multi_agent_v2_capability::MultiAgentV2CapabilityProjection;
+use crate::prompt_capability_receipt::MultiAgentV2CapabilityReceipt;
+use crate::prompt_capability_receipt::inspect_multi_agent_v2_capability;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
@@ -40,7 +43,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 4;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 5;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -56,6 +59,7 @@ pub struct PromptRequestReceipt {
     provenance: PromptReceiptProvenance,
     context_inheritance: PromptInheritanceProvenance,
     cockpit_contract: CockpitContractReceipt,
+    multi_agent_v2_capability: MultiAgentV2CapabilityReceipt,
     summary: PromptReceiptSummary,
     bounds: PromptReceiptBounds,
     request: ResponsesApiRequest,
@@ -84,6 +88,7 @@ pub struct RenderedPromptRequestReceipt<'a> {
     provenance: &'a PromptReceiptProvenance,
     context_inheritance: &'a PromptInheritanceProvenance,
     cockpit_contract: &'a CockpitContractReceipt,
+    multi_agent_v2_capability: &'a MultiAgentV2CapabilityReceipt,
     summary: &'a PromptReceiptSummary,
     bounds: &'a PromptReceiptBounds,
     redaction: PromptReceiptRedaction,
@@ -99,7 +104,7 @@ impl PromptRequestReceipt {
         use_responses_lite: bool,
         request: ResponsesApiRequest,
         context_inheritance: PromptInheritanceProvenance,
-        cockpit_contract_role: Option<CockpitContractRole>,
+        multi_agent_v2_projection: Option<&MultiAgentV2CapabilityProjection>,
     ) -> CodexResult<Self> {
         let lowering = if use_responses_lite {
             PromptRequestLowering::ResponsesLite
@@ -112,7 +117,12 @@ impl PromptRequestReceipt {
             PromptClientNormalization::NonOpenAiSanitized
         };
         let summary = build_receipt_summary(&request)?;
-        let cockpit_contract = CockpitContractReceipt::inspect(cockpit_contract_role, &request)?;
+        let cockpit_contract = CockpitContractReceipt::inspect(
+            multi_agent_v2_projection.and_then(|projection| projection.prompt_role),
+            &request,
+        )?;
+        let multi_agent_v2_capability =
+            inspect_multi_agent_v2_capability(multi_agent_v2_projection, &request)?;
 
         Ok(Self {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
@@ -134,6 +144,7 @@ impl PromptRequestReceipt {
             },
             context_inheritance,
             cockpit_contract,
+            multi_agent_v2_capability,
             summary,
             bounds: PromptReceiptBounds {
                 receipt_content_truncated: false,
@@ -155,6 +166,7 @@ impl PromptRequestReceipt {
             provenance: &self.provenance,
             context_inheritance: &self.context_inheritance,
             cockpit_contract: &self.cockpit_contract,
+            multi_agent_v2_capability: &self.multi_agent_v2_capability,
             summary: &self.summary,
             bounds: &self.bounds,
             redaction: PromptReceiptRedaction {
@@ -520,6 +532,8 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
             &responses_metadata,
         )
         .await?;
+    let multi_agent_v2_projection =
+        crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context.as_ref());
     PromptRequestReceipt::from_lowered_request(
         PromptInvocationKind::Turn,
         turn_context.config.model_provider_id.clone(),
@@ -527,13 +541,7 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
         turn_context.model_info.use_responses_lite,
         request,
         sess.prompt_context.provenance(),
-        (turn_context.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2)
-            .then(|| {
-                crate::cockpit_operating_contract::role_for_session_source(
-                    &turn_context.session_source,
-                )
-            })
-            .flatten(),
+        Some(&multi_agent_v2_projection),
     )
 }
 
