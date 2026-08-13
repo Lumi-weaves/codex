@@ -99,6 +99,7 @@ impl fmt::Display for PromptInvocationKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptContributionKind {
     BaseInstructions,
+    CodexAgentBaseInstructions,
     WorldStateDeveloperContext,
     CockpitOperatingContract,
     WorldStateContextualUserContext,
@@ -114,8 +115,9 @@ pub enum PromptContributionKind {
 }
 
 impl PromptContributionKind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::BaseInstructions,
+        Self::CodexAgentBaseInstructions,
         Self::WorldStateDeveloperContext,
         Self::CockpitOperatingContract,
         Self::WorldStateContextualUserContext,
@@ -133,6 +135,7 @@ impl PromptContributionKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BaseInstructions => "base_instructions",
+            Self::CodexAgentBaseInstructions => "codex_agent_base_instructions",
             Self::WorldStateDeveloperContext => "world_state_developer_context",
             Self::CockpitOperatingContract => "cockpit_operating_contract",
             Self::WorldStateContextualUserContext => "world_state_contextual_user_context",

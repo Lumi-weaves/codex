@@ -235,6 +235,9 @@ enum DebugSubcommand {
     /// Render the raw model catalog as JSON.
     Models(DebugModelsCommand),
 
+    /// Render the validated Agent Definition and Launch Preset catalog as JSON.
+    Agents,
+
     /// Tooling: helps debug the app server.
     AppServer(DebugAppServerCommand),
 
@@ -1622,6 +1625,17 @@ async fn cli_main(
             }
         }
         Some(Subcommand::Debug(DebugCommand { subcommand })) => match subcommand {
+            DebugSubcommand::Agents => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug agents",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::agent_catalog_manifest()?)?
+                );
+            }
             DebugSubcommand::Models(cmd) => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -3421,6 +3435,18 @@ mod tests {
             cli.subcommand,
             Some(Subcommand::Debug(DebugCommand {
                 subcommand: DebugSubcommand::PromptResources,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_agents_parses_without_runtime_configuration() {
+        let cli = MultitoolCli::try_parse_from(["codex", "debug", "agents"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::Agents,
             }))
         ));
     }
