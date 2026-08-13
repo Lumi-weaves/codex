@@ -20,6 +20,9 @@ import {
 } from "../src/backend";
 import { RICHCODEX_BACKEND_KERNEL } from "../src/kernel-manifest";
 import { createModelDataPlane } from "../src/data-plane";
+import { createDeviceOAuthCoordinator } from "../src/device-oauth";
+import type { DeviceOAuthCoordinator, SafeProviderLogin } from "../src/device-oauth";
+import { createModelPlaneStore } from "../src/model-plane";
 import type {
   ModelExecutionCandidate,
   ModelPlaneStore,
@@ -36,13 +39,18 @@ function inputOf(text: string): AsyncIterable<Uint8Array> {
   })();
 }
 
-async function runBackend(input: string, stateRoot: string): Promise<{ lines: unknown[]; result: unknown; stderr: string[] }> {
+async function runBackend(
+  input: string,
+  stateRoot: string,
+  deviceOAuthCoordinator?: DeviceOAuthCoordinator,
+): Promise<{ lines: unknown[]; result: unknown; stderr: string[] }> {
   const lines: unknown[] = [];
   const stderr: string[] = [];
   const backend = createHeadlessBackend({
     stateRoot,
     env: {},
     dataPlaneCapability: TEST_DATA_PLANE_CAPABILITY,
+    deviceOAuthCoordinator,
   });
   const result = await backend.run({
     stdin: inputOf(input),
@@ -119,6 +127,7 @@ function executionStore(
       modelRoutes: [],
     }),
     importCodexAuthJson: () => { throw new Error("not used"); },
+    addOAuthAccount: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
     createModelRoute: () => { throw new Error("not used"); },
     setModelRouteTargets: () => { throw new Error("not used"); },
@@ -397,7 +406,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 6,
+      protocolVersion: 7,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -431,6 +440,86 @@ describe("RichCodex headless backend composition root", () => {
     expect(result.lines[4]).toEqual({ type: "shutdownComplete", requestId: "request-43" });
     expect(JSON.stringify(result.lines)).not.toContain(secret);
     expect(result.stderr).toEqual([]);
+  });
+
+  test("correlates provider device-login lifecycle messages without credential fields", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-headless-device-login-"));
+    const calls: string[] = [];
+    const login = (
+      status: SafeProviderLogin["status"],
+      verificationUrl: string | null,
+      userCode: string | null,
+    ): SafeProviderLogin => ({
+      loginId: "login-safe-handle",
+      status,
+      verificationUrl,
+      userCode,
+      expiresAt: 2_000,
+      failure: null,
+      account: null,
+      desiredStateRevision: 0,
+      catalogRevision: 0,
+    });
+    const deviceOAuthCoordinator: DeviceOAuthCoordinator = {
+      start: async userLabel => {
+        calls.push(`start:${userLabel}`);
+        return login("awaitingUser", "https://auth.openai.com/codex/device", "SAFE-CODE");
+      },
+      status: loginId => {
+        calls.push(`status:${loginId}`);
+        return login("exchanging", null, null);
+      },
+      cancel: loginId => {
+        calls.push(`cancel:${loginId}`);
+        return login("cancelled", null, null);
+      },
+      shutdown: () => { calls.push("shutdown"); },
+    };
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountLoginStart",
+        requestId: "login-start",
+        userLabel: "Third Codex",
+      })}\n${JSON.stringify({
+        type: "providerAccountLoginStatus",
+        requestId: "login-status",
+        loginId: "login-safe-handle",
+      })}\n${JSON.stringify({
+        type: "providerAccountLoginCancel",
+        requestId: "login-cancel",
+        loginId: "login-safe-handle",
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "login-shutdown" })}\n`,
+      root,
+      deviceOAuthCoordinator,
+    );
+
+    expect(result.lines.slice(1)).toEqual([
+      {
+        type: "providerAccountLoginStartResult",
+        requestId: "login-start",
+        ...login("awaitingUser", "https://auth.openai.com/codex/device", "SAFE-CODE"),
+      },
+      {
+        type: "providerAccountLoginStatusResult",
+        requestId: "login-status",
+        ...login("exchanging", null, null),
+      },
+      {
+        type: "providerAccountLoginCancelResult",
+        requestId: "login-cancel",
+        ...login("cancelled", null, null),
+      },
+      { type: "shutdownComplete", requestId: "login-shutdown" },
+    ]);
+    expect(calls).toEqual([
+      "start:Third Codex",
+      "status:login-safe-handle",
+      "cancel:login-safe-handle",
+      "shutdown",
+    ]);
+    expect(JSON.stringify(result.lines)).not.toContain("access_token");
+    expect(JSON.stringify(result.lines)).not.toContain("refresh_token");
   });
 
   test("imports an explicitly selected Codex login and lists only safe account state", async () => {
@@ -659,6 +748,149 @@ describe("RichCodex headless backend composition root", () => {
     const serialized = JSON.stringify([...created.lines, ...retired.lines, ...restored.lines]);
     expect(serialized).not.toContain("refresh-route-account");
     expect(serialized).not.toContain("route-account");
+  });
+
+  test("owns device OAuth tokens while exposing only a safe multi-account login handle", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-device-oauth-"));
+    const stateRoot = join(root, "backend-state");
+    const now = 1_000_000;
+    const calls: Array<{
+      url: string;
+      body: string;
+      proxy?: string;
+    }> = [];
+    const responses = [
+      new Response(JSON.stringify({
+        device_auth_id: "private-device-auth-id",
+        user_code: "ABCD-EFGH",
+        interval: "1",
+      }), { status: 200 }),
+      new Response(JSON.stringify({
+        authorization_code: "private-authorization-code",
+        code_challenge: "private-code-challenge",
+        code_verifier: "private-code-verifier",
+      }), { status: 200 }),
+      new Response(JSON.stringify({
+        id_token: jwt({
+          exp: Math.floor(now / 1000) + 3600,
+          "https://api.openai.com/auth": {
+            chatgpt_account_id: "private-upstream-account",
+          },
+        }),
+        access_token: jwt({ exp: Math.floor(now / 1000) + 3600 }),
+        refresh_token: "private-refresh-token",
+      }), { status: 200 }),
+    ];
+    const modelPlaneStore = createModelPlaneStore(stateRoot, {
+      now: () => now,
+      createAccountId: () => "account-local-handle",
+    });
+    const coordinator = createDeviceOAuthCoordinator({
+      modelPlaneStore,
+      env: { HTTPS_PROXY: "http://127.0.0.1:7890" },
+      now: () => now,
+      createLoginId: () => "login-local-handle",
+      fetch: async (input, init) => {
+        calls.push({
+          url: String(input),
+          body: String(init?.body ?? ""),
+          proxy: init?.proxy,
+        });
+        const response = responses.shift();
+        if (!response) throw new Error("unexpected OAuth fetch");
+        return response;
+      },
+    });
+
+    const started = await coordinator.start("Second Codex");
+    expect(started).toMatchObject({
+      loginId: "login-local-handle",
+      verificationUrl: "https://auth.openai.com/codex/device",
+      userCode: "ABCD-EFGH",
+      expiresAt: 1_900,
+      failure: null,
+      account: null,
+    });
+
+    let completed = coordinator.status(started.loginId);
+    for (let attempt = 0; attempt < 20 && completed.status !== "completed"; attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+      completed = coordinator.status(started.loginId);
+    }
+    expect(completed).toEqual({
+      loginId: "login-local-handle",
+      status: "completed",
+      verificationUrl: null,
+      userCode: null,
+      expiresAt: 1_900,
+      failure: null,
+      account: {
+        id: "account-local-handle",
+        providerId: "openai",
+        userLabel: "Second Codex",
+        credentialKind: "oauth",
+        status: "verificationRequired",
+        addedAt: 1_000,
+      },
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+    });
+    expect(calls.map(call => call.url)).toEqual([
+      "https://auth.openai.com/api/accounts/deviceauth/usercode",
+      "https://auth.openai.com/api/accounts/deviceauth/token",
+      "https://auth.openai.com/oauth/token",
+    ]);
+    expect(calls.every(call => call.proxy === "http://127.0.0.1:7890")).toBe(true);
+    expect(calls[0]!.body).toBe(JSON.stringify({
+      client_id: "app_EMoamEEZ73f0CkXaXp7hrann",
+    }));
+    expect(calls[2]!.body).toContain("redirect_uri=https%3A%2F%2Fauth.openai.com%2Fdeviceauth%2Fcallback");
+
+    const safeSerialization = JSON.stringify({ started, completed });
+    expect(safeSerialization).not.toContain("private-device-auth-id");
+    expect(safeSerialization).not.toContain("private-authorization-code");
+    expect(safeSerialization).not.toContain("private-code-verifier");
+    expect(safeSerialization).not.toContain("private-refresh-token");
+    expect(safeSerialization).not.toContain("private-upstream-account");
+    coordinator.shutdown();
+  });
+
+  test("cancels a pending device OAuth flow without publishing private state", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-device-oauth-cancel-"));
+    const modelPlaneStore = createModelPlaneStore(join(root, "backend-state"));
+    const coordinator = createDeviceOAuthCoordinator({
+      modelPlaneStore,
+      createLoginId: () => "login-cancel",
+      fetch: async input => String(input).endsWith("/usercode")
+        ? new Response(JSON.stringify({
+            device_auth_id: "private-device-id",
+            user_code: "CANCEL-ME",
+            interval: "1",
+          }), { status: 200 })
+        : new Response("", { status: 403 }),
+      sleep: (_milliseconds, signal) => signal.aborted
+        ? Promise.reject(new DOMException("Aborted", "AbortError"))
+        : new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              "abort",
+              () => reject(new DOMException("Aborted", "AbortError")),
+              { once: true },
+            );
+          }),
+    });
+
+    const started = await coordinator.start("Cancelled Codex");
+    const cancelled = coordinator.cancel(started.loginId);
+    expect(cancelled).toMatchObject({
+      loginId: "login-cancel",
+      status: "cancelled",
+      verificationUrl: null,
+      userCode: null,
+      failure: null,
+      account: null,
+    });
+    expect(JSON.stringify(cancelled)).not.toContain("private-device-id");
+    coordinator.shutdown();
   });
 
   test("atomically replaces ordered model targets while preserving explicit target identity", async () => {

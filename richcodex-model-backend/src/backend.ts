@@ -3,6 +3,11 @@ import { isAbsolute, resolve } from "node:path";
 import { RICHCODEX_BACKEND_KERNEL, type RichCodexBackendKernel } from "./kernel-manifest";
 import { createModelDataPlane } from "./data-plane";
 import {
+  createDeviceOAuthCoordinator,
+  type DeviceOAuthCoordinator,
+  type SafeProviderLogin,
+} from "./device-oauth";
+import {
   createModelPlaneStore,
   ModelPlaneError,
   type ModelPlaneStore,
@@ -14,7 +19,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 6 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 7 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -73,6 +78,8 @@ export interface HeadlessBackendOptions {
   readonly modelPlaneStore?: ModelPlaneStore;
   /** Private bearer shared only with the supervising app-server process. */
   readonly dataPlaneCapability?: string;
+  /** Internal deterministic seam for provider-login lifecycle tests. */
+  readonly deviceOAuthCoordinator?: DeviceOAuthCoordinator;
 }
 
 export interface HeadlessBackendRunIo {
@@ -152,6 +159,14 @@ export type HeadlessProviderAccountImportResultMessage = {
   readonly account: SafeProviderAccount;
 };
 
+export type HeadlessProviderAccountLoginResultMessage = SafeProviderLogin & {
+  readonly type:
+    | "providerAccountLoginStartResult"
+    | "providerAccountLoginStatusResult"
+    | "providerAccountLoginCancelResult";
+  readonly requestId: string;
+};
+
 export type HeadlessModelRouteReadResultMessage = {
   readonly type: "modelRouteReadResult";
   readonly requestId: string;
@@ -194,6 +209,21 @@ type HeadlessInboundMessage =
     readonly requestId: string;
     readonly apiKey: string;
     readonly userLabel: string;
+  }
+  | {
+    readonly type: "providerAccountLoginStart";
+    readonly requestId: string;
+    readonly userLabel: string;
+  }
+  | {
+    readonly type: "providerAccountLoginStatus";
+    readonly requestId: string;
+    readonly loginId: string;
+  }
+  | {
+    readonly type: "providerAccountLoginCancel";
+    readonly requestId: string;
+    readonly loginId: string;
   }
   | { readonly type: "modelRouteRead"; readonly requestId: string }
   | {
@@ -318,6 +348,7 @@ function encodeMessage(message:
   | HeadlessProtocolErrorMessage
   | HeadlessProviderAccountListResultMessage
   | HeadlessProviderAccountImportResultMessage
+  | HeadlessProviderAccountLoginResultMessage
   | HeadlessModelRouteReadResultMessage
   | HeadlessModelRouteMutationResultMessage
   | HeadlessOperationErrorMessage,
@@ -463,6 +494,38 @@ function parseInboundMessage(text: string):
         apiKey: record.apiKey,
         userLabel: record.userLabel,
       },
+    };
+  }
+  if (record.type === "providerAccountLoginStart") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "userLabel"])
+      || !requestId
+      || !isBoundedOpaqueText(record.userLabel, 80)
+      || record.userLabel.trim() !== record.userLabel
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: { type: "providerAccountLoginStart", requestId, userLabel: record.userLabel },
+    };
+  }
+  if (
+    record.type === "providerAccountLoginStatus"
+    || record.type === "providerAccountLoginCancel"
+  ) {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "loginId"])
+      || !requestId
+      || !isBoundedOpaqueText(record.loginId, 80)
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: { type: record.type, requestId, loginId: record.loginId },
     };
   }
   if (record.type === "modelRouteRead") {
@@ -680,6 +743,9 @@ function operationErrorForCode(
     account_already_exists: "this provider account is already configured",
     account_limit_reached: "provider account limit reached",
     invalid_api_key: "API key is invalid",
+    login_unavailable: "provider login is unavailable",
+    login_limit_reached: "provider login limit reached",
+    login_not_found: "provider login does not exist",
     store_unavailable: "RichCodex model plane store is unavailable",
     invalid_request: "model plane request is invalid",
     revision_conflict: "model plane revision does not match",
@@ -714,6 +780,10 @@ function pageAccounts(
 export function createHeadlessBackend(options: HeadlessBackendOptions = {}): HeadlessBackend {
   const stateRoot = resolveBackendStateRoot(options);
   const modelPlaneStore = options.modelPlaneStore ?? createModelPlaneStore(stateRoot);
+  const deviceOAuth = options.deviceOAuthCoordinator ?? createDeviceOAuthCoordinator({
+    modelPlaneStore,
+    env: options.env,
+  });
   const dataPlaneCapability = options.dataPlaneCapability
     ?? options.env?.[RICHCODEX_BACKEND_DATA_PLANE_TOKEN_ENV];
   if (!dataPlaneCapability) {
@@ -747,6 +817,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             | HeadlessProtocolErrorMessage
             | HeadlessProviderAccountListResultMessage
             | HeadlessProviderAccountImportResultMessage
+            | HeadlessProviderAccountLoginResultMessage
             | HeadlessModelRouteReadResultMessage
             | HeadlessModelRouteMutationResultMessage
             | HeadlessOperationErrorMessage,
@@ -860,6 +931,33 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 })) return { exitCode: 1, reason: "output_error" };
                 continue;
               }
+              if (parsed.message.type === "providerAccountLoginStart") {
+                const login = await deviceOAuth.start(parsed.message.userLabel);
+                if (!await write({
+                  type: "providerAccountLoginStartResult",
+                  requestId: parsed.message.requestId,
+                  ...login,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountLoginStatus") {
+                const login = deviceOAuth.status(parsed.message.loginId);
+                if (!await write({
+                  type: "providerAccountLoginStatusResult",
+                  requestId: parsed.message.requestId,
+                  ...login,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountLoginCancel") {
+                const login = deviceOAuth.cancel(parsed.message.loginId);
+                if (!await write({
+                  type: "providerAccountLoginCancelResult",
+                  requestId: parsed.message.requestId,
+                  ...login,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
               const route = parsed.message.type === "modelRouteCreate"
                 ? modelPlaneStore.createModelRoute(parsed.message)
                 : parsed.message.type === "modelRouteSetTargets"
@@ -896,6 +994,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
         }
         return { exitCode: 0, reason: "eof" };
       } finally {
+        deviceOAuth.shutdown();
         await dataPlane.stop();
       }
     },

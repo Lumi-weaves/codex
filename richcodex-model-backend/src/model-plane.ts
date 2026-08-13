@@ -107,6 +107,9 @@ export type ProviderAccountImportCode =
   | "account_already_exists"
   | "account_limit_reached"
   | "invalid_api_key"
+  | "login_unavailable"
+  | "login_limit_reached"
+  | "login_not_found"
   | "store_unavailable";
 
 export type ModelRouteMutationCode =
@@ -180,6 +183,7 @@ export interface SetModelRouteTargetsInput {
 export interface ModelPlaneStore {
   snapshot(): ProviderAccountSnapshot;
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
+  addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount;
   addApiKeyAccount(apiKey: string, userLabel: string): SafeProviderAccount;
   createModelRoute(input: CreateModelRouteInput): SafeModelRoute;
   setModelRouteTargets(input: SetModelRouteTargetsInput): SafeModelRoute;
@@ -575,15 +579,40 @@ function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredOAuthCredenti
     throw new ModelPlaneError("invalid_auth_document");
   }
   const idToken = isSafeText(tokens.id_token, 64 * 1024) ? tokens.id_token : undefined;
-  const accessPayload = decodeJwtPayload(tokens.access_token);
-  const idPayload = idToken ? decodeJwtPayload(idToken) : null;
-  const explicitAccountId = isSafeText(tokens.account_id, 512) ? tokens.account_id : null;
+  return oauthCredentialFromTokens({
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    idToken,
+    explicitAccountId: isSafeText(tokens.account_id, 512) ? tokens.account_id : undefined,
+  }, now);
+}
+
+/** Convert freshly exchanged OAuth tokens into backend-private execution material. */
+export function oauthCredentialFromTokens(
+  tokens: {
+    readonly accessToken: string;
+    readonly refreshToken: string;
+    readonly idToken?: string;
+    readonly explicitAccountId?: string;
+  },
+  now: number,
+): StoredOAuthCredential {
+  if (
+    !isSafeText(tokens.accessToken, 64 * 1024)
+    || !isSafeText(tokens.refreshToken, 64 * 1024)
+    || tokens.idToken !== undefined && !isSafeText(tokens.idToken, 64 * 1024)
+    || tokens.explicitAccountId !== undefined && !isSafeText(tokens.explicitAccountId, 512)
+  ) {
+    throw new ModelPlaneError("invalid_auth_document");
+  }
+  const accessPayload = decodeJwtPayload(tokens.accessToken);
+  const idPayload = tokens.idToken ? decodeJwtPayload(tokens.idToken) : null;
   // Preserve the frozen kernel's extraction order. Codex may retain selected
   // workspace metadata beside tokens whose claims describe a different
   // default workspace; disagreement is not proof that the login is malformed.
   const chatgptAccountId = accountIdFromPayload(idPayload)
     ?? accountIdFromPayload(accessPayload)
-    ?? explicitAccountId;
+    ?? tokens.explicitAccountId;
   const expiresAt = expiryFromPayload(accessPayload) ?? expiryFromPayload(idPayload);
   if (!chatgptAccountId || expiresAt === null) {
     throw new ModelPlaneError("invalid_auth_document");
@@ -591,8 +620,8 @@ function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredOAuthCredenti
   if (expiresAt <= now) throw new ModelPlaneError("credential_expired");
   return {
     kind: "oauth",
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
+    accessToken: tokens.accessToken,
+    refreshToken: tokens.refreshToken,
     chatgptAccountId,
     expiresAt,
   };
@@ -735,42 +764,64 @@ export function createModelPlaneStore(
   const createTargetId = options.createTargetId ?? (() => `target-${randomUUID()}`);
   let document = loadDocument(stateRoot);
 
+  const addOAuthAccount = (
+    credential: StoredOAuthCredential,
+    userLabel: string,
+  ): SafeProviderAccount => {
+    if (
+      credential.kind !== "oauth"
+      || !isSafeText(credential.accessToken, 64 * 1024)
+      || !isSafeText(credential.refreshToken, 64 * 1024)
+      || !isSafeText(credential.chatgptAccountId, 512)
+      || !Number.isSafeInteger(credential.expiresAt)
+      || credential.expiresAt <= now()
+      || !isSafeText(userLabel, 80)
+      || userLabel.trim() !== userLabel
+    ) {
+      throw new ModelPlaneError("invalid_auth_document");
+    }
+    if (document.accounts.length >= PROVIDER_ACCOUNT_MAX_ROWS) {
+      throw new ModelPlaneError("account_limit_reached");
+    }
+    if (document.accounts.some(account =>
+      account.credential.kind === "oauth"
+      && account.credential.chatgptAccountId === credential.chatgptAccountId
+    )) {
+      throw new ModelPlaneError("account_already_exists");
+    }
+    const id = createAccountId();
+    if (!isSafeText(id, 80) || document.accounts.some(account => account.id === id)) {
+      throw new ModelPlaneError("store_unavailable");
+    }
+    const account: StoredProviderAccount = {
+      id,
+      providerId: OPENAI_PROVIDER_ID,
+      userLabel,
+      credentialKind: "oauth",
+      status: "verificationRequired",
+      addedAt: Math.floor(now() / 1000),
+      credential,
+    };
+    const next = nextDocument(document, {
+      accounts: [...document.accounts, account],
+      modelTags: document.modelTags,
+      displayEntries: document.displayEntries,
+    });
+    persistDocument(stateRoot, path, next);
+    document = next;
+    return safeAccount(account, now());
+  };
+
   return {
     snapshot(): ProviderAccountSnapshot {
       return safeSnapshot(document, now());
     },
     importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount {
       const credential = parseCodexAuthJson(readBoundedFile(authJsonPath, "source_unavailable"), now());
-      if (document.accounts.length >= PROVIDER_ACCOUNT_MAX_ROWS) {
-        throw new ModelPlaneError("account_limit_reached");
-      }
-      if (document.accounts.some(account =>
-        account.credential.kind === "oauth"
-        && account.credential.chatgptAccountId === credential.chatgptAccountId
-      )) {
-        throw new ModelPlaneError("account_already_exists");
-      }
-      const id = createAccountId();
-      if (!isSafeText(id, 80) || document.accounts.some(account => account.id === id)) {
-        throw new ModelPlaneError("store_unavailable");
-      }
-      const account: StoredProviderAccount = {
-        id,
-        providerId: OPENAI_PROVIDER_ID,
-        userLabel,
-        credentialKind: "oauth",
-        status: "verificationRequired",
-        addedAt: Math.floor(now() / 1000),
-        credential,
-      };
-      const next = nextDocument(document, {
-        accounts: [...document.accounts, account],
-        modelTags: document.modelTags,
-        displayEntries: document.displayEntries,
-      });
-      persistDocument(stateRoot, path, next);
-      document = next;
-      return safeAccount(account, now());
+      return addOAuthAccount(credential, userLabel);
+    },
+    addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount {
+      return addOAuthAccount(credential, userLabel);
     },
     addApiKeyAccount(apiKey: string, userLabel: string): SafeProviderAccount {
       if (
