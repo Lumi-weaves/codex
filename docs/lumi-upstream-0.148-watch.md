@@ -95,3 +95,40 @@ Before this integration can advance Lumi `main`:
 
 The original prototype remains recoverable in stash
 `c69e323daa41a3f5c08b817daa8f56f4eefbdb14` until its rebased form is accepted.
+
+## Alpha.12 selective recheck
+
+Status recorded on 2026-08-13 after fetching `rust-v0.148.0-alpha.12`.
+
+Lumi `main` now contains the deliberate alpha.7 integration plus newer
+cockpit, prompt-receipt, and compaction-continuity work. A disposable alpha.12
+merge probe produced 22 conflicts concentrated in RichCodex-owned seams:
+turn-input admission and routing, delegated-turn lineage, compaction/history,
+authentication selection, awaited-terminal completion, and app-server status.
+The 96-commit alpha.7-to-alpha.12 delta therefore does **not** advance the
+RichCodex base release or downstream version as a unit.
+
+RichCodex treats tagged upstream releases as a source inventory rather than a
+replacement harness. Substrate fixes may be ported independently when they do
+not redefine cockpit ownership, attention ordering, lifecycle, or continuity.
+Changes to those semantics are omitted by default and must be reimplemented or
+explicitly reconciled against the central cockpit invariants before adoption;
+reverting them after a broad merge is a fallback, not the normal update route.
+
+The accepted alpha.12-derived substrate batch is limited to:
+
+- exec-server startup retry;
+- fail-closed Linux unreadable-glob handling;
+- MCP elicitation cleanup and local custom-CA propagation;
+- disabled Azure Responses storage;
+- Windows sandbox/proxy correctness and nested-repository support;
+- remote `apply_patch` sandbox hardening;
+- network credential-broker hardening with bounded fallback ports; and
+- protection against inline-visualization writes through the sandbox.
+
+In particular, the upstream queued-user-message rewrite, unified turn-input
+submission, root-turn tracking, interrupted-turn recovery, response-envelope
+history migration, rollout/thread identity migration, and approval-pipeline
+unification remain outside this batch. They overlap the RichCodex cockpit
+kernel and require their own invariant-led decision rather than tag-driven
+adoption.
