@@ -38,6 +38,7 @@ pub(super) async fn create_thread(
             params.dynamic_tools,
         )
         .with_session_id(params.session_id)
+        .with_agent_selection(params.agent_selection)
         .with_prompt_context(
             params.prompt_compiler_revision,
             params.prompt_context_origin,

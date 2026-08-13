@@ -772,6 +772,7 @@ impl Session {
                             source: session_source,
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
+                            agent_selection: config.agent.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
                                 provenance: base_instructions_provenance.clone(),

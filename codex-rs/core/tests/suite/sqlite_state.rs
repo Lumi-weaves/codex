@@ -367,6 +367,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                     agent_path: None,
                     agent_nickname: None,
                     agent_role: None,
+                    agent_selection: None,
                     model_provider: None,
                     base_instructions: None,
                     prompt_compiler_revision: None,

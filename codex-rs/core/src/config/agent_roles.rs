@@ -254,6 +254,15 @@ pub(crate) fn parse_agent_role_file_contents(
             ),
         )
     })?;
+    if parsed.config.agent.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "agent role file at {} cannot set the root `agent` identity",
+                role_file_label.display()
+            ),
+        ));
+    }
     let description = normalize_agent_role_description(
         &format!("agent role file {}.description", role_file_label.display()),
         parsed.description.as_deref(),

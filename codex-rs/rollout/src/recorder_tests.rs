@@ -194,6 +194,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
             agent_path: None,
             agent_nickname: None,
             agent_role: None,
+            agent_selection: None,
             model_provider: None,
             base_instructions: None,
             dynamic_tools: None,

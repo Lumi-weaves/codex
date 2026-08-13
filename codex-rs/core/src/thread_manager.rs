@@ -47,6 +47,7 @@ use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::ThreadId;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -209,6 +210,23 @@ enum ShutdownOutcome {
     Complete,
     SubmitFailed,
     TimedOut,
+}
+
+fn inherit_agent_selection(
+    config: &mut Config,
+    initial_history: &InitialHistory,
+    origin: AgentSelectionOrigin,
+) {
+    if config.agent.is_some() {
+        return;
+    }
+    config.agent = initial_history
+        .get_agent_selection()
+        .cloned()
+        .map(|mut selection| {
+            selection.origin = origin;
+            selection
+        });
 }
 
 /// [`ThreadManager`] is responsible for creating threads and maintaining
@@ -912,6 +930,15 @@ impl ThreadManager {
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
+        inherit_agent_selection(
+            &mut options.config,
+            &options.initial_history,
+            if forked_from_thread_id.is_some() {
+                AgentSelectionOrigin::Fork
+            } else {
+                AgentSelectionOrigin::Resume
+            },
+        );
         let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
@@ -989,12 +1016,13 @@ impl ThreadManager {
     #[instrument(level = "trace", skip_all)]
     pub async fn resume_thread_with_history(
         &self,
-        config: Config,
+        mut config: Config,
         initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        inherit_agent_selection(&mut config, &initial_history, AgentSelectionOrigin::Resume);
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1042,14 +1070,15 @@ impl ThreadManager {
 
     pub(crate) async fn resume_thread_from_rollout_with_user_shell_override_for_tests(
         &self,
-        config: Config,
+        mut config: Config,
         rollout_path: PathBuf,
         auth_manager: Arc<AuthManager>,
         user_shell_override: crate::shell::Shell,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&config);
         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        inherit_agent_selection(&mut config, &initial_history, AgentSelectionOrigin::Resume);
+        let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
@@ -1233,7 +1262,7 @@ impl ThreadManager {
 
     async fn fork_thread_with_initial_history(
         &self,
-        config: Config,
+        mut config: Config,
         fork_history: ForkHistory,
         thread_source: Option<ThreadSource>,
         parent_trace: Option<W3cTraceContext>,
@@ -1244,6 +1273,7 @@ impl ThreadManager {
             initial_history: history,
             persistence: fork_persistence,
         } = fork_history;
+        inherit_agent_selection(&mut config, &history, AgentSelectionOrigin::Fork);
         let fork_lifecycle = match snapshot {
             ForkSnapshot::Interrupted => {
                 crate::prompt_inheritance::PromptLifecycleShape::FullHistoryFork

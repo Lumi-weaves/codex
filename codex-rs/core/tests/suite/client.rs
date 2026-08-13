@@ -528,6 +528,7 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
                     cli_version: "test_version".to_string(),
+                    agent_selection: None,
                     model_provider: Some("test-provider".to_string()),
                     ..Default::default()
                 },
@@ -1044,6 +1045,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
                     cli_version: "test_version".to_string(),
+                    agent_selection: None,
                     model_provider: Some("test-provider".to_string()),
                     ..Default::default()
                 },
@@ -1184,6 +1186,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
                     cli_version: "test_version".to_string(),
+                    agent_selection: None,
                     model_provider: Some("test-provider".to_string()),
                     ..Default::default()
                 },

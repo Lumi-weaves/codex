@@ -150,6 +150,9 @@ pub struct OrchestratorFeatureToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ConfigToml {
+    /// Optional Agent Definition selector. This is independent of model selection.
+    pub agent: Option<String>,
+
     /// Optional override of model selection.
     pub model: Option<String>,
     /// Review model override used by the `/review` feature.

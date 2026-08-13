@@ -77,6 +77,7 @@ fn write_rollout(
             originator: "codex".to_string(),
             cli_version: "0.0.0".to_string(),
             source: SessionSource::Cli,
+            agent_selection: None,
             model_provider: Some(config.model_provider_id.clone()),
             ..Default::default()
         },

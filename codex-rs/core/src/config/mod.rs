@@ -89,6 +89,8 @@ use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -625,6 +627,9 @@ pub struct Config {
 
     /// Warnings collected during config load that should be shown on startup.
     pub startup_warnings: Vec<String>,
+
+    /// Optional versioned Agent identity selected independently of the model.
+    pub agent: Option<AgentSelection>,
 
     /// Optional override of model selection.
     pub model: Option<String>,
@@ -1865,7 +1870,7 @@ impl Config {
             .map(AbsolutePathBuf::try_from)
             .transpose()?;
 
-        Self::load_config_with_layer_stack(
+        let mut config = Self::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             cfg,
             ConfigOverrides {
@@ -1876,7 +1881,9 @@ impl Config {
             refreshed_config.codex_home.clone(),
             config_layer_stack,
         )
-        .await
+        .await?;
+        config.agent.clone_from(&self.agent);
+        Ok(config)
     }
 
     /// This is the preferred way to create an instance of [Config].
@@ -2593,6 +2600,7 @@ fn apply_managed_filesystem_constraints(
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
+    pub agent: Option<String>,
     pub model: Option<String>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -3283,6 +3291,7 @@ impl Config {
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
+            agent: agent_override,
             model,
             review_model: override_review_model,
             cwd,
@@ -3765,6 +3774,20 @@ impl Config {
             }
         }
 
+        let agent = match agent_override {
+            Some(selector) => Some((selector, AgentSelectionOrigin::Cli)),
+            None => cfg
+                .agent
+                .clone()
+                .map(|selector| (selector, AgentSelectionOrigin::Config)),
+        }
+        .map(|(selector, origin)| {
+            crate::agent_selection::resolve_agent_selector(&selector)
+                .map(|agent| AgentSelection { agent, origin })
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+        })
+        .transpose()?;
+
         let model = model.or_else(|| cfg.model.clone());
         let model_provider_override = model_provider.or(cfg.model_provider);
         let model_provider_id = model
@@ -4129,6 +4152,7 @@ impl Config {
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
         let config = Self {
+            agent,
             model,
             service_tier,
             review_model,

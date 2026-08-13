@@ -94,6 +94,7 @@ fn write_rollout_with_fork(
         originator: "test-originator".to_string(),
         cli_version: "0.0.0".to_string(),
         source,
+        agent_selection: None,
         model_provider: Some("test-provider".to_string()),
         ..SessionMeta::default()
     };

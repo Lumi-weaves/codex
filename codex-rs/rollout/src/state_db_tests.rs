@@ -337,6 +337,7 @@ fn write_rollout_with_user_message(
                     agent_nickname: None,
                     agent_role: None,
                     agent_path: None,
+                    agent_selection: None,
                     model_provider: Some("test-provider".to_string()),
                     base_instructions: None,
                     dynamic_tools: None,

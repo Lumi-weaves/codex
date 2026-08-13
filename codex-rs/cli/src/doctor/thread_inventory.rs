@@ -1340,6 +1340,7 @@ mod tests {
                         originator: "test".to_string(),
                         cli_version: "test".to_string(),
                         source: SessionSource::Cli,
+                        agent_selection: None,
                         model_provider: Some("test-provider".to_string()),
                         ..Default::default()
                     },
