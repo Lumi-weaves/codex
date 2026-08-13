@@ -347,6 +347,7 @@ async fn run_remote_compaction_request_v2(
     loop {
         let result = match client_session
             .stream_compaction(
+                crate::PromptInvocationKind::RemoteCompaction,
                 prompt,
                 &turn_context.model_info,
                 &turn_context.session_telemetry,

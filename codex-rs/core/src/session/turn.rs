@@ -1379,7 +1379,7 @@ async fn run_sampling_request(
     let turn_context = Arc::clone(&step_context.turn);
 
     let base_instructions = sess.get_base_instructions().await;
-    let prompt_compiler = PromptCompiler::for_step(step_context.as_ref(), base_instructions);
+    let prompt_compiler = PromptCompiler::for_turn(step_context.as_ref(), base_instructions);
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&sess),

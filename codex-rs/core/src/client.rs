@@ -2032,11 +2032,12 @@ impl ModelClientSession {
         .await
     }
 
-    /// Streams remote-v2 compaction while recording the exact client-lowered request separately
-    /// from ordinary inference calls.
+    /// Streams compaction while recording the exact client-lowered request separately from
+    /// ordinary inference calls.
     #[allow(clippy::too_many_arguments)]
     pub async fn stream_compaction(
         &mut self,
+        invocation_kind: PromptInvocationKind,
         prompt: &Prompt,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
@@ -2046,8 +2047,12 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         compaction_trace: &CompactionTraceContext,
     ) -> Result<ResponseStream> {
+        debug_assert!(matches!(
+            invocation_kind,
+            PromptInvocationKind::LocalCompaction | PromptInvocationKind::RemoteCompaction
+        ));
         self.stream_with_trace(
-            PromptInvocationKind::RemoteCompaction,
+            invocation_kind,
             prompt,
             model_info,
             session_telemetry,

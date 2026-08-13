@@ -289,7 +289,7 @@ async fn schedule_startup_prewarm_inner(
         /*status*/ None,
     );
     let build_prompt_started_at = Instant::now();
-    let prompt_compiler = PromptCompiler::for_step(
+    let prompt_compiler = PromptCompiler::for_startup_prewarm(
         step_context.as_ref(),
         BaseInstructions {
             text: base_instructions,

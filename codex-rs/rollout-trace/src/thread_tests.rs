@@ -5,6 +5,8 @@ use std::path::PathBuf;
 
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::SandboxPolicy;
@@ -210,6 +212,108 @@ fn compaction_contexts_share_identity_across_models() -> anyhow::Result<()> {
             ("gpt-previous".to_string(), "compaction-1".to_string()),
             ("gpt-selected".to_string(), "compaction-1".to_string()),
         ]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn local_compaction_trace_links_request_install_and_continuation() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let thread_id_string = thread_id.to_string();
+    let thread_trace =
+        ThreadTraceContext::start_root_in_root_for_test(temp.path(), minimal_metadata(thread_id))?;
+    thread_trace.record_codex_turn_started("compact-turn");
+
+    let user = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "history to compact".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let summary = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "compacted summary".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let compaction_trace = thread_trace.compaction_trace_context(
+        "compact-turn",
+        "compaction-1",
+        "gpt-test",
+        "test-provider",
+    );
+    compaction_trace
+        .start_attempt(&serde_json::json!({
+            "model": "gpt-test",
+            "input": [&user],
+            "instructions": "compact locally"
+        }))
+        .record_stream_completed("local-response-1", &[]);
+    compaction_trace.record_installed(&CompactionCheckpointTracePayload {
+        input_history: std::slice::from_ref(&user),
+        replacement_history: std::slice::from_ref(&summary),
+        continuity: CompactionContinuityTracePayload {
+            trigger: "manual",
+            reason: "user_requested",
+            implementation: "responses",
+            phase: "standalone_turn",
+            model: "gpt-test",
+            provider: "test-provider",
+            reference_context_installed: false,
+            world_state_baseline_installed: false,
+        },
+        window_number: Some(1),
+        first_window_id: Some("first-window"),
+        previous_window_id: Some("previous-window"),
+        window_id: Some("current-window"),
+    });
+
+    thread_trace.record_codex_turn_started("continuation-turn");
+    thread_trace
+        .inference_trace_context("continuation-turn", "gpt-test", "test-provider")
+        .start_attempt()
+        .record_started(&serde_json::json!({
+            "model": "gpt-test",
+            "input": [&summary]
+        }));
+
+    let rollout = replay_bundle(&single_bundle_dir(temp.path())?)?;
+    let compaction = &rollout.compactions["compaction-1"];
+    let request_id = compaction
+        .request_ids
+        .first()
+        .expect("local compaction request");
+    let request = &rollout.compaction_requests[request_id];
+    let continuation_id = compaction
+        .continuation_inference_call_id
+        .as_ref()
+        .expect("continuation inference");
+    let continuation = &rollout.inference_calls[continuation_id];
+    assert_eq!(
+        (
+            request.compaction_id.as_str(),
+            request.execution.status.clone(),
+            request.response_id.as_deref(),
+            compaction.implementation.as_deref(),
+            compaction.thread_id.as_str(),
+            continuation.request_item_ids.as_slice(),
+        ),
+        (
+            "compaction-1",
+            ExecutionStatus::Completed,
+            Some("local-response-1"),
+            Some("responses"),
+            thread_id_string.as_str(),
+            compaction.replacement_item_ids.as_slice(),
+        )
     );
 
     Ok(())

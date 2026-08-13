@@ -9,6 +9,7 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -51,7 +52,6 @@ use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::CompactionCheckpointTracePayload;
 use codex_rollout_trace::CompactionContinuityTracePayload;
 use codex_rollout_trace::CompactionTraceContext;
-use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
@@ -317,6 +317,12 @@ async fn run_compact_task_inner_impl(
 ) -> CodexResult<String> {
     let context_compaction_item = ContextCompactionItem::new();
     let compaction_id = context_compaction_item.id.clone();
+    let compaction_trace = sess.services.rollout_thread_trace.compaction_trace_context(
+        turn_context.sub_id.as_str(),
+        compaction_id.as_str(),
+        turn_context.model_info.slug.as_str(),
+        turn_context.provider.info().name.as_str(),
+    );
     let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -341,29 +347,27 @@ async fn run_compact_task_inner_impl(
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
 
-    loop {
+    let trace_input_history = loop {
         // Clone is required because of the loop
         let turn_input = history
             .clone()
             .for_prompt(&turn_context.model_info.input_modalities);
         let turn_input_len = turn_input.len();
-        let prompt = Prompt {
-            input: turn_input,
-            base_instructions: sess.get_base_instructions().await,
-            ..Default::default()
-        };
+        let prompt = PromptCompiler::for_local_compaction(sess.get_base_instructions().await)
+            .compile_prompt(turn_input);
         let attempt_result = drain_to_completed(
             &sess,
             turn_context.as_ref(),
             &mut client_session,
             &responses_metadata,
             &prompt,
+            &compaction_trace,
         )
         .await;
 
         match attempt_result {
             Ok(()) => {
-                break;
+                break compaction_trace.is_enabled().then(|| prompt.input.clone());
             }
             Err(err)
                 if matches!(
@@ -415,7 +419,7 @@ async fn run_compact_task_inner_impl(
                 }
             }
         }
-    }
+    };
 
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.annotated_items();
@@ -451,18 +455,24 @@ async fn run_compact_task_inner_impl(
         reference_context_item.is_some(),
         world_state_baseline.is_some(),
     );
-    sess.replace_compacted_history(
-        new_history,
-        reference_context_item,
-        world_state_baseline,
-        CompactedHistoryMetadata {
-            message: summary_text,
-            window_number,
-            window_ids,
-            continuity: Some(continuity),
-        },
-    )
-    .await;
+    let installed = sess
+        .replace_compacted_history(
+            new_history,
+            reference_context_item,
+            world_state_baseline,
+            CompactedHistoryMetadata {
+                message: summary_text,
+                window_number,
+                window_ids,
+                continuity: Some(continuity),
+            },
+        )
+        .await;
+    record_installed_compaction(
+        &compaction_trace,
+        trace_input_history.as_deref(),
+        &installed,
+    );
     sess.recompute_token_usage(&turn_context).await;
 
     sess.emit_turn_item_completed(&turn_context, compaction_item)
@@ -824,9 +834,10 @@ async fn drain_to_completed(
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
+    compaction_trace: &CompactionTraceContext,
 ) -> CodexResult<()> {
     let mut stream = client_session
-        .stream(
+        .stream_compaction(
             crate::PromptInvocationKind::LocalCompaction,
             prompt,
             &turn_context.model_info,
@@ -835,9 +846,7 @@ async fn drain_to_completed(
             turn_context.reasoning_summary,
             turn_context.config.service_tier.clone(),
             responses_metadata,
-            // Rollout tracing currently models remote compaction only; local compaction streams
-            // are left untraced until the reducer has a first-class local compaction lifecycle.
-            &InferenceTraceContext::disabled(),
+            compaction_trace,
         )
         .await?;
     loop {

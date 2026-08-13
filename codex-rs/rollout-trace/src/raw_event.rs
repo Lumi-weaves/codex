@@ -199,7 +199,7 @@ pub enum RawTraceEventPayload {
         compaction_request_id: CompactionRequestId,
         error: String,
     },
-    /// Checkpoint installation event for remote-compacted replacement history.
+    /// Checkpoint installation event for compacted replacement history.
     CompactionInstalled {
         compaction_id: CompactionId,
         /// Trace-only checkpoint payload. Do not route this through public UI protocol.
