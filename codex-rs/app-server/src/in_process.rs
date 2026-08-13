@@ -483,6 +483,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
                 richcodex_backend: None,
+                richcodex_initial_model_routes: Vec::new(),
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());

@@ -23,12 +23,15 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::ModelRouteCreateResponse;
+use codex_app_server_protocol::ModelRouteRetireResponse;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -188,6 +191,21 @@ pub(crate) enum KeymapCaptureMode {
 pub(crate) enum TranscriptExportDestination {
     Clipboard,
     File(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteDraft {
+    pub(crate) display_name: String,
+    pub(crate) model_tag: String,
+    pub(crate) selected_model: ModelPreset,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteAccountChoices {
+    pub(crate) expected_revision: String,
+    pub(crate) semantic_model: String,
+    pub(crate) upstream_model_id: String,
+    pub(crate) accounts: Vec<ProviderAccount>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -857,6 +875,45 @@ pub(crate) enum AppEvent {
     /// Open the full model picker (non-auto models).
     OpenAllModelsPopup {
         models: Vec<ModelPreset>,
+    },
+
+    /// Continue the RichCodex route wizard after the display name is accepted.
+    OpenModelRouteTagPrompt {
+        display_name: String,
+        selected_model: ModelPreset,
+    },
+
+    /// Load the current route revision and provider accounts without blocking terminal input.
+    BeginModelRouteCreate {
+        draft: ModelRouteDraft,
+    },
+
+    /// Present the account picker after the route plane has been read.
+    ModelRouteAccountChoicesLoaded {
+        draft: ModelRouteDraft,
+        result: Result<ModelRouteAccountChoices, String>,
+    },
+
+    /// Create one account-bound target behind a new stable model tag.
+    SubmitModelRouteCreate {
+        draft: ModelRouteDraft,
+        choices: ModelRouteAccountChoices,
+        account: ProviderAccount,
+    },
+
+    /// Report completion only after app-server has published the resulting catalog.
+    ModelRouteCreateCompleted {
+        result: Result<ModelRouteCreateResponse, String>,
+    },
+
+    /// Resolve and retire one managed model tag at the latest route revision.
+    BeginModelRouteRetire {
+        model_tag: String,
+    },
+
+    /// Report completion only after app-server has published the retired tombstone.
+    ModelRouteRetireCompleted {
+        result: Result<ModelRouteRetireResponse, String>,
     },
 
     /// Open the confirmation prompt before enabling full access mode.

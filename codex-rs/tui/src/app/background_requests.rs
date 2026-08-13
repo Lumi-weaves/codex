@@ -19,6 +19,14 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use codex_app_server_protocol::ModelRouteCreateParams;
+use codex_app_server_protocol::ModelRouteCreateResponse;
+use codex_app_server_protocol::ModelRouteReadParams;
+use codex_app_server_protocol::ModelRouteReadResponse;
+use codex_app_server_protocol::ModelRouteRetireParams;
+use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ProviderAccountListParams;
+use codex_app_server_protocol::ProviderAccountListResponse;
 
 use codex_app_server_protocol::RequestId;
 
@@ -35,6 +43,62 @@ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
 impl App {
+    pub(super) fn begin_model_route_create(
+        &mut self,
+        app_server: &AppServerSession,
+        draft: crate::app_event::ModelRouteDraft,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = fetch_model_route_account_choices(request_handle, &draft).await;
+            app_event_tx.send(AppEvent::ModelRouteAccountChoicesLoaded { draft, result });
+        });
+    }
+
+    pub(super) fn submit_model_route_create(
+        &mut self,
+        app_server: &AppServerSession,
+        draft: crate::app_event::ModelRouteDraft,
+        choices: crate::app_event::ModelRouteAccountChoices,
+        account: codex_app_server_protocol::ProviderAccount,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id = RequestId::String(format!("model-route-create-{}", Uuid::new_v4()));
+            let result: Result<ModelRouteCreateResponse, String> = request_handle
+                .request_typed(ClientRequest::ModelRouteCreate {
+                    request_id,
+                    params: ModelRouteCreateParams {
+                        expected_revision: choices.expected_revision,
+                        model_tag: draft.model_tag,
+                        display_name: draft.display_name,
+                        semantic_model: choices.semantic_model,
+                        provider_id: account.provider_id,
+                        account_id: account.id,
+                        upstream_model_id: choices.upstream_model_id,
+                    },
+                })
+                .await
+                .map_err(|err| err.to_string());
+            app_event_tx.send(AppEvent::ModelRouteCreateCompleted { result });
+        });
+    }
+
+    pub(super) fn begin_model_route_retire(
+        &mut self,
+        app_server: &AppServerSession,
+        model_tag: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let result = retire_model_route(request_handle, model_tag).await;
+            app_event_tx.send(AppEvent::ModelRouteRetireCompleted { result });
+        });
+    }
+
     pub(super) fn fetch_mcp_inventory(
         &mut self,
         app_server: &AppServerSession,
@@ -721,6 +785,90 @@ impl App {
             overlay.replace_cells(self.transcript_cells.clone());
         }
     }
+}
+
+async fn fetch_model_route_account_choices(
+    request_handle: AppServerRequestHandle,
+    draft: &crate::app_event::ModelRouteDraft,
+) -> Result<crate::app_event::ModelRouteAccountChoices, String> {
+    let accounts_request_id =
+        RequestId::String(format!("provider-account-list-{}", Uuid::new_v4()));
+    let accounts: ProviderAccountListResponse = request_handle
+        .request_typed(ClientRequest::ProviderAccountList {
+            request_id: accounts_request_id,
+            params: ProviderAccountListParams {
+                cursor: None,
+                limit: Some(100),
+            },
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let routes_request_id = RequestId::String(format!("model-route-read-{}", Uuid::new_v4()));
+    let routes: ModelRouteReadResponse = request_handle
+        .request_typed(ClientRequest::ModelRouteRead {
+            request_id: routes_request_id,
+            params: ModelRouteReadParams::default(),
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+
+    let selected_route = routes
+        .data
+        .iter()
+        .find(|route| route.model_tag == draft.selected_model.model && !route.retired);
+    let semantic_model = selected_route
+        .map(|route| route.semantic_model.clone())
+        .unwrap_or_else(|| draft.selected_model.model.clone());
+    let upstream_model_id = selected_route
+        .and_then(|route| route.targets.first())
+        .map(|target| target.upstream_model_id.clone())
+        .unwrap_or_else(|| draft.selected_model.model.clone());
+
+    Ok(crate::app_event::ModelRouteAccountChoices {
+        expected_revision: routes.desired_state_revision,
+        semantic_model,
+        upstream_model_id,
+        accounts: accounts.data,
+    })
+}
+
+async fn retire_model_route(
+    request_handle: AppServerRequestHandle,
+    model_tag: String,
+) -> Result<ModelRouteRetireResponse, String> {
+    let read_request_id = RequestId::String(format!("model-route-read-{}", Uuid::new_v4()));
+    let routes: ModelRouteReadResponse = request_handle
+        .request_typed(ClientRequest::ModelRouteRead {
+            request_id: read_request_id,
+            params: ModelRouteReadParams::default(),
+        })
+        .await
+        .map_err(|err| err.to_string())?;
+    let Some(route) = routes
+        .data
+        .iter()
+        .find(|route| route.model_tag == model_tag)
+    else {
+        return Err(format!(
+            "`{model_tag}` is not a managed RichCodex model route"
+        ));
+    };
+    if route.retired {
+        return Err(format!("`{model_tag}` is already retired"));
+    }
+
+    let retire_request_id = RequestId::String(format!("model-route-retire-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::ModelRouteRetire {
+            request_id: retire_request_id,
+            params: ModelRouteRetireParams {
+                expected_revision: routes.desired_state_revision,
+                model_tag,
+            },
+        })
+        .await
+        .map_err(|err| err.to_string())
 }
 
 pub(super) async fn fetch_all_mcp_server_statuses(

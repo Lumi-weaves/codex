@@ -1304,6 +1304,40 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::OpenModelRouteTagPrompt {
+                display_name,
+                selected_model,
+            } => {
+                self.chat_widget
+                    .open_model_route_tag_prompt(display_name, selected_model);
+            }
+            AppEvent::BeginModelRouteCreate { draft } => {
+                self.begin_model_route_create(app_server, draft);
+            }
+            AppEvent::ModelRouteAccountChoicesLoaded { draft, result } => match result {
+                Ok(choices) => self
+                    .chat_widget
+                    .show_model_route_account_choices(draft, choices),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not prepare model route: {error}")),
+            },
+            AppEvent::SubmitModelRouteCreate {
+                draft,
+                choices,
+                account,
+            } => {
+                self.submit_model_route_create(app_server, draft, choices, account);
+            }
+            AppEvent::ModelRouteCreateCompleted { result } => {
+                self.chat_widget.finish_model_route_create(result);
+            }
+            AppEvent::BeginModelRouteRetire { model_tag } => {
+                self.begin_model_route_retire(app_server, model_tag);
+            }
+            AppEvent::ModelRouteRetireCompleted { result } => {
+                self.chat_widget.finish_model_route_retire(result);
+            }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
                 return_to_permissions,

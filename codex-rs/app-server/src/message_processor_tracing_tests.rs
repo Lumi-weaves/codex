@@ -270,6 +270,7 @@ async fn build_test_processor(
         remote_control_handle: None,
         plugin_startup_tasks: crate::PluginStartupTasks::Start,
         richcodex_backend: None,
+        richcodex_initial_model_routes: Vec::new(),
     }));
     (processor, outgoing_rx)
 }

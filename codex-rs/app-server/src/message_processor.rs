@@ -229,6 +229,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
     pub(crate) richcodex_backend: Option<crate::richcodex_backend::RichCodexBackendClient>,
+    pub(crate) richcodex_initial_model_routes: Vec<crate::richcodex_backend::ModelSummary>,
 }
 
 impl MessageProcessor {
@@ -255,6 +256,7 @@ impl MessageProcessor {
             remote_control_handle,
             plugin_startup_tasks,
             richcodex_backend,
+            richcodex_initial_model_routes,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -330,10 +332,11 @@ impl MessageProcessor {
             }
         });
         let models_manager = thread_manager.get_models_manager();
-        let model_list_catalog = Arc::new(ModelListCatalog::new(
+        let model_list_catalog = Arc::new(ModelListCatalog::new_with_runtime_routes(
             models_manager,
             config.http_client_factory(),
             outgoing.clone(),
+            &richcodex_initial_model_routes,
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_list_catalog);
         thread_manager
@@ -391,7 +394,7 @@ impl MessageProcessor {
             config: Arc::clone(&config),
             config_manager: config_manager.clone(),
             workspace_settings_cache: Arc::clone(&workspace_settings_cache),
-            model_list_catalog,
+            model_list_catalog: model_list_catalog.clone(),
         });
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
@@ -443,7 +446,8 @@ impl MessageProcessor {
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
         let provider_account_processor =
             ProviderAccountRequestProcessor::new(richcodex_backend.clone());
-        let model_route_processor = ModelRouteRequestProcessor::new(richcodex_backend);
+        let model_route_processor =
+            ModelRouteRequestProcessor::new(richcodex_backend, model_list_catalog);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),

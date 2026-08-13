@@ -117,6 +117,7 @@ mod outgoing_message;
 mod request_processors;
 mod request_serialization;
 mod richcodex_backend;
+mod richcodex_model_routes;
 mod server_request_error;
 mod skills_watcher;
 mod thread_state;
@@ -700,6 +701,10 @@ pub async fn run_main_with_transport_options(
     let richcodex_backend_client = richcodex_backend
         .as_ref()
         .map(richcodex_backend::RichCodexBackend::client);
+    let richcodex_initial_model_routes = richcodex_backend
+        .as_ref()
+        .map(|backend| backend.snapshot().models.clone())
+        .unwrap_or_default();
     let remote_control_policy = if config
         .config_layer_stack
         .requirements()
@@ -930,6 +935,7 @@ pub async fn run_main_with_transport_options(
             remote_control_handle: Some(remote_control_handle.clone()),
             plugin_startup_tasks: runtime_options.plugin_startup_tasks,
             richcodex_backend: richcodex_backend_client,
+            richcodex_initial_model_routes,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

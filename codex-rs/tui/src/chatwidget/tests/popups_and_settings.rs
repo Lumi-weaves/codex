@@ -10,6 +10,8 @@ use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
+use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
 use pretty_assertions::assert_eq;
@@ -3173,6 +3175,153 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     assert!(
         !popup.contains("test-hidden-model"),
         "expected hidden model to be excluded from picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_shows_display_name_and_stable_tag() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.id = "research-max".to_string();
+    preset.model = "research-max".to_string();
+    preset.display_name = "Research Max".to_string();
+    preset.description = "Routed by RichCodex".to_string();
+    preset.show_in_picker = true;
+
+    chat.open_model_popup_with_presets(vec![preset]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_picker_display_name_and_tag", popup);
+}
+
+#[tokio::test]
+async fn model_picker_i_opens_route_name_and_tag_prompts() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('i')));
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_route_display_name_prompt", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (display_name, selected_model) = match rx.try_recv() {
+        Ok(AppEvent::OpenModelRouteTagPrompt {
+            display_name,
+            selected_model,
+        }) => (display_name, selected_model),
+        other => panic!("expected OpenModelRouteTagPrompt, got {other:?}"),
+    };
+    chat.open_model_route_tag_prompt(display_name, selected_model);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_route_stable_tag_prompt", popup);
+}
+
+#[tokio::test]
+async fn model_picker_d_opens_non_cascading_retire_confirmation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('d')));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("model_route_retire_confirmation", popup);
+}
+
+#[tokio::test]
+async fn model_route_shortcuts_are_scoped_to_the_all_models_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut auto = get_available_model(&chat, "gpt-5.4");
+    auto.id = "codex-auto-fast".to_string();
+    auto.model = "codex-auto-fast".to_string();
+    auto.display_name = "Fast".to_string();
+    auto.show_in_picker = true;
+    let mut specific = get_available_model(&chat, "gpt-5.4");
+    specific.show_in_picker = true;
+    chat.open_model_popup_with_presets(vec![auto, specific]);
+    while rx.try_recv().is_ok() {}
+    let before = render_bottom_popup(&chat, /*width*/ 80);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('d')));
+
+    let after = render_bottom_popup(&chat, /*width*/ 80);
+    assert_eq!(after, before);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn model_route_account_picker_exposes_only_safe_account_labels() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let preset = get_available_model(&chat, "gpt-5.4");
+    let draft = crate::app_event::ModelRouteDraft {
+        display_name: "My Fast Model".to_string(),
+        model_tag: "my-fast-model".to_string(),
+        selected_model: preset,
+    };
+    let choices = crate::app_event::ModelRouteAccountChoices {
+        expected_revision: "7".to_string(),
+        semantic_model: "gpt-5.4".to_string(),
+        upstream_model_id: "gpt-5.4".to_string(),
+        accounts: vec![
+            ProviderAccount {
+                id: "opaque-primary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Primary Codex".to_string(),
+                status: ProviderAccountStatus::VerificationRequired,
+                added_at: 1,
+            },
+            ProviderAccount {
+                id: "opaque-expired".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Needs Login".to_string(),
+                status: ProviderAccountStatus::ReauthenticationRequired,
+                added_at: 2,
+            },
+        ],
+    };
+
+    chat.show_model_route_account_choices(draft, choices);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("opaque-primary"));
+    assert!(!popup.contains("opaque-expired"));
+    assert_chatwidget_snapshot!("model_route_account_picker", popup);
+}
+
+#[tokio::test]
+async fn open_model_picker_refreshes_when_catalog_changes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("old-tag")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut old = get_available_model(&chat, "gpt-5.4");
+    old.id = "old-tag".to_string();
+    old.model = "old-tag".to_string();
+    old.display_name = "Old Model".to_string();
+    old.show_in_picker = true;
+    chat.open_model_popup_with_presets(vec![old]);
+
+    let mut new = get_available_model(&chat, "gpt-5.4");
+    new.id = "new-tag".to_string();
+    new.model = "new-tag".to_string();
+    new.display_name = "New Model".to_string();
+    new.show_in_picker = true;
+    chat.refresh_model_picker_if_open(vec![new]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("New Model"), "refreshed picker:\n{popup}");
+    assert!(popup.contains("tag: new-tag"), "refreshed picker:\n{popup}");
+    assert!(!popup.contains("Old Model"), "refreshed picker:\n{popup}");
+    assert!(
+        !popup.contains("(current)"),
+        "a vanished current tag must not silently select a replacement:\n{popup}"
     );
 }
 

@@ -6,6 +6,8 @@
 use super::*;
 
 const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
+pub(super) const MODEL_POPUP_VIEW_ID: &str = "model-popup";
+pub(super) const ALL_MODELS_POPUP_VIEW_ID: &str = "all-models-popup";
 
 impl ChatWidget {
     /// Open a popup to choose a quick auto model. Selecting "All models"
@@ -72,6 +74,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
+        self.open_model_popup_with_presets_at(presets, None);
+    }
+
+    fn open_model_popup_with_presets_at(
+        &mut self,
+        presets: Vec<ModelPreset>,
+        initial_selected_idx: Option<usize>,
+    ) {
         let presets: Vec<ModelPreset> = presets
             .into_iter()
             .filter(|preset| preset.show_in_picker)
@@ -81,7 +91,7 @@ impl ChatWidget {
         let current_label = presets
             .iter()
             .find(|preset| preset.model.as_str() == current_model)
-            .map(|preset| preset.model.to_string())
+            .map(|preset| preset.display_name.to_string())
             .unwrap_or_else(|| self.model_display_name().to_string());
 
         let (mut auto_presets, other_presets): (Vec<ModelPreset>, Vec<ModelPreset>) = presets
@@ -97,8 +107,7 @@ impl ChatWidget {
         let mut items: Vec<SelectionItem> = auto_presets
             .into_iter()
             .map(|preset| {
-                let description =
-                    (!preset.description.is_empty()).then_some(preset.description.clone());
+                let (name, description) = Self::model_picker_label(&preset);
                 let model = preset.model.clone();
                 let requires_advanced_selection =
                     Self::is_advanced_reasoning_effort(&preset.default_reasoning_effort)
@@ -126,7 +135,7 @@ impl ChatWidget {
                     )
                 };
                 SelectionItem {
-                    name: model.clone(),
+                    name,
                     description,
                     is_current: model.as_str() == current_model,
                     is_default: preset.is_default,
@@ -166,14 +175,16 @@ impl ChatWidget {
             "Pick a quick auto mode or browse all models.",
         );
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(MODEL_POPUP_VIEW_ID),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             header,
+            initial_selected_idx,
             ..Default::default()
         });
     }
 
-    fn is_auto_model(model: &str) -> bool {
+    pub(super) fn is_auto_model(model: &str) -> bool {
         model.starts_with("codex-auto-")
     }
 
@@ -187,6 +198,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_all_models_popup(&mut self, presets: Vec<ModelPreset>) {
+        self.open_all_models_popup_at(presets, None);
+    }
+
+    fn open_all_models_popup_at(
+        &mut self,
+        presets: Vec<ModelPreset>,
+        initial_selected_idx: Option<usize>,
+    ) {
         if presets.is_empty() {
             self.add_info_message(
                 "No additional models are available right now.".to_string(),
@@ -197,8 +216,7 @@ impl ChatWidget {
 
         let mut items: Vec<SelectionItem> = Vec::new();
         for preset in presets.into_iter() {
-            let description =
-                (!preset.description.is_empty()).then_some(preset.description.to_string());
+            let (name, description) = Self::model_picker_label(&preset);
             let is_current = preset.model.as_str() == self.current_model();
             let single_supported_effort = preset.supported_reasoning_efforts.len() == 1;
             let preset_for_action = preset.clone();
@@ -209,7 +227,7 @@ impl ChatWidget {
                 });
             })];
             items.push(SelectionItem {
-                name: preset.model.clone(),
+                name,
                 description,
                 is_current,
                 is_default: preset.is_default,
@@ -222,14 +240,58 @@ impl ChatWidget {
 
         let header = self.model_menu_header(
             "Select Model and Effort",
-            "Access legacy models by running codex -m <model_name> or in your config.toml",
+            "Display names map to stable model tags; routing stays behind the tag.",
         );
         self.bottom_pane.show_selection_view(SelectionViewParams {
-            footer_hint: Some(self.bottom_pane.standard_popup_hint_line()),
+            view_id: Some(ALL_MODELS_POPUP_VIEW_ID),
+            footer_hint: Some(Line::from(
+                "Enter select  ·  i add route  ·  d retire route  ·  Esc close".dim(),
+            )),
             items,
             header,
+            initial_selected_idx,
             ..Default::default()
         });
+    }
+
+    fn model_picker_label(preset: &ModelPreset) -> (String, Option<String>) {
+        let description = (!preset.description.is_empty()).then_some(preset.description.as_str());
+        if preset.display_name == preset.model {
+            return (preset.display_name.clone(), description.map(str::to_string));
+        }
+
+        let tag = format!("tag: {}", preset.model);
+        let description = Some(match description {
+            Some(description) => format!("{tag} · {description}"),
+            None => tag,
+        });
+        (preset.display_name.clone(), description)
+    }
+
+    pub(crate) fn refresh_model_picker_if_open(&mut self, presets: Vec<ModelPreset>) {
+        if let Some(selected_idx) = self
+            .bottom_pane
+            .selected_index_for_active_view(MODEL_POPUP_VIEW_ID)
+        {
+            self.bottom_pane
+                .dismiss_active_view_if_id(MODEL_POPUP_VIEW_ID);
+            self.open_model_popup_with_presets_at(presets, Some(selected_idx));
+            return;
+        }
+        if let Some(selected_idx) = self
+            .bottom_pane
+            .selected_index_for_active_view(ALL_MODELS_POPUP_VIEW_ID)
+        {
+            self.bottom_pane
+                .dismiss_active_view_if_id(ALL_MODELS_POPUP_VIEW_ID);
+            self.open_all_models_popup_at(
+                presets
+                    .into_iter()
+                    .filter(|preset| preset.show_in_picker && !Self::is_auto_model(&preset.model))
+                    .collect(),
+                Some(selected_idx),
+            );
+        }
     }
 
     fn model_selection_actions(

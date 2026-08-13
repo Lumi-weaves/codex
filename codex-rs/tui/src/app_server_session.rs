@@ -581,6 +581,25 @@ impl AppServerSession {
         self.client.next_event().await
     }
 
+    pub(crate) async fn list_models(&self) -> Result<Vec<ModelPreset>, TypedRequestError> {
+        let response = self
+            .client
+            .request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                request_id: RequestId::String(format!("model-list-refresh-{}", Uuid::new_v4())),
+                params: ModelListParams {
+                    cursor: None,
+                    limit: None,
+                    include_hidden: Some(true),
+                },
+            })
+            .await?;
+        Ok(response
+            .data
+            .into_iter()
+            .map(model_preset_from_api_model)
+            .collect())
+    }
+
     #[cfg(test)]
     pub(crate) async fn start_thread(&mut self, config: &Config) -> Result<AppServerStartedThread> {
         self.start_thread_with_session_start_source(config, /*session_start_source*/ None)

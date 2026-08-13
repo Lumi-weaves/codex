@@ -1,5 +1,6 @@
 use anyhow::Result;
 use app_test_support::TestAppServer;
+use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::ModelRoute;
 use codex_app_server_protocol::ModelRouteCreateResponse;
 use codex_app_server_protocol::ModelRouteReadResponse;
@@ -107,13 +108,52 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "gpt-existing",
                 "GPT Existing",
                 false,
-                "openai/gpt-existing",
+                "gpt-5.6-luna",
                 "target-existing",
                 "gpt-existing",
             )],
             desired_state_revision: "1".to_string(),
             catalog_revision: "1".to_string(),
         }
+    );
+    let startup_model_list_id = server
+        .send_raw_request(
+            "model/list",
+            Some(serde_json::json!({ "includeHidden": false })),
+        )
+        .await?;
+    let startup_model_list: ModelListResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(startup_model_list_id)).await??;
+    assert!(
+        startup_model_list
+            .data
+            .iter()
+            .any(|model| { model.model == "gpt-existing" && model.display_name == "GPT Existing" })
+    );
+
+    let chained_id = server
+        .send_raw_request(
+            "modelRoute/create",
+            Some(serde_json::json!({
+                "expectedRevision": "1",
+                "modelTag": "gpt-chained",
+                "displayName": "GPT Chained",
+                "semanticModel": "gpt-existing",
+                "providerId": "openai",
+                "accountId": "account-local",
+                "upstreamModelId": "gpt-chained",
+            })),
+        )
+        .await?;
+    let chained = timeout(
+        DEFAULT_TIMEOUT,
+        server.read_stream_until_error_message(RequestId::Integer(chained_id)),
+    )
+    .await??;
+    assert_eq!(chained.error.code, INVALID_PARAMS_ERROR_CODE);
+    assert_eq!(
+        chained.error.message,
+        "semanticModel must identify a native model, not another RichCodex route"
     );
 
     let create_id = server
@@ -123,7 +163,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "expectedRevision": "1",
                 "modelTag": "gpt-primary",
                 "displayName": "GPT Primary",
-                "semanticModel": "openai/gpt-primary",
+                "semanticModel": "gpt-5.6-luna",
                 "providerId": "openai",
                 "accountId": "account-local",
                 "upstreamModelId": "gpt-primary-2026-08-13",
@@ -139,13 +179,27 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "gpt-primary",
                 "GPT Primary",
                 false,
-                "openai/gpt-primary",
+                "gpt-5.6-luna",
                 "target-created",
                 "gpt-primary-2026-08-13",
             ),
             desired_state_revision: "2".to_string(),
             catalog_revision: "2".to_string(),
         }
+    );
+    let model_list_id = server
+        .send_raw_request(
+            "model/list",
+            Some(serde_json::json!({ "includeHidden": false })),
+        )
+        .await?;
+    let model_list: ModelListResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(model_list_id)).await??;
+    assert!(
+        model_list
+            .data
+            .iter()
+            .any(|model| { model.model == "gpt-primary" && model.display_name == "GPT Primary" })
     );
 
     let conflict_id = server
@@ -155,7 +209,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "expectedRevision": "0",
                 "modelTag": "gpt-conflict",
                 "displayName": "GPT Conflict",
-                "semanticModel": "openai/gpt-conflict",
+                "semanticModel": "gpt-5.6-luna",
                 "providerId": "openai",
                 "accountId": "account-local",
                 "upstreamModelId": "gpt-conflict",
@@ -191,13 +245,27 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
                 "gpt-primary",
                 "GPT Primary",
                 true,
-                "openai/gpt-primary",
+                "gpt-5.6-luna",
                 "target-created",
                 "gpt-primary-2026-08-13",
             ),
             desired_state_revision: "3".to_string(),
             catalog_revision: "3".to_string(),
         }
+    );
+    let model_list_id = server
+        .send_raw_request(
+            "model/list",
+            Some(serde_json::json!({ "includeHidden": false })),
+        )
+        .await?;
+    let model_list: ModelListResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(model_list_id)).await??;
+    assert!(
+        !model_list
+            .data
+            .iter()
+            .any(|model| model.model == "gpt-primary")
     );
 
     let recorded = std::fs::read_to_string(
@@ -209,11 +277,11 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
         serde_json::from_str::<serde_json::Value>(&recorded)?,
         serde_json::json!({
             "type": "modelRouteCreate",
-            "requestId": "app-server-2",
+            "requestId": "app-server-4",
             "expectedRevision": 1,
             "modelTag": "gpt-primary",
             "displayName": "GPT Primary",
-            "semanticModel": "openai/gpt-primary",
+            "semanticModel": "gpt-5.6-luna",
             "providerId": "openai",
             "accountId": "account-local",
             "upstreamModelId": "gpt-primary-2026-08-13",
@@ -254,22 +322,31 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":3,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[],"models":[]}'
+route_state=0
+printf '%s\n' '{"type":"ready","protocolVersion":3,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[],"models":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
     *'"type":"modelRouteRead"'*)
-      printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":1,"catalogRevision":1,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"openai/gpt-existing","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+      if [ "$route_state" -eq 0 ]; then
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":1,"catalogRevision":1,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+      elif [ "$route_state" -eq 1 ]; then
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+      else
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+      fi
       ;;
     *'"type":"modelRouteCreate"'*'"expectedRevision":0'*)
       printf '{"type":"operationError","requestId":"%s","code":"revision_conflict","message":"must-not-be-reflected"}\n' "$request_id"
       ;;
     *'"type":"modelRouteCreate"'*)
       printf '%s\n' "$line" > "$state_root/model-route-create.json"
-      printf '{"type":"modelRouteCreateResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"openai/gpt-primary","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
+      route_state=1
+      printf '{"type":"modelRouteCreateResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
       ;;
     *'"type":"modelRouteRetire"'*)
-      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"openai/gpt-primary","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
+      route_state=2
+      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

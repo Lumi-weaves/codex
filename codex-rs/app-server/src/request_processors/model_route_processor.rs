@@ -1,5 +1,6 @@
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
+use crate::model_list_catalog::ModelListCatalog;
 use crate::richcodex_backend::ModelRouteCreateRequest;
 use crate::richcodex_backend::ModelRouteMutationResult;
 use crate::richcodex_backend::ModelRouteReadResult;
@@ -18,17 +19,25 @@ use codex_app_server_protocol::ModelRouteRetireParams;
 use codex_app_server_protocol::ModelRouteRetireResponse;
 use codex_app_server_protocol::ModelRouteTarget;
 use codex_app_server_protocol::ModelRouteTargetStatus;
+use std::sync::Arc;
 
 const MAX_BACKEND_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone)]
 pub(crate) struct ModelRouteRequestProcessor {
     backend: Option<RichCodexBackendClient>,
+    model_list_catalog: Arc<ModelListCatalog>,
 }
 
 impl ModelRouteRequestProcessor {
-    pub(crate) fn new(backend: Option<RichCodexBackendClient>) -> Self {
-        Self { backend }
+    pub(crate) fn new(
+        backend: Option<RichCodexBackendClient>,
+        model_list_catalog: Arc<ModelListCatalog>,
+    ) -> Self {
+        Self {
+            backend,
+            model_list_catalog,
+        }
     }
 
     pub(crate) async fn read(
@@ -50,8 +59,26 @@ impl ModelRouteRequestProcessor {
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let expected_revision = parse_revision(&params.expected_revision)?;
         validate_create_params(&params)?;
+        self.model_list_catalog
+            .validate_route_semantic_model(&params.semantic_model)
+            .await
+            .map_err(|_| invalid_params("semanticModel is not in the active model catalog"))?;
         let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
-        backend
+        let existing_routes = backend
+            .read_model_routes()
+            .await
+            .map_err(model_route_error)?;
+        if params.semantic_model != params.model_tag
+            && existing_routes
+                .data
+                .iter()
+                .any(|route| route.model_tag == params.semantic_model)
+        {
+            return Err(invalid_params(
+                "semanticModel must identify a native model, not another RichCodex route",
+            ));
+        }
+        let result = backend
             .create_model_route(ModelRouteCreateRequest {
                 expected_revision,
                 model_tag: params.model_tag,
@@ -62,9 +89,9 @@ impl ModelRouteRequestProcessor {
                 upstream_model_id: params.upstream_model_id,
             })
             .await
-            .map(model_route_create_response)
-            .map(|response| Some(response.into()))
-            .map_err(model_route_error)
+            .map_err(model_route_error)?;
+        self.publish_backend_routes(backend).await?;
+        Ok(Some(model_route_create_response(result).into()))
     }
 
     pub(crate) async fn retire(
@@ -74,12 +101,31 @@ impl ModelRouteRequestProcessor {
         let expected_revision = parse_revision(&params.expected_revision)?;
         validate_model_tag(&params.model_tag)?;
         let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
-        backend
+        let result = backend
             .retire_model_route(expected_revision, params.model_tag)
             .await
-            .map(model_route_retire_response)
-            .map(|response| Some(response.into()))
-            .map_err(model_route_error)
+            .map_err(model_route_error)?;
+        self.publish_backend_routes(backend).await?;
+        Ok(Some(model_route_retire_response(result).into()))
+    }
+
+    async fn publish_backend_routes(
+        &self,
+        backend: &RichCodexBackendClient,
+    ) -> Result<(), JSONRPCErrorError> {
+        let routes = backend
+            .read_model_routes()
+            .await
+            .map_err(model_route_error)?;
+        self.model_list_catalog
+            .publish_runtime_routes(&routes.data)
+            .await
+            .map(|_| ())
+            .map_err(|_| {
+                internal_error(
+                    "RichCodex route was saved, but its model catalog could not be published safely",
+                )
+            })
     }
 }
 
