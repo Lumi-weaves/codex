@@ -4,6 +4,11 @@ common --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 common --xcode_version_config=//:disable_xcode
 
 common --disk_cache=~/.cache/bazel-disk-cache
+# This content-addressed store is intentionally shared by local worktrees.
+# Bound it so persistent cache reuse cannot grow until the host runs out of
+# disk; Bazel collects it in the background after the server becomes idle.
+common --experimental_disk_cache_gc_max_size=40G
+common --experimental_disk_cache_gc_max_age=30d
 common --repo_contents_cache=~/.cache/bazel-repo-contents-cache
 common --repository_cache=~/.cache/bazel-repo-cache
 common --remote_cache_compression
