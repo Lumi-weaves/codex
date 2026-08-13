@@ -44,6 +44,23 @@ function codexAuthJson(accountId: string, expiresAtMs: number): string {
   });
 }
 
+function codexAuthJsonWithDistinctAccountMetadata(expiresAtMs: number): string {
+  return JSON.stringify({
+    tokens: {
+      id_token: jwt({
+        exp: Math.floor(expiresAtMs / 1000),
+        "https://api.openai.com/auth": { chatgpt_account_id: "id-token-workspace" },
+      }),
+      access_token: jwt({
+        exp: Math.floor(expiresAtMs / 1000),
+        chatgpt_account_id: "access-token-workspace",
+      }),
+      refresh_token: "refresh-distinct-workspaces",
+      account_id: "selected-workspace",
+    },
+  });
+}
+
 describe("RichCodex headless backend composition root", () => {
   test("emits a bounded ready shape and resolves only an explicit RichCodex root", () => {
     const root = mkdtempSync(join(tmpdir(), "richcodex-headless-"));
@@ -178,6 +195,35 @@ describe("RichCodex headless backend composition root", () => {
     const persisted = join(stateRoot, "providers", "openai", "accounts.json");
     expect(existsSync(persisted)).toBe(true);
     if (process.platform !== "win32") expect(statSync(persisted).mode & 0o777).toBe(0o600);
+  });
+
+  test("accepts Codex login metadata for distinct token and selected workspaces", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-provider-account-workspaces-"));
+    const stateRoot = join(root, "backend-state");
+    const source = join(root, "selected-auth.json");
+    writeFileSync(source, codexAuthJsonWithDistinctAccountMetadata(Date.now() + 3_600_000), {
+      mode: 0o600,
+    });
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountImport",
+        requestId: "import-distinct-workspaces",
+        authJsonPath: source,
+        userLabel: "Distinct Workspaces",
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "shutdown-distinct-workspaces" })}\n`,
+      stateRoot,
+    );
+
+    expect(result.result).toEqual({ exitCode: 0, reason: "shutdown" });
+    expect(result.stderr).toEqual([]);
+    expect(result.lines[1]).toMatchObject({
+      type: "providerAccountImportResult",
+      requestId: "import-distinct-workspaces",
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      account: { providerId: "openai", status: "verificationRequired" },
+    });
   });
 
   test("failed imports preserve revisions and do not reflect credential-shaped input", async () => {

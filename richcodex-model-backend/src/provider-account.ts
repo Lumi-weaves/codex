@@ -298,15 +298,12 @@ function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredCredential {
   const accessPayload = decodeJwtPayload(tokens.access_token);
   const idPayload = idToken ? decodeJwtPayload(idToken) : null;
   const explicitAccountId = isSafeText(tokens.account_id, 512) ? tokens.account_id : null;
-  const identityCandidates = [
-    accountIdFromPayload(idPayload),
-    accountIdFromPayload(accessPayload),
-    explicitAccountId,
-  ].filter((candidate): candidate is string => candidate !== null);
-  if (new Set(identityCandidates).size > 1) {
-    throw new ProviderAccountImportError("invalid_auth_document");
-  }
-  const chatgptAccountId = identityCandidates[0] ?? null;
+  // Preserve the frozen kernel's extraction order. Codex may retain selected
+  // workspace metadata beside tokens whose claims describe a different
+  // default workspace; disagreement is not proof that the login is malformed.
+  const chatgptAccountId = accountIdFromPayload(idPayload)
+    ?? accountIdFromPayload(accessPayload)
+    ?? explicitAccountId;
   const expiresAt = expiryFromPayload(accessPayload) ?? expiryFromPayload(idPayload);
   if (!chatgptAccountId || expiresAt === null) {
     throw new ProviderAccountImportError("invalid_auth_document");
