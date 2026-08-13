@@ -11,6 +11,8 @@ use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
+use crate::context::ActiveResourceNoFinish;
+use crate::context::ActiveResourceNoFinishBuffer;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
@@ -18,7 +20,6 @@ use crate::hook_runtime::drain_async_hook_results;
 use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
-use crate::hook_runtime::reject_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
@@ -28,6 +29,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -89,7 +91,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::build_hook_prompt_message;
-use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
@@ -386,6 +387,7 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    finish_downgraded,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -447,7 +449,7 @@ pub(crate) async fn run_turn(
                     );
                 }
 
-                let should_roll_over = needs_follow_up
+                let should_roll_over = (needs_follow_up || finish_downgraded)
                     && (sess.take_new_context_window_request().await || token_limit_reached);
                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
@@ -462,8 +464,11 @@ pub(crate) async fn run_turn(
                 if should_roll_over {
                     if let Err(err) = run_auto_compact(
                         &sess,
-                        Arc::clone(&step_context),
-                        /*fallback_step_context*/ None,
+                        AutoCompactStepContexts {
+                            compaction: Arc::clone(&step_context),
+                            fallback: None,
+                            projection: Arc::clone(&step_context),
+                        },
                         &mut client_session,
                         InitialContextInjection::BeforeLastUserMessage {
                             world_state: Arc::clone(&world_state),
@@ -507,6 +512,12 @@ pub(crate) async fn run_turn(
                             AwaitedPollWaitOutcome::Resume => continue,
                             AwaitedPollWaitOutcome::AwaitedWorkCleared => {}
                         }
+                    }
+                    // A constrained response tried to finish, but direct cleanup can close the
+                    // resource without queuing model-visible completion input. Sample once more
+                    // after closure so the model can produce the task's accepted final answer.
+                    if finish_downgraded {
+                        continue;
                     }
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
@@ -630,34 +641,26 @@ pub(crate) async fn run_hooks_and_record_inputs(
 ) -> bool {
     let mut blocked_input = false;
     let mut accepted_user_input = false;
-    let mut persistence_failed = false;
     for input_item in input {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
-            reject_pending_input(sess, turn_context, input_item).await;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
-            if record_pending_input(
+            record_pending_input(
                 sess,
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
                 persist_context,
             )
-            .await
-            .is_err()
-            {
-                // Preserve later drained inputs, but stop before sampling so a
-                // later queue retry cannot execute this message twice.
-                persistence_failed = true;
-            }
+            .await;
         }
     }
-    persistence_failed || (blocked_input && !accepted_user_input)
+    blocked_input && !accepted_user_input
 }
 
 fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
@@ -1049,8 +1052,11 @@ async fn run_pre_sampling_compact(
             .await?;
         run_auto_compact(
             sess,
-            step_context,
-            /*fallback_step_context*/ None,
+            AutoCompactStepContexts {
+                compaction: Arc::clone(&step_context),
+                fallback: None,
+                projection: step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::ContextLimit,
@@ -1069,16 +1075,15 @@ fn comp_hash_changed(previous: Option<&str>, current: Option<&str>) -> bool {
         .is_some_and(|(previous, current)| previous != current)
 }
 
-/// Captures the current model's request-scoped state for retrying previous-model compaction.
+/// Reuses the current model's projected step for retrying previous-model compaction.
 ///
 /// Returns `None` when the active authentication does not use the Codex backend, the provider is
 /// not OpenAI, or the previous and current model are the same.
-async fn capture_current_model_fallback_step_context(
-    sess: &Arc<Session>,
+fn current_model_fallback_step_context(
     turn_context: &Arc<TurnContext>,
     previous_model: &str,
-    cancellation_token: &CancellationToken,
-) -> CodexResult<Option<Arc<StepContext>>> {
+    projection_step_context: &Arc<StepContext>,
+) -> Option<Arc<StepContext>> {
     let uses_codex_backend = turn_context
         .model_auth_manager
         .as_deref()
@@ -1087,11 +1092,9 @@ async fn capture_current_model_fallback_step_context(
         || !turn_context.provider.info().is_openai()
         || previous_model == turn_context.model_info.slug
     {
-        return Ok(None);
+        return None;
     }
-    sess.capture_step_context(Arc::clone(turn_context), cancellation_token)
-        .await
-        .map(Some)
+    Some(Arc::clone(projection_step_context))
 }
 
 /// Runs pre-sampling compaction against the previous model when its compaction compatibility
@@ -1129,17 +1132,21 @@ async fn maybe_run_previous_model_inline_compact(
         let step_context = sess
             .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
             .await?;
-        let fallback_step_context = capture_current_model_fallback_step_context(
-            sess,
+        let projection_step_context = sess
+            .capture_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        let fallback_step_context = current_model_fallback_step_context(
             turn_context,
             previous_model.as_str(),
-            cancellation_token,
-        )
-        .await?;
+            &projection_step_context,
+        );
         run_auto_compact(
             sess,
-            step_context,
-            fallback_step_context,
+            AutoCompactStepContexts {
+                compaction: step_context,
+                fallback: fallback_step_context,
+                projection: projection_step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::CompHashChanged,
@@ -1177,17 +1184,21 @@ async fn maybe_run_previous_model_inline_compact(
         let step_context = sess
             .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
             .await?;
-        let fallback_step_context = capture_current_model_fallback_step_context(
-            sess,
+        let projection_step_context = sess
+            .capture_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        let fallback_step_context = current_model_fallback_step_context(
             turn_context,
             previous_model.as_str(),
-            cancellation_token,
-        )
-        .await?;
+            &projection_step_context,
+        );
         run_auto_compact(
             sess,
-            step_context,
-            fallback_step_context,
+            AutoCompactStepContexts {
+                compaction: step_context,
+                fallback: fallback_step_context,
+                projection: projection_step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::ModelDownshift,
@@ -1198,6 +1209,12 @@ async fn maybe_run_previous_model_inline_compact(
     Ok(())
 }
 
+struct AutoCompactStepContexts {
+    compaction: Arc<StepContext>,
+    fallback: Option<Arc<StepContext>>,
+    projection: Arc<StepContext>,
+}
+
 #[instrument(
     level = "trace",
     skip_all,
@@ -1205,13 +1222,17 @@ async fn maybe_run_previous_model_inline_compact(
 )]
 async fn run_auto_compact(
     sess: &Arc<Session>,
-    step_context: Arc<StepContext>,
-    fallback_step_context: Option<Arc<StepContext>>,
+    step_contexts: AutoCompactStepContexts,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
+    let AutoCompactStepContexts {
+        compaction: step_context,
+        fallback: fallback_step_context,
+        projection: projection_step_context,
+    } = step_contexts;
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     if turn_context.config.features.enabled(Feature::TokenBudget) {
@@ -1242,8 +1263,8 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
+                projection_step_context,
                 client_session,
-                initial_context_injection,
                 reason,
                 phase,
             )
@@ -1336,25 +1357,6 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
     connector_ids
 }
 
-#[instrument(level = "trace", skip_all)]
-pub(crate) fn build_prompt(
-    input: Vec<ResponseItem>,
-    router: &ToolRouter,
-    turn_context: &TurnContext,
-    base_instructions: BaseInstructions,
-) -> Prompt {
-    Prompt {
-        input,
-        tools: router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
-        base_instructions,
-        output_schema: turn_context.final_output_json_schema.clone(),
-        output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
-            &turn_context.session_source,
-        ),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -1376,9 +1378,9 @@ async fn run_sampling_request(
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
-    let router = Arc::clone(&step_context.tool_router);
 
     let base_instructions = sess.get_base_instructions().await;
+    let prompt_compiler = PromptCompiler::for_turn(step_context.as_ref(), base_instructions);
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&sess),
@@ -1410,12 +1412,14 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        let prompt = build_prompt(
-            prompt_input,
-            router.as_ref(),
-            turn_context.as_ref(),
-            base_instructions.clone(),
-        );
+        let active_resource_no_finish = sess
+            .has_awaited_terminals()
+            .await
+            .then_some(ActiveResourceNoFinish);
+        if let Some(no_finish) = active_resource_no_finish {
+            prompt_input.push(ContextualUserFragment::into(no_finish));
+        }
+        let prompt = prompt_compiler.compile_prompt(prompt_input);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -1425,6 +1429,7 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            active_resource_no_finish,
             cancellation_token.child_token(),
         )
         .await
@@ -1605,6 +1610,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    finish_downgraded: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2145,6 +2151,50 @@ async fn handle_assistant_item_done_in_plan_mode(
     false
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn deliver_active_resource_commentary(
+    sess: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    turn_store: &Arc<codex_extension_api::ExtensionData>,
+    tool_runtime: &ToolCallRuntime,
+    cancellation_token: &CancellationToken,
+    plan_mode_state: Option<&mut PlanModeStreamState>,
+    buffer: &mut ActiveResourceNoFinishBuffer,
+    last_agent_message: &mut Option<String>,
+) -> CodexResult<bool> {
+    let downgraded_finish = buffer.downgraded_finish();
+    let Some(commentary) = buffer.take_commentary() else {
+        return Ok(downgraded_finish);
+    };
+
+    if let Some(state) = plan_mode_state {
+        handle_assistant_item_done_in_plan_mode(
+            sess,
+            turn_context,
+            turn_store.as_ref(),
+            &commentary,
+            state,
+            /*previously_active_item*/ None,
+            last_agent_message,
+        )
+        .await;
+    } else {
+        let mut ctx = HandleOutputCtx {
+            sess: Arc::clone(sess),
+            turn_context: Arc::clone(turn_context),
+            turn_store: Arc::clone(turn_store),
+            tool_runtime: tool_runtime.clone(),
+            cancellation_token: cancellation_token.child_token(),
+        };
+        let output_result =
+            handle_output_item_done(&mut ctx, commentary, /*previously_active_item*/ None).await?;
+        if let Some(agent_message) = output_result.last_agent_message {
+            *last_agent_message = Some(agent_message);
+        }
+    }
+    Ok(downgraded_finish)
+}
+
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
     in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
@@ -2187,6 +2237,17 @@ fn assign_missing_streamed_response_item_id(
     Session::assign_missing_response_item_id(item);
 }
 
+fn active_resource_no_finish_defers_assistant_message(
+    constraint: Option<ActiveResourceNoFinish>,
+    item: &ResponseItem,
+) -> bool {
+    constraint.is_some()
+        && matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "assistant"
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace",
     skip_all,
@@ -2204,6 +2265,7 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    active_resource_no_finish: Option<ActiveResourceNoFinish>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
@@ -2244,6 +2306,8 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut finish_downgraded = false;
+    let mut active_resource_assistant_buffer = ActiveResourceNoFinishBuffer::default();
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2349,6 +2413,57 @@ async fn try_run_sampling_request(
                     )
                     .await;
                 }
+                if active_resource_no_finish.is_some() {
+                    let preempt_for_buffered_commentary =
+                        matches!(
+                            &item,
+                            ResponseItem::Message {
+                                role,
+                                phase: Some(MessagePhase::Commentary),
+                                ..
+                            } if role == "assistant"
+                        ) && sess.input_queue.has_pending_session_inputs().await;
+                    item = match active_resource_assistant_buffer.push_if_assistant(item) {
+                        None => {
+                            if preempt_for_buffered_commentary {
+                                finish_downgraded |= deliver_active_resource_commentary(
+                                    &sess,
+                                    &turn_context,
+                                    &turn_store,
+                                    &tool_runtime,
+                                    &cancellation_token,
+                                    plan_mode_state.as_mut(),
+                                    &mut active_resource_assistant_buffer,
+                                    &mut last_agent_message,
+                                )
+                                .await?;
+                                break Ok(SamplingRequestResult {
+                                    needs_follow_up: true,
+                                    last_agent_message,
+                                    finish_downgraded,
+                                });
+                            }
+                            // Completed phases are authoritative. Hold useful commentary and
+                            // final-answer text alike; response completion merges them into one
+                            // commentary item.
+                            continue;
+                        }
+                        Some(item) => {
+                            finish_downgraded |= deliver_active_resource_commentary(
+                                &sess,
+                                &turn_context,
+                                &turn_store,
+                                &tool_runtime,
+                                &cancellation_token,
+                                plan_mode_state.as_mut(),
+                                &mut active_resource_assistant_buffer,
+                                &mut last_agent_message,
+                            )
+                            .await?;
+                            item
+                        }
+                    };
+                }
                 if let Some(state) = plan_mode_state.as_mut()
                     && handle_assistant_item_done_in_plan_mode(
                         &sess,
@@ -2414,11 +2529,19 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        finish_downgraded,
                     });
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
+                // Hold all assistant text until the completed item supplies the authoritative
+                // phase. Providers are allowed to omit or revise phase between added and done.
+                let defer_active_resource_assistant_message =
+                    active_resource_no_finish_defers_assistant_message(
+                        active_resource_no_finish,
+                        &item,
+                    );
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,
@@ -2442,7 +2565,8 @@ async fn try_run_sampling_request(
                 .await
                 {
                     let mut turn_item = turn_item;
-                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
+                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors
+                        && !defer_active_resource_assistant_message;
                     let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                     let mut seeded_item_id: Option<String> = None;
                     if stream_item_to_client
@@ -2569,6 +2693,17 @@ async fn try_run_sampling_request(
                 token_usage,
                 end_turn,
             } => {
+                finish_downgraded |= deliver_active_resource_commentary(
+                    &sess,
+                    &turn_context,
+                    &turn_store,
+                    &tool_runtime,
+                    &cancellation_token,
+                    plan_mode_state.as_mut(),
+                    &mut active_resource_assistant_buffer,
+                    &mut last_agent_message,
+                )
+                .await?;
                 sess.services
                     .analytics_events_client
                     .track_code_mode_tool_call(
@@ -2608,6 +2743,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    finish_downgraded,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -2803,8 +2939,10 @@ async fn try_run_sampling_request(
     outcome
 }
 
-pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
-    for item in responses.iter().rev() {
+pub(crate) fn get_last_assistant_message_from_turn<'a>(
+    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
+) -> Option<String> {
+    for item in responses.rev() {
         if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
             return Some(message);
         }

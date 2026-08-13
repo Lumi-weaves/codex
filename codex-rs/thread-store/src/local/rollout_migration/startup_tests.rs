@@ -40,6 +40,7 @@ fn write_rollout(home: &Path, thread_id: ThreadId, history_mode: ThreadHistoryMo
         originator: "test-originator".to_string(),
         cli_version: "0.0.0".to_string(),
         source: SessionSource::Cli,
+        agent_selection: None,
         model_provider: Some("test-provider".to_string()),
         history_mode,
         ..SessionMeta::default()

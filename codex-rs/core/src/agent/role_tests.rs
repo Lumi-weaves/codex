@@ -123,6 +123,33 @@ async fn apply_role_returns_unavailable_for_invalid_user_role_toml() {
 }
 
 #[tokio::test]
+async fn apply_role_rejects_root_agent_identity_and_preserves_selection() {
+    let (home, mut config) = test_config_with_cli_overrides(vec![(
+        "agent".to_string(),
+        TomlValue::String("codex".to_string()),
+    )])
+    .await;
+    let role_path =
+        write_role_config(&home, "invalid-agent-role.toml", "agent = \"codex@1\"").await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+    let before = config.agent.clone();
+
+    let error = apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect_err("role must not replace root Agent identity");
+
+    assert_eq!(error, AGENT_TYPE_UNAVAILABLE_ERROR);
+    assert_eq!(config.agent, before);
+}
+
+#[tokio::test]
 async fn apply_role_ignores_agent_metadata_fields_in_user_role_file() {
     let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let role_path = write_role_config(
@@ -162,7 +189,6 @@ async fn apply_role_preserves_unspecified_keys() {
     .await;
     config.codex_linux_sandbox_exe = Some(PathBuf::from("/tmp/codex-linux-sandbox"));
     config.main_execve_wrapper_exe = Some(PathBuf::from("/tmp/codex-execve-wrapper"));
-    config.psp = true;
     let role_path = write_role_config(
         &home,
         "instructions-only.toml",
@@ -203,7 +229,6 @@ async fn apply_role_preserves_unspecified_keys() {
         config.main_execve_wrapper_exe,
         Some(PathBuf::from("/tmp/codex-execve-wrapper"))
     );
-    assert!(config.psp);
     assert_eq!(config.base_instructions, base_instructions);
     assert_eq!(config.base_instructions_provenance, provenance);
 }

@@ -105,6 +105,148 @@ async fn runtime_provider_state_survives_initial_model_client_construction() {
         .expect("shutdown managed-model thread");
 }
 
+fn history_with_agent_selection(origin: AgentSelectionOrigin) -> InitialHistory {
+    let thread_id = ThreadId::new();
+    InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                agent_selection: Some(codex_protocol::agent::AgentSelection {
+                    agent: codex_protocol::agent::AgentDefinitionRef {
+                        id: "codex".to_string(),
+                        revision: 1,
+                    },
+                    origin,
+                }),
+                ..Default::default()
+            },
+            git: None,
+        })]),
+        rollout_path: None,
+    })
+}
+
+#[tokio::test]
+async fn resume_and_fork_inherit_agent_unless_explicitly_overridden() {
+    let history = history_with_agent_selection(AgentSelectionOrigin::Cli);
+    let mut resumed = test_config().await;
+    inherit_agent_selection(&mut resumed, &history, AgentSelectionOrigin::Resume);
+    assert_eq!(
+        resumed.agent.as_ref().map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Resume)
+    );
+
+    let mut forked = test_config().await;
+    inherit_agent_selection(&mut forked, &history, AgentSelectionOrigin::Fork);
+    assert_eq!(
+        forked.agent.as_ref().map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Fork)
+    );
+
+    let explicit = resumed.agent.clone().expect("inherited selection");
+    forked.agent = Some(explicit.clone());
+    inherit_agent_selection(&mut forked, &history, AgentSelectionOrigin::Fork);
+    assert_eq!(forked.agent, Some(explicit));
+}
+
+#[tokio::test]
+async fn agent_selection_round_trips_through_rollout_resume_and_fork() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.agent = Some(codex_protocol::agent::AgentSelection {
+        agent: codex_protocol::agent::AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+        origin: AgentSelectionOrigin::Cli,
+    });
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+
+    let source = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start source thread");
+    source.thread.ensure_rollout_materialized().await;
+    source.thread.flush_rollout().await.expect("flush source");
+    let rollout_path = source.thread.rollout_path().expect("source rollout path");
+    let persisted = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read source rollout");
+    assert_eq!(
+        persisted
+            .get_agent_selection()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Cli)
+    );
+    source
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source");
+    let _ = manager.remove_thread(&source.thread_id).await;
+
+    let mut inherited_config = config.clone();
+    inherited_config.agent = None;
+    let resumed = manager
+        .resume_thread_from_rollout(
+            inherited_config.clone(),
+            rollout_path.clone(),
+            Arc::clone(&manager.state.auth_manager),
+            None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("resume source");
+    assert_eq!(
+        resumed
+            .thread
+            .session
+            .get_config()
+            .await
+            .agent
+            .as_ref()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Resume)
+    );
+
+    let forked = manager
+        .fork_thread(
+            ForkSnapshot::Interrupted,
+            inherited_config,
+            rollout_path,
+            None,
+            None,
+        )
+        .await
+        .expect("fork source");
+    assert_eq!(
+        forked
+            .thread
+            .session
+            .get_config()
+            .await
+            .agent
+            .as_ref()
+            .map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Fork)
+    );
+
+    let report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(10))
+        .await;
+    assert_eq!(report.completed.len(), 2);
+}
+
 /// Controls without a custom allocation policy still produce distinct thread identifiers.
 #[test]
 fn thread_id_generator_defaults_to_standard_ids() {
@@ -468,7 +610,7 @@ fn truncates_before_requested_user_message() {
     let initial: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
     let truncated = truncate_before_nth_user_message(
         InitialHistory::Forked(initial),
@@ -482,9 +624,9 @@ fn truncates_before_requested_user_message() {
     );
     let got_items = truncated.get_rollout_items();
     let expected_items = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
+        RolloutItem::ResponseItem(items[0].clone().into()),
+        RolloutItem::ResponseItem(items[1].clone().into()),
+        RolloutItem::ResponseItem(items[2].clone().into()),
     ];
     assert_eq!(
         serde_json::to_value(got_items).unwrap(),
@@ -494,7 +636,7 @@ fn truncates_before_requested_user_message() {
     let initial2: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
     let truncated2 = truncate_before_nth_user_message(
         InitialHistory::Forked(initial2.clone()),
@@ -515,10 +657,10 @@ fn truncates_before_requested_user_message() {
 #[test]
 fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
     let items = vec![
-        RolloutItem::ResponseItem(user_msg("u1")),
-        RolloutItem::ResponseItem(assistant_msg("a1")),
-        RolloutItem::ResponseItem(user_msg("u2")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
+        RolloutItem::ResponseItem(user_msg("u1").into()),
+        RolloutItem::ResponseItem(assistant_msg("a1").into()),
+        RolloutItem::ResponseItem(user_msg("u2").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
     ];
 
     let truncated = truncate_before_nth_user_message(
@@ -560,8 +702,8 @@ fn fork_thread_accepts_legacy_usize_snapshot_argument() {
 #[test]
 fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
     let items = vec![
-        RolloutItem::ResponseItem(user_msg("u1")),
-        RolloutItem::ResponseItem(assistant_msg("a1")),
+        RolloutItem::ResponseItem(user_msg("u1").into()),
+        RolloutItem::ResponseItem(assistant_msg("a1").into()),
         RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
             turn_id: "turn-2".to_string(),
             trace_id: None,
@@ -569,8 +711,8 @@ fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
             model_context_window: None,
             collaboration_mode_kind: Default::default(),
         })),
-        RolloutItem::ResponseItem(user_msg("u2")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
+        RolloutItem::ResponseItem(user_msg("u2").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
     ];
 
     let snapshot_state = snapshot_turn_state(&InitialHistory::Forked(items.clone()));
@@ -612,7 +754,7 @@ async fn ignores_session_prefix_messages_when_truncating() {
     let rollout_items: Vec<RolloutItem> = items
         .iter()
         .cloned()
-        .map(RolloutItem::ResponseItem)
+        .map(|item| RolloutItem::ResponseItem(item.into()))
         .collect();
 
     let truncated = truncate_before_nth_user_message(
@@ -628,10 +770,10 @@ async fn ignores_session_prefix_messages_when_truncating() {
     let got_items = truncated.get_rollout_items();
 
     let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
-        RolloutItem::ResponseItem(items[3].clone()),
+        RolloutItem::ResponseItem(items[0].clone().into()),
+        RolloutItem::ResponseItem(items[1].clone().into()),
+        RolloutItem::ResponseItem(items[2].clone().into()),
+        RolloutItem::ResponseItem(items[3].clone().into()),
     ];
 
     assert_eq!(
@@ -1655,7 +1797,7 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: source.thread_id,
-                history: Arc::new(vec![RolloutItem::ResponseItem(user_msg("hello"))]),
+                history: Arc::new(vec![RolloutItem::ResponseItem(user_msg("hello").into())]),
                 rollout_path: Some(rollout_path.clone()),
             }),
             auth_manager.clone(),
@@ -1810,7 +1952,7 @@ async fn injected_models_manager_controls_refresh_policy() {
 #[test]
 fn interrupted_fork_snapshot_appends_interrupt_boundary() {
     let committed_history =
-        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello"))]);
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello").into())]);
 
     assert_eq!(
         serde_json::to_value(
@@ -1824,8 +1966,8 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
         )
         .expect("serialize interrupted fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(user_msg("hello")),
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(user_msg("hello").into()),
+            RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1848,7 +1990,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
         )
         .expect("serialize interrupted empty fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+            RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1864,7 +2006,7 @@ fn interrupted_fork_snapshot_appends_interrupt_boundary() {
 #[test]
 fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
     let committed_history =
-        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello"))]);
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("hello").into())]);
 
     assert_eq!(
         serde_json::to_value(
@@ -1878,7 +2020,7 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
         )
         .expect("serialize disabled interrupted fork history"),
         serde_json::to_value(vec![
-            RolloutItem::ResponseItem(user_msg("hello")),
+            RolloutItem::ResponseItem(user_msg("hello").into()),
             RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: None,
                 started_at: None,
@@ -1916,9 +2058,9 @@ fn disabled_interrupted_fork_snapshot_appends_only_interrupt_event() {
 #[test]
 fn interrupted_snapshot_is_not_mid_turn() {
     let interrupted_history = InitialHistory::Forked(vec![
-        RolloutItem::ResponseItem(user_msg("hello")),
-        RolloutItem::ResponseItem(assistant_msg("partial")),
-        RolloutItem::ResponseItem(contextual_user_interrupted_marker()),
+        RolloutItem::ResponseItem(user_msg("hello").into()),
+        RolloutItem::ResponseItem(assistant_msg("partial").into()),
+        RolloutItem::ResponseItem(contextual_user_interrupted_marker().into()),
         RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some("turn-1".to_string()),
             started_at: None,
@@ -1989,7 +2131,7 @@ fn completed_legacy_event_history_is_not_mid_turn() {
 #[test]
 fn mixed_response_and_legacy_user_event_history_is_mid_turn() {
     let mixed_history = InitialHistory::Forked(vec![
-        RolloutItem::ResponseItem(user_msg("hello")),
+        RolloutItem::ResponseItem(user_msg("hello").into()),
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
             client_id: None,
             message: "hello".to_string(),
@@ -2043,8 +2185,8 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .resume_thread_with_history(
             config.clone(),
             InitialHistory::Forked(vec![
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2088,7 +2230,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        contextual_user_interrupted_marker().into(),
     ))
     .expect("serialize interrupted marker");
     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
@@ -2163,8 +2305,8 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
                     model_context_window: None,
                     collaboration_mode_kind: Default::default(),
                 })),
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2259,8 +2401,8 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .resume_thread_with_history(
             config.clone(),
             InitialHistory::Forked(vec![
-                RolloutItem::ResponseItem(user_msg("hello")),
-                RolloutItem::ResponseItem(assistant_msg("partial")),
+                RolloutItem::ResponseItem(user_msg("hello").into()),
+                RolloutItem::ResponseItem(assistant_msg("partial").into()),
             ]),
             auth_manager,
             /*parent_trace*/ None,
@@ -2303,7 +2445,7 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        contextual_user_interrupted_marker().into(),
     ))
     .expect("serialize interrupted marker");
     assert_eq!(

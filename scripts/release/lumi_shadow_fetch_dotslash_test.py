@@ -151,14 +151,20 @@ class FetchDotslashTest(unittest.TestCase):
         self.rg_manifest = self.root / "rg-manifest"
         self.rg_manifest.write_text(
             json.dumps(
-                manifest_for(archive=self.rg_archive, url=RG_URL, member="ripgrep-15.2.0-aarch64-unknown-linux-gnu/rg")
+                manifest_for(
+                    archive=self.rg_archive,
+                    url=RG_URL,
+                    member="ripgrep-15.2.0-aarch64-unknown-linux-gnu/rg",
+                )
             ),
             encoding="utf-8",
         )
         self.zsh_manifest = self.root / "zsh-manifest"
         self.zsh_manifest.write_text(
             json.dumps(
-                manifest_for(archive=self.zsh_archive, url=ZSH_URL, member="codex-zsh/bin/zsh")
+                manifest_for(
+                    archive=self.zsh_archive, url=ZSH_URL, member="codex-zsh/bin/zsh"
+                )
             ),
             encoding="utf-8",
         )
@@ -289,7 +295,9 @@ class FetchDotslashTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        result = self._run("--rg-manifest", str(bad), "--zsh-manifest-path", str(self.zsh_manifest))
+        result = self._run(
+            "--rg-manifest", str(bad), "--zsh-manifest-path", str(self.zsh_manifest)
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("sha256", result.stderr)
         self.assertFalse((self.out / "ripgrep-15.2.0-linux-aarch64.tar.gz").exists())
@@ -307,7 +315,9 @@ class FetchDotslashTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        result = self._run("--rg-manifest", str(bad), "--zsh-manifest-path", str(self.zsh_manifest))
+        result = self._run(
+            "--rg-manifest", str(bad), "--zsh-manifest-path", str(self.zsh_manifest)
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("size", result.stderr)
 
@@ -324,7 +334,9 @@ class FetchDotslashTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        result = self._run("--rg-manifest", str(self.rg_manifest), "--zsh-manifest-path", str(mac_only))
+        result = self._run(
+            "--rg-manifest", str(self.rg_manifest), "--zsh-manifest-path", str(mac_only)
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.strip().splitlines()
         self.assertEqual(lines[1], "LUMI_SHADOW_ZSH_BIN=")
@@ -343,7 +355,12 @@ class FetchDotslashTest(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        result = self._run("--rg-manifest", str(mac_only), "--zsh-manifest-path", str(self.zsh_manifest))
+        result = self._run(
+            "--rg-manifest",
+            str(mac_only),
+            "--zsh-manifest-path",
+            str(self.zsh_manifest),
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("linux-aarch64", result.stderr)
 

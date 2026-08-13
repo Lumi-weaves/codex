@@ -20,11 +20,7 @@ pub(super) fn usage_hint_text<'a>(
 }
 
 pub(super) fn cockpit_contract_role(turn_context: &TurnContext) -> Option<CockpitContractRole> {
-    (turn_context.multi_agent_version == MultiAgentVersion::V2)
-        .then(|| {
-            crate::cockpit_operating_contract::role_for_session_source(&turn_context.session_source)
-        })
-        .flatten()
+    crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context).prompt_role
 }
 
 fn configured_usage_hint_text_for_source<'a>(

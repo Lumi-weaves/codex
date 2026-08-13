@@ -8,13 +8,16 @@ use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::Sleep;
 
+use super::SharedPluginMetricsSidecar;
 use super::UnifiedExecContext;
 use super::process::OutputHandles;
 use super::process::UnifiedExecProcess;
+use super::take_plugin_metrics_sidecar;
 use crate::context::UNIFIED_EXEC_COMPLETION_OUTPUT_EXCERPT_MAX_BYTES;
 use crate::context::UnifiedExecCompletionEvent;
 use crate::context::decode_lossy_one_for_one;
 use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
+use crate::plugins::metrics::finish_and_track_measurements;
 use crate::session::SessionIngress;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -173,6 +176,7 @@ pub(crate) fn spawn_exit_watcher(
     transcript: Arc<Mutex<HeadTailBuffer>>,
     started_at: Instant,
     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+    plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
 ) {
     let exit_token = process.cancellation_token();
     let output_drained = process.output_drained_notify();
@@ -195,8 +199,12 @@ pub(crate) fn spawn_exit_watcher(
         let _interaction_guard = interaction_lock.lock_owned().await;
 
         let duration = Instant::now().saturating_duration_since(started_at);
+        let plugin_metrics_sidecar = plugin_metrics_sidecar
+            .as_ref()
+            .and_then(take_plugin_metrics_sidecar);
         let claimed_completion = process.mark_completion_observed();
         if let Some(message) = process.failure_message() {
+            drop(plugin_metrics_sidecar);
             emit_failed_exec_end_for_unified_exec(
                 Arc::clone(&session_ref),
                 turn_ref,
@@ -225,6 +233,14 @@ pub(crate) fn spawn_exit_watcher(
             }
         } else {
             let exit_code = process.exit_code().unwrap_or(-1);
+            finish_and_track_measurements(
+                plugin_metrics_sidecar,
+                exit_code,
+                &session_ref,
+                &turn_ref,
+                &call_id,
+            )
+            .await;
             emit_exec_end_for_unified_exec(
                 Arc::clone(&session_ref),
                 turn_ref,

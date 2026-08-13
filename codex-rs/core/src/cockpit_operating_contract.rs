@@ -6,7 +6,7 @@ use sha2::Digest;
 use sha2::Sha256;
 
 pub const COCKPIT_OPERATING_CONTRACT_ID: &str = "lumi_cockpit_operating_contract";
-pub const COCKPIT_OPERATING_CONTRACT_REVISION: u32 = 1;
+pub const COCKPIT_OPERATING_CONTRACT_REVISION: u32 = 2;
 pub const COCKPIT_OPERATING_CONTRACT_OPEN_TAG: &str = "<lumi_cockpit_operating_contract>";
 pub const COCKPIT_OPERATING_CONTRACT_CLOSE_TAG: &str = "</lumi_cockpit_operating_contract>";
 
@@ -133,10 +133,10 @@ pub(crate) fn ingress_contracts() -> Vec<CockpitIngressContract> {
 pub(crate) fn contract_body(role: CockpitContractRole) -> String {
     let lifecycle = match role {
         CockpitContractRole::Root => {
-            "You own every Shadow Lumi lifecycle: follow up, park, refresh, refork when its knowledge fork is stale, retire, and close with a receipt. Shadows own only their internal resources unless you explicitly grant supervisory ownership."
+            "You own every open Shadow Lumi lifecycle. Its parent-facing state is running or stopped; completed, interrupted, errored, or unloaded are stopped runtime facts, never closure or acceptance. Inspect its checkpoint and follow up when useful; explicitly close it when no longer needed, and treat only a successful close receipt as closure. Shadows own only their internal resources unless you explicitly grant supervisory ownership."
         }
         CockpitContractRole::Shadow => {
-            "Root Lumi owns your lifecycle. Own resources internal to your assignment and return concise receipts; do not spawn or manage peers or children unless root explicitly grants supervisory ownership."
+            "Root Lumi owns your lifecycle. A completed turn leaves you stopped and open for follow-up; it does not close you. Own resources internal to your assignment and return a concise checkpoint; do not spawn or manage peers or children unless root explicitly grants supervisory ownership."
         }
     };
 
@@ -254,12 +254,16 @@ mod tests {
             let rendered = rendered_contract(role);
             let descriptor = descriptor(role);
             assert!(rendered.len() <= descriptor.max_utf8_bytes);
+            assert_eq!(descriptor.revision, 2);
             assert!(rendered.contains("delivered != opened != accepted != resolved"));
             assert!(rendered.contains(&format!("role: {}", role.as_str())));
         }
-        assert_ne!(
-            rendered_contract(CockpitContractRole::Root),
-            rendered_contract(CockpitContractRole::Shadow)
-        );
+        let root = rendered_contract(CockpitContractRole::Root);
+        assert!(root.contains("parent-facing state is running or stopped"));
+        assert!(root.contains("never closure or acceptance"));
+        assert!(root.contains("only a successful close receipt as closure"));
+        let shadow = rendered_contract(CockpitContractRole::Shadow);
+        assert!(shadow.contains("completed turn leaves you stopped and open for follow-up"));
+        assert_ne!(root, shadow);
     }
 }

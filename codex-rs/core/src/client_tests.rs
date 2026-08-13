@@ -55,6 +55,9 @@ use codex_rollout_trace::RawTraceEventPayload;
 use codex_rollout_trace::RolloutTrace;
 use codex_rollout_trace::TraceWriter;
 use codex_rollout_trace::replay_bundle;
+use codex_tools::JsonSchema;
+use codex_tools::ResponsesApiTool;
+use codex_tools::ToolSpec;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
@@ -371,6 +374,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
             .await?;
         let receipt = PromptRequestReceipt::from_lowered_request(
             PromptInvocationKind::Turn,
+            /*agent_selection*/ None,
             provider_name,
             client.provider_info(),
             use_responses_lite,
@@ -381,7 +385,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
                 None,
             )
             .provenance(),
-            None,
+            /*multi_agent_v2_projection*/ None,
         )?;
 
         let metadata = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
@@ -423,6 +427,121 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
             "receipt must describe the body emitted by the production transport"
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_compaction_trace_matches_captured_lowered_request() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("compaction-trace"),
+            ev_completed("compaction-trace"),
+        ]),
+    )
+    .await;
+    let mut provider =
+        create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+    provider.supports_websockets = false;
+    let thread_id = ThreadId::new();
+    let client = ModelClient::new(
+        /*auth_manager*/ None,
+        AgentIdentityAuthPolicy::JwtOnly,
+        thread_id,
+        provider,
+        SessionSource::Exec,
+        "compaction_trace_test".to_string(),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        /*concurrent_reasoning_summaries_enabled*/ false,
+        /*attestation_provider*/ None,
+        HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+    );
+    let prompt = Prompt {
+        input: vec![ResponseItem::CompactionTrigger {}],
+        tools: Arc::from([ToolSpec::Function(ResponsesApiTool {
+            name: "inspect_resource".to_string(),
+            description: "Inspect one resource".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                BTreeMap::new(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
+            output_schema: None,
+        })]),
+        parallel_tool_calls: true,
+        base_instructions: BaseInstructions {
+            text: "compaction instructions".to_string(),
+            provenance: None,
+        },
+        output_schema: None,
+        output_schema_strict: true,
+    };
+    let responses_metadata = test_responses_metadata_for_client(
+        &client,
+        Some("compaction-turn"),
+        format!("{thread_id}:0"),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::Turn,
+    );
+    let trace_dir = TempDir::new()?;
+    let writer = Arc::new(TraceWriter::create(
+        trace_dir.path(),
+        "trace-1".to_string(),
+        "rollout-1".to_string(),
+        "thread-root".to_string(),
+    )?);
+    writer.append(RawTraceEventPayload::ThreadStarted {
+        thread_id: "thread-root".to_string(),
+        agent_path: "/root".to_string(),
+        metadata_payload: None,
+    })?;
+    writer.append(RawTraceEventPayload::CodexTurnStarted {
+        codex_turn_id: "compaction-turn".to_string(),
+        thread_id: "thread-root".to_string(),
+    })?;
+    let compaction_trace = CompactionTraceContext::enabled(
+        writer,
+        "thread-root".to_string(),
+        "compaction-turn".to_string(),
+        "compaction-1".to_string(),
+        "gpt-test".to_string(),
+        "test-provider".to_string(),
+    );
+
+    let mut stream = client
+        .new_session()
+        .stream_compaction(
+            PromptInvocationKind::LocalCompaction,
+            &prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            codex_protocol::config_types::ReasoningSummary::None,
+            /*service_tier*/ None,
+            &responses_metadata,
+            &compaction_trace,
+        )
+        .await?;
+    while stream.next().await.is_some() {}
+
+    let rollout = replay_bundle(trace_dir.path())?;
+    let request = rollout
+        .compaction_requests
+        .values()
+        .next()
+        .expect("compaction request");
+    let payload = &rollout.raw_payloads[&request.raw_request_payload_id];
+    let traced_request: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(trace_dir.path().join(&payload.path))?)?;
+    assert_eq!(traced_request, response_mock.single_request().body_json());
+    assert_eq!(traced_request["tools"][0]["name"], "inspect_resource");
+
     Ok(())
 }
 
@@ -724,7 +843,7 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         /*upstream_request_id*/ None,
         api_stream,
         test_session_telemetry(),
-        attempt,
+        super::StreamingTraceAttempt::Inference(attempt),
         test_model_provider(),
     );
 
@@ -774,7 +893,7 @@ async fn response_stream_records_last_model_feedback_ids() {
         Some("req-123".to_string()),
         api_stream,
         test_session_telemetry(),
-        InferenceTraceAttempt::disabled(),
+        super::StreamingTraceAttempt::Inference(InferenceTraceAttempt::disabled()),
         test_model_provider(),
     );
 
@@ -849,7 +968,7 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         /*upstream_request_id*/ None,
         api_stream,
         test_session_telemetry(),
-        attempt,
+        super::StreamingTraceAttempt::Inference(attempt),
         test_model_provider(),
     );
 

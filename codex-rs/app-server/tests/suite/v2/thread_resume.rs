@@ -157,6 +157,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     append_rollout_item_to_path(
         &path,
         &RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "compacted history".to_string(),
             replacement_history: Some(Vec::new()),
             window_number: Some(1),
@@ -1958,6 +1959,7 @@ fn append_resume_redaction_history(
             revised_prompt: Some("secret revised prompt".to_string()),
             result: "base64-image-result".to_string(),
             transparent_background: None,
+            failure: None,
             saved_path: Some(test_absolute_path("/tmp/ig-1.png")),
         }),
     ]
@@ -3313,6 +3315,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_selection: None,
         model_provider: Some("mock_provider".to_string()),
         base_instructions: None,
         dynamic_tools: None,

@@ -344,7 +344,7 @@ impl MessageProcessor {
             config.http_client_factory(),
             outgoing.clone(),
             &richcodex_initial_model_routes,
-            richcodex_runtime_model_provider_routes.clone(),
+            richcodex_runtime_model_provider_routes,
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_list_catalog);
         thread_manager
@@ -1486,8 +1486,8 @@ impl MessageProcessor {
                     .consume_account_rate_limit_reset_credit(params)
                     .await
             }
-            ClientRequest::GetAccountTokenUsage { .. } => {
-                self.account_processor.get_account_token_usage().await
+            ClientRequest::GetAccountTokenUsage { params, .. } => {
+                self.account_processor.get_account_token_usage(params).await
             }
             ClientRequest::GetWorkspaceMessages { .. } => {
                 self.account_processor.get_workspace_messages().await

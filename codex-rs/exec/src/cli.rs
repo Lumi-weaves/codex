@@ -12,10 +12,6 @@ use std::path::PathBuf;
     override_usage = "codex exec [OPTIONS] [PROMPT]\n       codex exec [OPTIONS] <COMMAND> [ARGS]"
 )]
 pub struct Cli {
-    /// Process-only PSP routing selected by the parent Codex CLI.
-    #[clap(skip)]
-    pub psp: bool,
-
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -137,7 +133,8 @@ impl FromArgMatches for ExecSharedCliOptions {
 }
 
 fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
-    cmd.mut_arg("model", |arg| arg.global(true))
+    cmd.mut_arg("agent", |arg| arg.global(true))
+        .mut_arg("model", |arg| arg.global(true))
         .mut_arg("dangerously_bypass_approvals_and_sandbox", |arg| {
             arg.global(true)
         })

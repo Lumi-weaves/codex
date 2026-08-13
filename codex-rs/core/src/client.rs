@@ -89,7 +89,6 @@ use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout_trace::CompactionTraceContext;
-use codex_rollout_trace::InferenceTraceAttempt;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_tools::create_tools_json_for_responses_api;
 use codex_tools::create_tools_json_for_responses_lite;
@@ -111,6 +110,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
+
+mod streaming_trace;
+use streaming_trace::StreamingTraceAttempt;
+use streaming_trace::StreamingTraceContext;
 
 use crate::attestation::AttestationContext;
 use crate::attestation::AttestationProvider;
@@ -684,7 +687,6 @@ impl ModelClient {
             self.state.auth_env_telemetry.clone(),
         );
         let request = self.build_responses_request(
-            &client_setup.api_provider,
             prompt,
             model_info,
             settings.effort,
@@ -957,10 +959,8 @@ impl ModelClient {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build_responses_request(
         &self,
-        provider: &codex_api::Provider,
         prompt: &Prompt,
         model_info: &ModelInfo,
         effort: Option<ReasoningEffortConfig>,
@@ -1061,7 +1061,7 @@ impl ModelClient {
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
             reasoning: Some(reasoning),
-            store: provider.is_azure_responses_endpoint(),
+            store: false,
             stream: true,
             stream_options,
             include,
@@ -1087,9 +1087,8 @@ impl ModelClient {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
-        let client_setup = self.current_client_setup().await?;
+        self.current_client_setup().await?;
         let mut request = self.build_responses_request(
-            &client_setup.api_provider,
             prompt,
             model_info,
             effort,
@@ -1613,7 +1612,7 @@ impl ModelClientSession {
         summary: ReasoningSummaryConfig,
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
-        inference_trace: &InferenceTraceContext,
+        trace_context: StreamingTraceContext<'_>,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1647,7 +1646,6 @@ impl ModelClientSession {
                 .await;
 
             let mut request = self.client.build_responses_request(
-                &client_setup.api_provider,
                 prompt,
                 model_info,
                 effort.clone(),
@@ -1668,9 +1666,9 @@ impl ModelClientSession {
                 .prepare_response_items_for_request(&mut request.input);
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
-            let inference_trace_attempt = inference_trace.start_attempt();
-            inference_trace_attempt.add_request_headers(&mut options.extra_headers);
-            inference_trace_attempt.record_started(&request);
+            let trace_attempt = trace_context.start_attempt();
+            trace_attempt.add_request_headers(&mut options.extra_headers);
+            trace_attempt.record_started(&request);
             let client = ApiResponsesClient::new(
                 transport,
                 client_setup.api_provider,
@@ -1684,7 +1682,7 @@ impl ModelClientSession {
                     let (stream, _) = map_response_stream(
                         stream,
                         request_session_telemetry,
-                        inference_trace_attempt,
+                        trace_attempt,
                         Arc::clone(&self.client.state.provider),
                     );
                     return Ok(stream);
@@ -1694,7 +1692,7 @@ impl ModelClientSession {
                 )) if status == StatusCode::UNAUTHORIZED => {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
-                    inference_trace_attempt.record_failed(
+                    trace_attempt.record_failed(
                         &unauthorized_transport,
                         response_debug_context.request_id.as_deref(),
                         /*output_items*/ &[],
@@ -1714,7 +1712,7 @@ impl ModelClientSession {
                     let response_debug_context =
                         extract_response_debug_context_from_api_error(&err);
                     let err = self.client.state.provider.map_api_error(err);
-                    inference_trace_attempt.record_failed(
+                    trace_attempt.record_failed(
                         &err,
                         response_debug_context.request_id.as_deref(),
                         /*output_items*/ &[],
@@ -1751,7 +1749,7 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
-        inference_trace: &InferenceTraceContext,
+        trace_context: StreamingTraceContext<'_>,
     ) -> Result<WebsocketStreamOutcome> {
         let auth_manager = self.client.state.provider.auth_manager();
 
@@ -1768,7 +1766,6 @@ impl ModelClientSession {
                 pending_retry,
             );
             let mut request = self.client.build_responses_request(
-                &client_setup.api_provider,
                 prompt,
                 model_info,
                 effort.clone(),
@@ -1832,18 +1829,18 @@ impl ModelClientSession {
 
             let (incremental_request, previous_response_id_from_untraced_warmup) =
                 self.prepare_websocket_request(&request);
-            let inference_trace_attempt = if warmup {
+            let trace_attempt = if warmup {
                 // Prewarm sends `generate=false`; it is connection setup, not a
                 // model inference attempt that should appear in rollout traces.
-                InferenceTraceAttempt::disabled()
+                StreamingTraceAttempt::disabled_inference()
             } else {
-                inference_trace.start_attempt()
+                trace_context.start_attempt()
             };
             if previous_response_id_from_untraced_warmup {
                 // The transport can reuse an untraced warmup response id and omit the
                 // already-sent input, but rollout replay needs the logical model-visible
                 // request rather than the compressed websocket delta.
-                inference_trace_attempt.record_started(&request);
+                trace_attempt.record_started(&request);
             }
 
             let (previous_response_id, mut incremental_items) = match incremental_request {
@@ -1877,7 +1874,7 @@ impl ModelClientSession {
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
             if !previous_response_id_from_untraced_warmup {
-                inference_trace_attempt.record_started(&ws_request);
+                trace_attempt.record_started(&ws_request);
             }
 
             let websocket_connection =
@@ -1903,7 +1900,7 @@ impl ModelClientSession {
             let stream_result = stream_result.map_err(|err| {
                 let response_debug_context = extract_response_debug_context_from_api_error(&err);
                 let err = self.client.state.provider.map_api_error(err);
-                inference_trace_attempt.record_failed(
+                trace_attempt.record_failed(
                     &err,
                     response_debug_context.request_id.as_deref(),
                     /*output_items*/ &[],
@@ -1913,7 +1910,7 @@ impl ModelClientSession {
             let (stream, last_request_rx) = map_response_stream(
                 stream_result,
                 request_session_telemetry,
-                inference_trace_attempt,
+                trace_attempt,
                 Arc::clone(&self.client.state.provider),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
@@ -1990,7 +1987,7 @@ impl ModelClientSession {
                 responses_metadata,
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
-                &disabled_trace,
+                StreamingTraceContext::Inference(&disabled_trace),
             )
             .await
         {
@@ -2034,6 +2031,66 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.stream_with_trace(
+            invocation_kind,
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            StreamingTraceContext::Inference(inference_trace),
+        )
+        .await
+    }
+
+    /// Streams compaction while recording the exact client-lowered request separately from
+    /// ordinary inference calls.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn stream_compaction(
+        &mut self,
+        invocation_kind: PromptInvocationKind,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        compaction_trace: &CompactionTraceContext,
+    ) -> Result<ResponseStream> {
+        debug_assert!(matches!(
+            invocation_kind,
+            PromptInvocationKind::LocalCompaction | PromptInvocationKind::RemoteCompaction
+        ));
+        self.stream_with_trace(
+            invocation_kind,
+            prompt,
+            model_info,
+            session_telemetry,
+            effort,
+            summary,
+            service_tier,
+            responses_metadata,
+            StreamingTraceContext::Compaction(compaction_trace),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn stream_with_trace(
+        &mut self,
+        invocation_kind: PromptInvocationKind,
+        prompt: &Prompt,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        effort: Option<ReasoningEffortConfig>,
+        summary: ReasoningSummaryConfig,
+        service_tier: Option<String>,
+        responses_metadata: &CodexResponsesMetadata,
+        trace_context: StreamingTraceContext<'_>,
+    ) -> Result<ResponseStream> {
         trace!(%invocation_kind, "starting model invocation");
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
@@ -2051,7 +2108,7 @@ impl ModelClientSession {
                             responses_metadata,
                             /*warmup*/ false,
                             request_trace,
-                            inference_trace,
+                            trace_context,
                         )
                         .await?
                     {
@@ -2070,7 +2127,7 @@ impl ModelClientSession {
                     summary,
                     service_tier,
                     responses_metadata,
-                    inference_trace,
+                    trace_context,
                 )
                 .await
             }
@@ -2152,7 +2209,7 @@ const STREAM_DROPPED_REASON: &str = "response stream dropped before provider ter
 fn map_response_stream(
     api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
-    inference_trace_attempt: InferenceTraceAttempt,
+    trace_attempt: StreamingTraceAttempt,
     provider: SharedModelProvider,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
@@ -2167,7 +2224,7 @@ fn map_response_stream(
         upstream_request_id,
         api_stream,
         session_telemetry,
-        inference_trace_attempt,
+        trace_attempt,
         provider,
     )
 }
@@ -2176,7 +2233,7 @@ fn map_response_events<S>(
     upstream_request_id: Option<String>,
     api_stream: S,
     session_telemetry: SessionTelemetry,
-    inference_trace_attempt: InferenceTraceAttempt,
+    trace_attempt: StreamingTraceAttempt,
     provider: SharedModelProvider,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
@@ -2204,7 +2261,7 @@ where
         loop {
             let event = tokio::select! {
                 _ = consumer_dropped.cancelled() => {
-                    inference_trace_attempt.record_cancelled(
+                    trace_attempt.record_cancelled(
                         STREAM_DROPPED_REASON,
                         upstream_request_id,
                         &items_added,
@@ -2224,7 +2281,7 @@ where
                         .await
                         .is_err()
                     {
-                        inference_trace_attempt.record_cancelled(
+                        trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
                             &items_added,
@@ -2241,7 +2298,7 @@ where
                     if let Some(usage) = &token_usage {
                         session_telemetry.sse_event_completed(usage, ttft_ms);
                     }
-                    inference_trace_attempt.record_completed(
+                    trace_attempt.record_completed(
                         &response_id,
                         upstream_request_id,
                         &token_usage,
@@ -2272,7 +2329,7 @@ where
                         );
                     }
                     if tx_event.send(Ok(event)).await.is_err() {
-                        inference_trace_attempt.record_cancelled(
+                        trace_attempt.record_cancelled(
                             STREAM_DROPPED_REASON,
                             upstream_request_id,
                             &items_added,
@@ -2289,11 +2346,7 @@ where
                         feedback_tags!(last_model_request_id = upstream_request_id);
                     }
                     let mapped = provider.map_api_error(err);
-                    inference_trace_attempt.record_failed(
-                        &mapped,
-                        upstream_request_id,
-                        &items_added,
-                    );
+                    trace_attempt.record_failed(&mapped, upstream_request_id, &items_added);
                     if !logged_error {
                         session_telemetry.see_event_completed_failed(&mapped);
                         logged_error = true;
@@ -2304,7 +2357,7 @@ where
                 }
             }
         }
-        inference_trace_attempt.record_failed(
+        trace_attempt.record_failed(
             "stream closed before response.completed",
             upstream_request_id,
             &items_added,

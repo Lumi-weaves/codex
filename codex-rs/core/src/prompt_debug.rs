@@ -6,6 +6,7 @@ use codex_exec_server::ExecServerRuntimePaths;
 use codex_extension_api::ExtensionRegistry;
 use codex_extension_api::UserInstructionsProvider;
 use codex_login::AuthManager;
+use codex_protocol::agent::AgentSelection;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
@@ -27,20 +28,23 @@ use crate::cockpit_operating_contract::descriptor as cockpit_contract_descriptor
 use crate::config::Config;
 use crate::context::CockpitOperatingContract;
 use crate::context::ContextualUserFragment;
+use crate::multi_agent_v2_capability::MultiAgentV2CapabilityProjection;
+use crate::prompt_capability_receipt::MultiAgentV2CapabilityReceipt;
+use crate::prompt_capability_receipt::inspect_multi_agent_v2_capability;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
+use crate::prompt_compiler::PromptCompiler;
 use crate::prompt_inheritance::PromptInheritanceProvenance;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::session::Session;
-use crate::session::turn::build_prompt;
 use crate::state_db_bridge::StateDbHandle;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 4;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 6;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -50,12 +54,14 @@ const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 4;
 pub struct PromptRequestReceipt {
     schema_version: u32,
     compiler_revision: String,
+    agent_selection: Option<AgentSelection>,
     invocation_kind: PromptInvocationKind,
     request_form: PromptRequestForm,
     provider: PromptRequestProvider,
     provenance: PromptReceiptProvenance,
     context_inheritance: PromptInheritanceProvenance,
     cockpit_contract: CockpitContractReceipt,
+    multi_agent_v2_capability: MultiAgentV2CapabilityReceipt,
     summary: PromptReceiptSummary,
     bounds: PromptReceiptBounds,
     request: ResponsesApiRequest,
@@ -78,12 +84,15 @@ pub enum PromptReceiptView {
 pub struct RenderedPromptRequestReceipt<'a> {
     schema_version: u32,
     compiler_revision: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_selection: Option<&'a AgentSelection>,
     invocation_kind: PromptInvocationKind,
     request_form: &'a PromptRequestForm,
     provider: &'a PromptRequestProvider,
     provenance: &'a PromptReceiptProvenance,
     context_inheritance: &'a PromptInheritanceProvenance,
     cockpit_contract: &'a CockpitContractReceipt,
+    multi_agent_v2_capability: &'a MultiAgentV2CapabilityReceipt,
     summary: &'a PromptReceiptSummary,
     bounds: &'a PromptReceiptBounds,
     redaction: PromptReceiptRedaction,
@@ -92,14 +101,16 @@ pub struct RenderedPromptRequestReceipt<'a> {
 }
 
 impl PromptRequestReceipt {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_lowered_request(
         invocation_kind: PromptInvocationKind,
+        agent_selection: Option<AgentSelection>,
         provider_id: String,
         provider_info: &codex_model_provider_info::ModelProviderInfo,
         use_responses_lite: bool,
         request: ResponsesApiRequest,
         context_inheritance: PromptInheritanceProvenance,
-        cockpit_contract_role: Option<CockpitContractRole>,
+        multi_agent_v2_projection: Option<&MultiAgentV2CapabilityProjection>,
     ) -> CodexResult<Self> {
         let lowering = if use_responses_lite {
             PromptRequestLowering::ResponsesLite
@@ -112,11 +123,17 @@ impl PromptRequestReceipt {
             PromptClientNormalization::NonOpenAiSanitized
         };
         let summary = build_receipt_summary(&request)?;
-        let cockpit_contract = CockpitContractReceipt::inspect(cockpit_contract_role, &request)?;
+        let cockpit_contract = CockpitContractReceipt::inspect(
+            multi_agent_v2_projection.and_then(|projection| projection.prompt_role),
+            &request,
+        )?;
+        let multi_agent_v2_capability =
+            inspect_multi_agent_v2_capability(multi_agent_v2_projection, &request)?;
 
         Ok(Self {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
             compiler_revision: context_inheritance.compiler_revision.clone(),
+            agent_selection,
             invocation_kind,
             request_form: PromptRequestForm::LogicalFull,
             provider: PromptRequestProvider {
@@ -134,6 +151,7 @@ impl PromptRequestReceipt {
             },
             context_inheritance,
             cockpit_contract,
+            multi_agent_v2_capability,
             summary,
             bounds: PromptReceiptBounds {
                 receipt_content_truncated: false,
@@ -149,12 +167,14 @@ impl PromptRequestReceipt {
         RenderedPromptRequestReceipt {
             schema_version: self.schema_version,
             compiler_revision: &self.compiler_revision,
+            agent_selection: self.agent_selection.as_ref(),
             invocation_kind: self.invocation_kind,
             request_form: &self.request_form,
             provider: &self.provider,
             provenance: &self.provenance,
             context_inheritance: &self.context_inheritance,
             cockpit_contract: &self.cockpit_contract,
+            multi_agent_v2_capability: &self.multi_agent_v2_capability,
             summary: &self.summary,
             bounds: &self.bounds,
             redaction: PromptReceiptRedaction {
@@ -493,12 +513,8 @@ async fn build_prompt_from_session(
         .await
         .for_prompt(&turn_context.model_info.input_modalities);
     let base_instructions = sess.get_base_instructions().await;
-    let prompt = build_prompt(
-        prompt_input,
-        step_context.tool_router.as_ref(),
-        turn_context.as_ref(),
-        base_instructions,
-    );
+    let prompt = PromptCompiler::for_turn(step_context.as_ref(), base_instructions)
+        .compile_prompt(prompt_input);
     Ok((turn_context, prompt))
 }
 
@@ -524,20 +540,18 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
             &responses_metadata,
         )
         .await?;
+    let multi_agent_v2_projection =
+        crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context.as_ref());
+    let agent_selection = sess.get_config().await.agent.clone();
     PromptRequestReceipt::from_lowered_request(
         PromptInvocationKind::Turn,
+        agent_selection,
         turn_context.config.model_provider_id.clone(),
         turn_context.provider.info(),
         turn_context.model_info.use_responses_lite,
         request,
         sess.prompt_context.provenance(),
-        (turn_context.multi_agent_version == codex_protocol::protocol::MultiAgentVersion::V2)
-            .then(|| {
-                crate::cockpit_operating_contract::role_for_session_source(
-                    &turn_context.session_source,
-                )
-            })
-            .flatten(),
+        Some(&multi_agent_v2_projection),
     )
 }
 

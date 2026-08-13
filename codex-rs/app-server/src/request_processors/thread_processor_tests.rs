@@ -1181,6 +1181,7 @@ mod thread_processor_behavior_tests {
             session_id: conversation_id.into(),
             id: conversation_id,
             timestamp: timestamp.clone(),
+            agent_selection: None,
             model_provider: None,
             ..SessionMeta::default()
         };
@@ -1249,6 +1250,7 @@ mod thread_processor_behavior_tests {
             thread_source: Some(codex_protocol::protocol::ThreadSource::Subagent),
             agent_nickname: Some("atlas".to_string()),
             agent_role: Some("explorer".to_string()),
+            agent_selection: None,
             model_provider: Some("test-provider".to_string()),
             ..SessionMeta::default()
         };
@@ -1292,6 +1294,7 @@ mod thread_processor_behavior_tests {
             id: conversation_id,
             forked_from_id: Some(forked_from_id),
             timestamp: timestamp.clone(),
+            agent_selection: None,
             model_provider: Some("test-provider".to_string()),
             ..SessionMeta::default()
         };

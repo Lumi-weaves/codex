@@ -1,4 +1,4 @@
-//! Reducer support for the remote compaction lifecycle.
+//! Reducer support for the compaction lifecycle.
 //!
 //! This module owns request/checkpoint bookkeeping. Conversation item reconciliation stays in
 //! `conversation` because it depends on the same normalization and reuse invariants as inference
@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 use anyhow::bail;
+use serde_json::Value;
 
 use super::TraceReducer;
 use crate::model::Compaction;
@@ -68,6 +69,7 @@ impl TraceReducer {
                 },
                 model: started.model,
                 provider_name: started.provider_name,
+                response_id: None,
                 raw_request_payload_id: started.request_payload.raw_payload_id,
                 raw_response_payload_id: None,
             },
@@ -77,7 +79,7 @@ impl TraceReducer {
 
     /// Completes an upstream compaction request attempt without modifying conversation history.
     ///
-    /// The request/response payloads are evidence for the remote call. The live
+    /// The request/response payloads are evidence for the model call. The live
     /// conversation changes only when a separate install event provides the checkpoint.
     pub(super) fn complete_compaction_request(
         &mut self,
@@ -88,6 +90,18 @@ impl TraceReducer {
         status: ExecutionStatus,
         response_payload: Option<RawPayloadRef>,
     ) -> Result<()> {
+        let response_id = response_payload
+            .as_ref()
+            .map(|payload| {
+                self.read_payload_json(payload).map(|value| {
+                    value
+                        .get("response_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+            })
+            .transpose()?
+            .flatten();
         let Some(request) = self
             .rollout
             .compaction_requests
@@ -106,6 +120,7 @@ impl TraceReducer {
         request.execution.ended_at_unix_ms = Some(wall_time_unix_ms);
         request.execution.ended_seq = Some(seq);
         request.execution.status = status;
+        request.response_id = response_id;
         request.raw_response_payload_id = response_payload.map(|payload| payload.raw_payload_id);
         Ok(())
     }
@@ -137,6 +152,7 @@ impl TraceReducer {
                 turn.thread_id
             );
         }
+        let checkpoint_facts = self.read_payload_json(&checkpoint_payload)?;
         let checkpoint = self.reduce_compaction_checkpoint(
             wall_time_unix_ms,
             &thread_id,
@@ -152,8 +168,14 @@ impl TraceReducer {
             .map(|request| request.compaction_request_id.clone())
             .collect();
 
-        self.pending_compaction_replacement_item_ids
-            .insert(thread_id.clone(), checkpoint.replacement_item_ids.clone());
+        self.pending_compaction_replacement_item_ids.insert(
+            thread_id.clone(),
+            super::PendingCompactionReplacement {
+                compaction_id: compaction_id.clone(),
+                replacement_item_ids: checkpoint.replacement_item_ids.clone(),
+            },
+        );
+        let continuity = checkpoint_facts.get("continuity");
         self.rollout.compactions.insert(
             compaction_id.clone(),
             Compaction {
@@ -165,10 +187,38 @@ impl TraceReducer {
                 request_ids,
                 input_item_ids: checkpoint.input_item_ids,
                 replacement_item_ids: checkpoint.replacement_item_ids,
+                continuation_inference_call_id: None,
+                window_number: checkpoint_facts
+                    .get("window_number")
+                    .and_then(Value::as_u64),
+                first_window_id: optional_string(&checkpoint_facts, "first_window_id"),
+                previous_window_id: optional_string(&checkpoint_facts, "previous_window_id"),
+                window_id: optional_string(&checkpoint_facts, "window_id"),
+                trigger: continuity.and_then(|value| optional_string(value, "trigger")),
+                reason: continuity.and_then(|value| optional_string(value, "reason")),
+                implementation: continuity
+                    .and_then(|value| optional_string(value, "implementation")),
+                phase: continuity.and_then(|value| optional_string(value, "phase")),
+                installed_model: continuity.and_then(|value| optional_string(value, "model")),
+                installed_provider: continuity.and_then(|value| optional_string(value, "provider")),
+                reference_context_installed: continuity.and_then(|value| {
+                    value
+                        .get("reference_context_installed")
+                        .and_then(Value::as_bool)
+                }),
+                world_state_baseline_installed: continuity.and_then(|value| {
+                    value
+                        .get("world_state_baseline_installed")
+                        .and_then(Value::as_bool)
+                }),
             },
         );
         Ok(())
     }
+}
+
+fn optional_string(value: &Value, key: &str) -> Option<String> {
+    value.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
 /// Raw compaction-request start fields after dispatch has stripped the event envelope.

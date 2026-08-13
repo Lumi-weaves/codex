@@ -14,7 +14,7 @@ pub(crate) const PROMPT_CENSUS_SCHEMA_VERSION: u32 = 2;
 /// Keep [`Self::ALL`] and [`invocation_definition`] exhaustive. Sampling call sites carry this
 /// value explicitly so a model invocation cannot silently disappear behind the generic Responses
 /// transport.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptInvocationKind {
     Turn,
@@ -95,10 +95,11 @@ impl fmt::Display for PromptInvocationKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptContributionKind {
     BaseInstructions,
+    CodexAgentBaseInstructions,
     WorldStateDeveloperContext,
     CockpitOperatingContract,
     WorldStateContextualUserContext,
@@ -114,8 +115,9 @@ pub enum PromptContributionKind {
 }
 
 impl PromptContributionKind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::BaseInstructions,
+        Self::CodexAgentBaseInstructions,
         Self::WorldStateDeveloperContext,
         Self::CockpitOperatingContract,
         Self::WorldStateContextualUserContext,
@@ -133,6 +135,7 @@ impl PromptContributionKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::BaseInstructions => "base_instructions",
+            Self::CodexAgentBaseInstructions => "codex_agent_base_instructions",
             Self::WorldStateDeveloperContext => "world_state_developer_context",
             Self::CockpitOperatingContract => "cockpit_operating_contract",
             Self::WorldStateContextualUserContext => "world_state_contextual_user_context",
@@ -149,7 +152,7 @@ impl PromptContributionKind {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CensusCompleteness {
     Static,
@@ -158,7 +161,7 @@ pub enum CensusCompleteness {
     ProviderOwnedUnknown,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptContextCensus {
     pub schema_version: u32,
@@ -167,7 +170,7 @@ pub struct PromptContextCensus {
     pub contributions: Vec<PromptContributionDefinition>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CensusScope {
     pub boundary: &'static str,
@@ -175,7 +178,7 @@ pub struct CensusScope {
     pub provider_processing: CensusCompleteness,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptInvocationDefinition {
     pub id: PromptInvocationKind,
@@ -191,7 +194,7 @@ pub struct PromptInvocationDefinition {
     pub completeness: CensusCompleteness,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptContributionDefinition {
     pub id: PromptContributionKind,
@@ -296,7 +299,7 @@ pub fn prompt_context_census() -> PromptContextCensus {
             .collect(),
         contributions: PromptContributionKind::ALL
             .into_iter()
-            .map(contribution_definition)
+            .map(crate::prompt_resources::prompt_contribution_definition)
             .collect(),
     }
 }
@@ -432,167 +435,6 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             lifecycle: "dedicated internal agent session with workspace resources",
             contributions: id.contributions(),
             completeness: CensusCompleteness::Incomplete,
-        },
-    }
-}
-
-fn contribution_definition(id: PromptContributionKind) -> PromptContributionDefinition {
-    match id {
-        PromptContributionKind::BaseInstructions => PromptContributionDefinition {
-            id,
-            owner: "session configuration and model catalog",
-            placement: "Responses instructions, or a leading developer item under Responses Lite",
-            provenance: "BaseInstructions provenance is retained in core but not yet emitted by request receipts",
-            availability: "effective value is runtime-enumerable in prompt-receipt",
-            hard_bound: "no independent uniform bound; participates in the model context window",
-            governance: "versioned model default or operator-authored override",
-            inheritance: "full forks may preserve it; fresh role layers may replace it",
-            sensitivity: "may contain private operator instructions",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::WorldStateDeveloperContext => PromptContributionDefinition {
-            id,
-            owner: "session::world_state and registered context contributors",
-            placement: "ordered developer messages before contextual user messages and live turn input",
-            provenance: "built-in fragment types plus extension contributors; item-level provenance is not preserved after assembly",
-            availability: "effective items are runtime-enumerable; contributor identity is incomplete",
-            hard_bound: "fragment-specific bounds only; no uniform aggregate bound",
-            governance: "mixed versioned contract, harness runtime facts, and extension-authored context",
-            inheritance: "recomputed from child session configuration and inherited state",
-            sensitivity: "may contain paths, policies, environment facts, and extension content",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::CockpitOperatingContract => PromptContributionDefinition {
-            id,
-            owner: "Lumi Prompt / Context Plane",
-            placement: "one marked standalone developer message before generic multi-agent hints",
-            provenance: "stable contract id, revision, role, hash, bounds, and governance are emitted by prompt-receipt",
-            availability: "runtime-enumerable with exact effective copy count in prompt-receipt; static manifest is available through debug prompt-contract",
-            hard_bound: "4096 UTF-8 bytes",
-            governance: "versioned built-in contract with prompt-plane conformance review",
-            inheritance: "root fresh receives root; full, bounded, and fresh role shadows receive exactly one shadow copy; non-owning internal agents receive zero",
-            sensitivity: "static public operating semantics; contains no runtime state or user content",
-            completeness: CensusCompleteness::RuntimeEnumerable,
-        },
-        PromptContributionKind::WorldStateContextualUserContext => PromptContributionDefinition {
-            id,
-            owner: "session::world_state contextual user fragments",
-            placement: "ordered contextual user messages after developer context and before live user input",
-            provenance: "built-in fragment types; item-level provenance is not preserved after assembly",
-            availability: "effective items are runtime-enumerable; contributor identity is incomplete",
-            hard_bound: "fragment-specific bounds only; no uniform aggregate bound",
-            governance: "mixed harness runtime facts and versioned context policy",
-            inheritance: "recomputed for each session and turn",
-            sensitivity: "may contain runtime state or prior task context",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::ConversationHistory => PromptContributionDefinition {
-            id,
-            owner: "context_manager::history",
-            placement: "after initial context according to recorded item order",
-            provenance: "rollout items retain roles and item kinds; contribution lineage is only partially explicit",
-            availability: "runtime-enumerable in the effective request",
-            hard_bound: "model context window plus truncation and compaction policy",
-            governance: "user, assistant, tool, and runtime-authored transcript",
-            inheritance: "full, last-N, fresh, or referenced history according to fork policy",
-            sensitivity: "may contain user content, tool output, secrets, and encrypted provider items",
-            completeness: CensusCompleteness::RuntimeEnumerable,
-        },
-        PromptContributionKind::InvocationInput => PromptContributionDefinition {
-            id,
-            owner: "logical invocation owner",
-            placement: "invocation-specific items appended to or assembled with history",
-            provenance: "call-site-owned prompt, trigger, transcript, or current user input",
-            availability: "runtime-enumerable in the effective request",
-            hard_bound: "invocation-specific; Guardian and compaction apply explicit trimming",
-            governance: "user-authored, versioned task prompt, or harness runtime fact",
-            inheritance: "invocation-specific and normally not inherited as a base contract",
-            sensitivity: "may contain user content and selected runtime evidence",
-            completeness: CensusCompleteness::RuntimeEnumerable,
-        },
-        PromptContributionKind::ToolSpecifications => PromptContributionDefinition {
-            id,
-            owner: "ToolRouter and dynamic tool registry",
-            placement: "Responses tools field, or leading AdditionalTools item under Responses Lite",
-            provenance: "effective schemas are visible; per-tool registration provenance is not yet emitted",
-            availability: "effective tool schemas are runtime-enumerable in prompt-receipt",
-            hard_bound: "no locally enforced uniform aggregate bound",
-            governance: "versioned built-ins, MCP/app/plugin tools, and runtime dynamic tools",
-            inheritance: "rebuilt for each step from session capabilities and runtime bindings",
-            sensitivity: "schemas may expose internal names, descriptions, and argument structure",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::OutputSchema => PromptContributionDefinition {
-            id,
-            owner: "turn context and invocation policy",
-            placement: "Responses text.format JSON schema control",
-            provenance: "caller-supplied final output schema plus invocation strictness policy",
-            availability: "runtime-enumerable in prompt-receipt",
-            hard_bound: "no independent local uniform bound",
-            governance: "caller-authored or versioned invocation contract",
-            inheritance: "turn-scoped",
-            sensitivity: "normally structural; descriptions may contain private contract text",
-            completeness: CensusCompleteness::RuntimeEnumerable,
-        },
-        PromptContributionKind::RealtimeSessionInstructions => PromptContributionDefinition {
-            id,
-            owner: "realtime_prompt and realtime session configuration",
-            placement: "realtime session instructions",
-            provenance: "config override, request override, or versioned backend prompt",
-            availability: "effective session config exists at runtime but has no prompt-plane receipt",
-            hard_bound: "provider contract; no client-wide bound recorded",
-            governance: "operator-authored override or versioned default",
-            inheritance: "realtime-call scoped",
-            sensitivity: "may contain private operator instructions and user identity hints",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::RealtimeConversationInput => PromptContributionDefinition {
-            id,
-            owner: "realtime_conversation input channels",
-            placement: "ordered live audio, text, and handoff events",
-            provenance: "channel and event kinds are known at runtime",
-            availability: "event-stream enumerable; no consolidated request receipt",
-            hard_bound: "bounded local queues; provider session history bound is not client-visible",
-            governance: "user input and harness handoff runtime facts",
-            inheritance: "realtime-call scoped",
-            sensitivity: "may contain voice, transcript, user content, and model handoffs",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::RawMemoryTraces => PromptContributionDefinition {
-            id,
-            owner: "memories stage-one selection",
-            placement: "typed raw_memories endpoint payload",
-            provenance: "selected rollout and memory records",
-            availability: "runtime payload is enumerable; no prompt-plane receipt or redaction summary",
-            hard_bound: "memory selection policy",
-            governance: "harness-selected historical runtime facts",
-            inheritance: "memory job scoped",
-            sensitivity: "may contain prior user, workspace, and rollout content",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::ProviderLowering => PromptContributionDefinition {
-            id,
-            owner: "ModelClient request builder",
-            placement: "normal Responses fields or Responses Lite developer input lowering",
-            provenance: "provider configuration and model capability flags",
-            availability: "logical full request is runtime-enumerable in prompt-receipt for ordinary turns",
-            hard_bound: "transport-specific normalization and compatibility rules",
-            governance: "versioned client implementation plus provider configuration",
-            inheritance: "resolved per model request",
-            sensitivity: "may rearrange sensitive contributions without changing their sensitivity",
-            completeness: CensusCompleteness::Incomplete,
-        },
-        PromptContributionKind::ProviderProcessing => PromptContributionDefinition {
-            id,
-            owner: "model provider",
-            placement: "after the client-emitted request boundary",
-            provenance: "not observable from the Codex client",
-            availability: "not runtime-enumerable by the client",
-            hard_bound: "provider-owned",
-            governance: "provider-owned unknown",
-            inheritance: "provider-owned unknown",
-            sensitivity: "inherits all request sensitivity",
-            completeness: CensusCompleteness::ProviderOwnedUnknown,
         },
     }
 }

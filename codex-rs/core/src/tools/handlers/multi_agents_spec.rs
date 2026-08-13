@@ -307,20 +307,42 @@ pub fn create_list_agents_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "path_prefix".to_string(),
         JsonSchema::string(Some(
-            "Task-path prefix filter without a trailing slash. Omit to list all live agents."
+            "Task-path prefix filter without a trailing slash. Omit to list all open agents."
                 .to_string(),
         )),
     )]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "list_agents".to_string(),
-        description:
-            "List live agents in the current root thread tree. Optionally filter by task-path prefix."
-                .to_string(),
+        description: "List open agents in the current root thread tree, including stopped agents that are available for follow-up or explicit close. Optionally filter by task-path prefix."
+            .to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(list_agents_output_schema()),
+    })
+}
+
+pub fn create_close_agent_tool_v2() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(
+            "Agent id or canonical task name to close (from spawn_agent).".to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_agent".to_string(),
+        description: "Explicitly close an open non-root agent and its open descendants when they are no longer needed. A stopped agent remains open and reusable until this action succeeds. Returns a closure receipt with the target's previous runtime status."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["target".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(close_agent_output_schema_v2()),
     })
 }
 
@@ -474,18 +496,46 @@ fn list_agents_output_schema() -> Value {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
                         },
+                        "agent_state": {
+                            "type": "string",
+                            "enum": ["running", "stopped"],
+                            "description": "Stable parent-facing activity state. Stopped agents remain open and reusable until explicitly closed."
+                        },
+                        "residency": {
+                            "type": "string",
+                            "enum": ["resident", "unloaded"],
+                            "description": "Whether the open agent thread is currently loaded. Unloaded agents remain available for follow-up or close."
+                        },
                         "agent_status": {
-                            "description": "Last known status of the agent.",
+                            "description": "Current loaded-thread runtime detail. Unloaded open agents report not_found while agent_state remains stopped.",
                             "allOf": [agent_status_output_schema()]
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": ["agent_name", "agent_state", "residency", "agent_status"],
                     "additionalProperties": false
                 },
-                "description": "Live agents visible in the current root thread tree."
+                "description": "Open agents visible in the current root thread tree."
             }
         },
         "required": ["agents"],
+        "additionalProperties": false
+    })
+}
+
+fn close_agent_output_schema_v2() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "closed": {
+                "type": "boolean",
+                "description": "True after explicit closure succeeded."
+            },
+            "previous_status": {
+                "description": "Runtime status observed before closure was requested.",
+                "allOf": [agent_status_output_schema()]
+            }
+        },
+        "required": ["closed", "previous_status"],
         "additionalProperties": false
     })
 }

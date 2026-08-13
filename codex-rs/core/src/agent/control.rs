@@ -1,3 +1,6 @@
+use crate::TurnInputRequest;
+use crate::TurnInputSubmission;
+use crate::TurnStartOptions;
 use crate::agent::AgentStatus;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
@@ -51,6 +54,7 @@ use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::watch;
 use tracing::warn;
+use uuid::Uuid;
 
 pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
@@ -73,6 +77,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) parent_turn_id: Option<String>,
+    pub(crate) root_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
 }
 
@@ -86,7 +91,44 @@ pub(crate) struct LiveAgent {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
+    pub(crate) agent_state: ListedAgentState,
+    pub(crate) residency: ListedAgentResidency,
     pub(crate) agent_status: AgentStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ListedAgentState {
+    Running,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ListedAgentResidency {
+    Resident,
+    Unloaded,
+}
+
+impl ListedAgent {
+    fn resident(agent_name: String, status: AgentStatus) -> Self {
+        let agent_status = status_without_payload(status);
+        Self {
+            agent_name,
+            agent_state: listed_agent_state(&agent_status),
+            residency: ListedAgentResidency::Resident,
+            agent_status,
+        }
+    }
+
+    fn unloaded(agent_name: String) -> Self {
+        Self {
+            agent_name,
+            agent_state: ListedAgentState::Stopped,
+            residency: ListedAgentResidency::Unloaded,
+            agent_status: AgentStatus::NotFound,
+        }
+    }
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -169,27 +211,35 @@ impl AgentControl {
         agent_id: ThreadId,
         input: Vec<UserInput>,
         parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
-        self.ensure_execution_capacity_for_turn_start(agent_id, /*starts_turn*/ true)
-            .await?;
-        self.send_input_after_capacity_check(agent_id, &state, input, parent_turn_id)
+        let thread = state.get_thread(agent_id).await?;
+        let result = match thread
+            .start_or_steer_turn(
+                TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+                    parent_turn_id,
+                    root_turn_id,
+                    ..Default::default()
+                }),
+            )
             .await
-    }
-
-    async fn send_input_after_capacity_check(
-        &self,
-        agent_id: ThreadId,
-        state: &Arc<ThreadManagerState>,
-        input: Vec<UserInput>,
-        parent_turn_id: Option<String>,
-    ) -> CodexResult<String> {
-        self.handle_thread_request_result(
-            agent_id,
-            state,
-            state.send_op(agent_id, input.into(), parent_turn_id).await,
-        )
-        .await
+        {
+            Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
+            Ok(TurnInputSubmission::Steered { .. }) => {
+                // MAv1 exposes an opaque `submission_id` to the model. The legacy
+                // `Op::UserInput` path returned a fresh ID for every steer, while the
+                // turn-input API returns the active turn ID. Keep the tool-visible ID
+                // unique without adding a submission receipt back to Core.
+                Ok(Uuid::now_v7().to_string())
+            }
+            Ok(TurnInputSubmission::NotSubmitted { reason }) => Err(CodexErr::InvalidRequest(
+                format!("turn input was not submitted: {reason:?}"),
+            )),
+            Err(err) => Err(err),
+        };
+        self.handle_thread_request_result(agent_id, &state, result)
+            .await
     }
 
     pub(crate) async fn send_inter_agent_communication(
@@ -198,16 +248,21 @@ impl AgentControl {
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
-        self.ensure_execution_capacity_for_turn_start(agent_id, communication.trigger_turn)
-            .await?;
+        if communication.trigger_turn {
+            let thread = state.get_thread(agent_id).await?;
+            self.ensure_execution_capacity_for_turn_start(&thread)
+                .await?;
+        }
         self.send_inter_agent_communication_after_capacity_check(
             agent_id,
             &state,
             communication,
             agent_communication_context,
             parent_turn_id,
+            root_turn_id,
         )
         .await
     }
@@ -219,6 +274,7 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
     ) -> CodexResult<String> {
         self.submit_inter_agent_communication(
             agent_id,
@@ -226,6 +282,7 @@ impl AgentControl {
             communication,
             context,
             parent_turn_id,
+            root_turn_id,
         )
         .await
     }
@@ -237,10 +294,12 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         parent_turn_id: Option<String>,
+        root_turn_id: Option<String>,
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
+        let root_turn_id = root_turn_id.filter(|_| communication.trigger_turn);
         let result = self
             .handle_thread_request_result(
                 agent_id,
@@ -250,6 +309,7 @@ impl AgentControl {
                         agent_id,
                         Op::InterAgentCommunication { communication },
                         parent_turn_id,
+                        root_turn_id,
                     )
                     .await,
             )
@@ -274,7 +334,12 @@ impl AgentControl {
             agent_id,
             &state,
             state
-                .send_op(agent_id, Op::Interrupt, /*parent_turn_id*/ None)
+                .send_op(
+                    agent_id,
+                    Op::Interrupt,
+                    /*parent_turn_id*/ None,
+                    /*root_turn_id*/ None,
+                )
                 .await,
         )
         .await
@@ -442,10 +507,10 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
-            agents.push(ListedAgent {
-                agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
-            });
+            agents.push(ListedAgent::resident(
+                root_path.to_string(),
+                root_thread.agent_status().await,
+            ));
         }
 
         for metadata in live_agents {
@@ -459,18 +524,26 @@ impl AgentControl {
                 continue;
             }
 
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
-            };
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
-            agents.push(ListedAgent {
-                agent_name,
-                agent_status: thread.agent_status().await,
-            });
+            match state.get_thread(thread_id).await {
+                Ok(thread) => agents.push(ListedAgent::resident(
+                    agent_name,
+                    thread.agent_status().await,
+                )),
+                Err(err)
+                    if matches!(
+                        err.details(),
+                        CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
+                    ) =>
+                {
+                    agents.push(ListedAgent::unloaded(agent_name));
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         Ok(agents)
@@ -556,6 +629,7 @@ impl AgentControl {
                         communication,
                         context,
                         /*parent_turn_id*/ None,
+                        /*root_turn_id*/ None,
                     )
                     .await;
                 return;
@@ -777,6 +851,27 @@ impl AgentControl {
         }
 
         Ok(descendants)
+    }
+}
+
+fn listed_agent_state(status: &AgentStatus) -> ListedAgentState {
+    match status {
+        AgentStatus::PendingInit | AgentStatus::Running => ListedAgentState::Running,
+        AgentStatus::Interrupted
+        | AgentStatus::Completed(_)
+        | AgentStatus::Errored(_)
+        | AgentStatus::Shutdown
+        | AgentStatus::NotFound => ListedAgentState::Stopped,
+    }
+}
+
+fn status_without_payload(status: AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Completed(_) => AgentStatus::Completed(None),
+        AgentStatus::Errored(_) => {
+            AgentStatus::Errored("details available from the agent checkpoint".to_string())
+        }
+        status => status,
     }
 }
 

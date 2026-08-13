@@ -103,7 +103,7 @@ struct TraceReducer {
     /// history, not against the pre-compaction request. That keeps repeated prefix/context messages
     /// as fresh post-compaction conversation items while still reusing the summary/replacement
     /// items that actually became live history.
-    pending_compaction_replacement_item_ids: BTreeMap<String, Vec<String>>,
+    pending_compaction_replacement_item_ids: BTreeMap<String, PendingCompactionReplacement>,
     /// Runtime cell ids indexed by thread-local code-mode handle.
     ///
     /// Reduced `CodeCellId`s are based on the model-visible `exec` call id
@@ -133,6 +133,12 @@ struct TraceReducer {
     /// as a `ConversationItem`, so the reducer keeps the delivery edge pending until it can point
     /// at the exact model-visible item instead of a coarse thread.
     pending_agent_interaction_edges: Vec<PendingAgentInteractionEdge>,
+}
+
+#[derive(Clone)]
+struct PendingCompactionReplacement {
+    compaction_id: String,
+    replacement_item_ids: Vec<String>,
 }
 
 impl TraceReducer {

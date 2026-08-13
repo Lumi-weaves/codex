@@ -26,6 +26,7 @@ pub use bundle::REDUCED_STATE_FILE_NAME;
 pub use code_cell::CodeCellTraceContext;
 /// Raw checkpoint payload for a remote compaction install event.
 pub use compaction::CompactionCheckpointTracePayload;
+pub use compaction::CompactionContinuityTracePayload;
 /// No-op-capable handle for recording remote-compaction requests.
 pub use compaction::CompactionTraceAttempt;
 /// Shared recorder context for a compaction checkpoint.

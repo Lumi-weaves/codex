@@ -6,6 +6,7 @@ use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::agent::AgentSelection;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -85,6 +86,8 @@ pub struct CreateThreadParams {
     pub thread_source: Option<ThreadSource>,
     /// Effective originator used for this thread's Responses requests and analytics events.
     pub originator: String,
+    /// Optional versioned root Agent identity selected for this thread.
+    pub agent_selection: Option<AgentSelection>,
     /// Base instructions persisted in session metadata.
     pub base_instructions: BaseInstructions,
     /// Prompt compiler revision pinned for the lifetime of the thread.
@@ -200,6 +203,15 @@ pub struct PrepareForkParams {
     pub thread_id: ThreadId,
     /// Requested inclusive or exclusive fork boundary.
     pub boundary: ForkBoundary,
+}
+
+/// Parameters for reverting a paginated thread's durable history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RevertThreadParams {
+    /// Stable logical thread to revert.
+    pub thread_id: ThreadId,
+    /// First turn excluded from the retained history.
+    pub before_turn_id: String,
 }
 
 /// Frozen source history and model context for a reference-backed fork.

@@ -36,6 +36,20 @@ fn resume_parses_prompt_after_global_flags() {
 }
 
 #[test]
+fn resume_accepts_typed_agent_after_subcommand() {
+    let cli = Cli::parse_from([
+        "codex-exec",
+        "resume",
+        "--last",
+        "--agent",
+        "codex@1",
+        "continue",
+    ]);
+
+    assert_eq!(cli.agent.as_deref(), Some("codex@1"));
+}
+
+#[test]
 fn resume_accepts_output_flags_after_subcommand() {
     const PROMPT: &str = "echo resume-with-output-file";
     let cli = Cli::parse_from([

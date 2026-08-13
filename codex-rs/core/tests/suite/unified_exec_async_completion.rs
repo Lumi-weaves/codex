@@ -4,16 +4,22 @@
 
 use anyhow::Result;
 use codex_features::Feature;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::TurnItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_message_item_added;
+use core_test_support::responses::ev_output_text_delta;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_sequence;
@@ -34,6 +40,7 @@ use tokio::time::timeout;
 use wiremock::ResponseTemplate;
 
 const COMPLETION_MARKER: &str = "<unified_exec_completion>";
+const NO_FINISH_MARKER: &str = "no-finish";
 const OUTPUT_AVAILABLE_MARKER: &str = "<unified_exec_output_available>";
 
 fn completion_feature_config(config: &mut codex_core::config::Config) {
@@ -61,35 +68,96 @@ async fn submit_turn(test: &TestCodex, prompt: &str) -> Result<()> {
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.config.cwd.as_path());
     test.codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
                 text: prompt.into(),
                 text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
-                approval_policy: Some(AskForApproval::Never),
-                sandbox_policy: Some(sandbox_policy),
-                permission_profile,
-                collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
-                    mode: codex_protocol::config_types::ModeKind::Default,
-                    settings: codex_protocol::config_types::Settings {
-                        model: session_model,
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            },
-        })
+            }])
+            .with_thread_settings(
+                codex_protocol::protocol::ThreadSettingsOverrides {
+                    approval_policy: Some(AskForApproval::Never),
+                    sandbox_policy: Some(sandbox_policy),
+                    permission_profile,
+                    collaboration_mode: Some(codex_protocol::config_types::CollaborationMode {
+                        mode: codex_protocol::config_types::ModeKind::Default,
+                        settings: codex_protocol::config_types::Settings {
+                            model: session_model,
+                            reasoning_effort: None,
+                            developer_instructions: None,
+                        },
+                    }),
+                    ..Default::default()
+                },
+            ),
+        )
         .await?;
     Ok(())
 }
 
 fn request_contains_completion_marker(body: &Value) -> bool {
     request_contains_marker(body, COMPLETION_MARKER)
+}
+
+fn no_finish_message_count(body: &Value) -> usize {
+    body.get("input")
+        .and_then(Value::as_array)
+        .map(|input| {
+            input
+                .iter()
+                .filter(|item| {
+                    item.get("role").and_then(Value::as_str) == Some("developer")
+                        && item
+                            .get("content")
+                            .and_then(Value::as_array)
+                            .is_some_and(|content| {
+                                content.as_slice()
+                                    == [json!({
+                                        "text": NO_FINISH_MARKER,
+                                        "type": "input_text",
+                                    })]
+                            })
+                })
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn request_contains_assistant_text(body: &Value, text: &str) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                item.get("role").and_then(Value::as_str) == Some("assistant")
+                    && item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| {
+                            content
+                                .iter()
+                                .any(|part| part.get("text").and_then(Value::as_str) == Some(text))
+                        })
+            })
+        })
+}
+
+fn request_contains_combined_assistant_text(body: &Value, text: &str) -> bool {
+    body.get("input")
+        .and_then(Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                if item.get("role").and_then(Value::as_str) != Some("assistant") {
+                    return false;
+                }
+                let combined = item
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<String>();
+                combined == text
+            })
+        })
 }
 
 fn request_contains_marker(body: &Value, marker: &str) -> bool {
@@ -154,6 +222,50 @@ async fn wait_for_raw_response_completed(test: &TestCodex, response_id: &str) {
     .await;
 }
 
+async fn wait_for_merged_commentary(
+    test: &TestCodex,
+    response_id: &str,
+    expected_item_id: &str,
+    expected_message: &str,
+) {
+    let mut completed_count = 0;
+    loop {
+        let event = test
+            .codex
+            .next_event()
+            .await
+            .expect("event stream should remain open");
+        match event.msg {
+            EventMsg::AgentMessageContentDelta(_) => {
+                panic!("constrained assistant text must be held until its phase is final")
+            }
+            EventMsg::ItemCompleted(event) => {
+                if let TurnItem::AgentMessage(item) = event.item {
+                    let combined = item
+                        .content
+                        .iter()
+                        .map(|content| match content {
+                            AgentMessageContent::Text { text } => text.as_str(),
+                        })
+                        .collect::<String>();
+                    assert_eq!(item.id, expected_item_id);
+                    assert_eq!(item.phase, Some(MessagePhase::Commentary));
+                    assert_eq!(combined, expected_message);
+                    completed_count += 1;
+                }
+            }
+            EventMsg::RawResponseCompleted(event) if event.response_id == response_id => {
+                assert_eq!(
+                    completed_count, 1,
+                    "deliver exactly one merged commentary item"
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
 async fn wait_for_response_before_exec_end(test: &TestCodex, response_id: &str, call_id: &str) {
     loop {
         let event = test
@@ -193,6 +305,12 @@ async fn assert_no_turn_complete_for(test: &TestCodex, duration: Duration) {
 
 fn ev_assistant_message_with_phase(id: &str, text: &str, phase: &str) -> Value {
     let mut event = ev_assistant_message(id, text);
+    event["item"]["phase"] = Value::String(phase.to_string());
+    event
+}
+
+fn ev_assistant_message_added_with_phase(id: &str, phase: &str) -> Value {
+    let mut event = ev_message_item_added(id, "");
     event["item"]["phase"] = Value::String(phase.to_string());
     event
 }
@@ -296,6 +414,10 @@ async fn commentary_only_response_waits_for_awaited_terminal_and_resumes_same_tu
         request_contains_completion_marker(&third),
         "the resumed turn must sample the completion fragment"
     );
+    assert!(
+        request_contains_assistant_text(&third, "I will wait for the background process."),
+        "explicit commentary must remain in history while no-finish is active"
+    );
     let third_text = serde_json::to_string(&third)?;
     assert!(
         third_text.contains(&format!("process_id\\\":{process_id}")),
@@ -393,9 +515,19 @@ async fn user_input_wakes_awaited_turn_before_terminal_completion() -> Result<()
         !request_contains_completion_marker(&user_wake_request),
         "the user wake must happen before terminal completion"
     );
+    assert_eq!(
+        no_finish_message_count(&user_wake_request),
+        1,
+        "the model must be told not to finish while the terminal remains live"
+    );
     assert!(
         request_contains_completion_marker(&completion_request),
         "the later poll must still consume the terminal completion"
+    );
+    assert_eq!(
+        no_finish_message_count(&completion_request),
+        0,
+        "the constraint must disappear after the terminal closes"
     );
     Ok(())
 }
@@ -423,6 +555,14 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
         ]),
         sse(vec![
             ev_response_created("resp-2"),
+            ev_assistant_message_with_phase(
+                "msg-commentary",
+                "I am still waiting for the resource.",
+                "commentary",
+            ),
+            // The completed phase is authoritative even if the added item was mislabeled.
+            ev_assistant_message_added_with_phase("msg-1", "commentary"),
+            ev_output_text_delta("This final is premature."),
             ev_assistant_message_with_phase("msg-1", "This final is premature.", "final_answer"),
             ev_completed("resp-2"),
         ]),
@@ -440,7 +580,13 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
     submit_turn(&test, "start the command and do not finish early").await?;
 
     wait_for_exec_command_begin(&test, call_id).await;
-    wait_for_raw_response_completed(&test, "resp-2").await;
+    wait_for_merged_commentary(
+        &test,
+        "resp-2",
+        "msg-commentary",
+        "I am still waiting for the resource.\n\nThis final is premature.",
+    )
+    .await;
     assert_no_turn_complete_for(&test, Duration::from_millis(500)).await;
     wait_for_exec_command_end(&test, call_id).await;
     let completed = wait_for_turn_complete(&test).await;
@@ -449,7 +595,25 @@ async fn final_answer_does_not_complete_turn_while_terminal_is_awaited() -> Resu
         completed.last_agent_message.as_deref(),
         Some("The awaited work is now handled.")
     );
-    assert_eq!(response_mock.requests().len(), 3);
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        no_finish_message_count(&requests[1].body_json()),
+        1,
+        "the premature final-answer request must carry the active-resource constraint"
+    );
+    assert_eq!(
+        no_finish_message_count(&requests[2].body_json()),
+        0,
+        "the completion request must not retain the transient constraint"
+    );
+    assert!(
+        request_contains_combined_assistant_text(
+            &requests[2].body_json(),
+            "I am still waiting for the resource.\n\nThis final is premature."
+        ),
+        "useful commentary and final-answer text must survive as one commentary history item"
+    );
     Ok(())
 }
 
@@ -654,7 +818,7 @@ async fn interactive_exit_during_attention_debounce_emits_completion_only() -> R
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<()> {
+async fn clean_background_terminals_allows_final_after_downgraded_finish() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX-only command fixture");
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -679,15 +843,24 @@ async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<
             ev_assistant_message("msg-1", "done"),
             ev_completed("resp-2"),
         ]),
+        sse(vec![
+            ev_response_created("resp-3"),
+            ev_assistant_message_with_phase(
+                "msg-2",
+                "The cleaned-up work is now closed.",
+                "final_answer",
+            ),
+            ev_completed("resp-3"),
+        ]),
     ];
     let response_mock = mount_sse_sequence(&server, responses).await;
     submit_turn(&test, "start the long command").await?;
 
     wait_for_exec_command_begin(&test, call_id).await;
-    wait_for_raw_response_completed(&test, "resp-2").await;
+    wait_for_merged_commentary(&test, "resp-2", "msg-1", "done").await;
     assert_no_turn_complete_for(&test, Duration::from_millis(500)).await;
-    // Explicitly clean up all background terminals (feature enabled): the
-    // cleanup must wake the parked task without creating another model poll.
+    // Explicitly clean up all background terminals (feature enabled). The
+    // downgraded finish leaves an obligation to sample an accepted final after closure.
     test.codex
         .submit(Op::CleanBackgroundTerminals)
         .await
@@ -695,7 +868,11 @@ async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<
     // The watcher still emits the terminal end item event for the terminated
     // process (existing behavior), then the original turn completes.
     wait_for_exec_command_end(&test, call_id).await;
-    wait_for_turn_complete(&test).await;
+    let completed = wait_for_turn_complete(&test).await;
+    assert_eq!(
+        completed.last_agent_message.as_deref(),
+        Some("The cleaned-up work is now closed.")
+    );
     assert!(matches!(
         test.codex.agent_status().await,
         AgentStatus::Completed(_)
@@ -703,14 +880,16 @@ async fn clean_background_terminals_does_not_wake_a_completion_turn() -> Result<
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     let requests = response_mock.requests();
-    assert_eq!(
-        requests.len(),
-        2,
-        "cleanup must not wake an automatic completion turn"
-    );
+    assert_eq!(requests.len(), 3, "cleanup permits one accepted final poll");
     assert!(
         !request_contains_completion_marker(&requests[1].body_json()),
         "no completion fragment after cleanup"
+    );
+    assert_eq!(no_finish_message_count(&requests[1].body_json()), 1);
+    assert_eq!(no_finish_message_count(&requests[2].body_json()), 0);
+    assert!(
+        request_contains_assistant_text(&requests[2].body_json(), "done"),
+        "the downgraded untagged answer must survive as commentary history"
     );
     Ok(())
 }
@@ -753,6 +932,11 @@ async fn synchronous_exit_does_not_start_an_extra_turn() -> Result<()> {
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2, "no extra turn for a synchronous exit");
+    assert_eq!(
+        no_finish_message_count(&requests[1].body_json()),
+        0,
+        "a synchronously closed terminal must not prohibit finishing"
+    );
     assert!(
         !request_contains_completion_marker(&requests[1].body_json()),
         "no completion fragment when the exit was returned synchronously"

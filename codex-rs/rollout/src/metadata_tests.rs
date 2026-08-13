@@ -48,6 +48,7 @@ async fn extract_metadata_from_rollout_uses_session_meta() {
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_selection: None,
         model_provider: Some("openai".to_string()),
         base_instructions: None,
         dynamic_tools: None,
@@ -148,6 +149,7 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_selection: None,
         model_provider: Some("openai".to_string()),
         base_instructions: None,
         dynamic_tools: None,
@@ -209,6 +211,7 @@ fn builder_from_items_falls_back_to_filename() {
         .path()
         .join(format!("rollout-2026-01-27T12-34-56-{uuid}.jsonl"));
     let items = vec![RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: "noop".to_string(),
         replacement_history: None,
         window_number: None,
@@ -486,6 +489,7 @@ fn write_rollout_in_sessions_with_cwd(
         agent_path: None,
         agent_nickname: None,
         agent_role: None,
+        agent_selection: None,
         model_provider: Some("test-provider".to_string()),
         base_instructions: None,
         dynamic_tools: None,

@@ -13,10 +13,10 @@ use tracing::warn;
 
 use crate::client::ModelClientSession;
 use crate::guardian::routes_approval_to_guardian;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::session::Session;
-use crate::session::turn::build_prompt;
 use codex_otel::STARTUP_PREWARM_AGE_AT_FIRST_TURN_METRIC;
 use codex_otel::STARTUP_PREWARM_DURATION_METRIC;
 use codex_otel::SessionTelemetry;
@@ -283,22 +283,20 @@ async fn schedule_startup_prewarm_inner(
             &startup_cancellation_token,
         )
         .await?;
-    let startup_router = Arc::clone(&step_context.tool_router);
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_tools",
         built_tools_started_at.elapsed(),
         /*status*/ None,
     );
     let build_prompt_started_at = Instant::now();
-    let startup_prompt = build_prompt(
-        Vec::new(),
-        startup_router.as_ref(),
-        startup_turn_context.as_ref(),
+    let prompt_compiler = PromptCompiler::for_startup_prewarm(
+        step_context.as_ref(),
         BaseInstructions {
             text: base_instructions,
             provenance: None,
         },
     );
+    let startup_prompt = prompt_compiler.compile_prompt(Vec::new());
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_prompt",
         build_prompt_started_at.elapsed(),

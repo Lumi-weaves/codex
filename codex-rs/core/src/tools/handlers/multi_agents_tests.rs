@@ -14,6 +14,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -34,6 +35,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
+use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -46,12 +48,14 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -60,6 +64,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
@@ -102,6 +107,27 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[UserInput]) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event stream should stay open");
+            if let EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::UserMessage(item),
+                ..
+            }) = event.msg
+            {
+                assert_eq!(item.content, expected);
+                return;
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for recorded user input");
 }
 
 fn thread_manager() -> ThreadManager {
@@ -184,7 +210,15 @@ struct ListAgentsResult {
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    agent_state: String,
+    residency: String,
     agent_status: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloseAgentResultV2 {
+    closed: bool,
+    previous_status: AgentStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1486,8 +1520,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1508,8 +1542,44 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
-    assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert_eq!(worker.agent_state, "stopped");
+    assert_eq!(worker.residency, "resident");
+    assert_eq!(worker.agent_status, json!({"completed": null}));
     assert_eq!(success, Some(true));
+
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::Error(ErrorEvent {
+                message: "boom".to_string(),
+                codex_error_info: None,
+            }),
+        )
+        .await;
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after an agent error");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let worker = result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/worker")
+        .expect("errored worker agent should remain listed");
+    assert_eq!(worker.agent_state, "stopped");
+    assert_eq!(worker.residency, "resident");
+    assert_eq!(
+        worker.agent_status,
+        json!({"errored": "details available from the agent checkpoint"})
+    );
 }
 
 #[tokio::test]
@@ -1597,7 +1667,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_list_agents_omits_closed_agents() {
+async fn multi_agent_v2_close_agent_omits_closed_agents() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1632,12 +1702,31 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
-    session
-        .services
-        .agent_control
-        .close_agent(agent_id)
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
         .await
         .expect("close_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: CloseAgentResultV2 =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert!(result.closed);
+    assert!(matches!(
+        result.previous_status,
+        AgentStatus::PendingInit | AgentStatus::Running
+    ));
+    assert_eq!(success, Some(true));
+    assert!(
+        session
+            .services
+            .agent_control
+            .get_agent_metadata(agent_id)
+            .is_none()
+    );
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
@@ -1699,6 +1788,12 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
         .expect("worker metadata should exist")
         .agent_path
         .expect("worker path should exist");
+    let mut status_rx = session
+        .services
+        .agent_control
+        .subscribe_status(agent_id)
+        .await
+        .expect("worker status should be observable");
     let interrupt_output = InterruptAgentHandler
         .handle(invocation(
             session.clone(),
@@ -1709,6 +1804,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
         .await
         .expect("interrupt_agent should succeed");
     let _ = expect_text_output(interrupt_output);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(*status_rx.borrow(), AgentStatus::Interrupted) {
+                break;
+            }
+            status_rx
+                .changed()
+                .await
+                .expect("worker status stream should stay open");
+        }
+    })
+    .await
+    .expect("worker should become interrupted");
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
@@ -1726,6 +1834,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     assert_eq!(result.agents.len(), 2);
     assert_eq!(result.agents[0].agent_name, "/root");
     assert_eq!(result.agents[1].agent_name, agent_path.as_str());
+    assert_eq!(result.agents[1].agent_state, "stopped");
+    assert_eq!(result.agents[1].residency, "resident");
 }
 
 #[tokio::test]
@@ -1920,8 +2030,8 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
 
     FollowupTaskHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
@@ -1944,6 +2054,39 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     }));
 
     let second_turn = thread.session.new_default_turn().await;
+    thread
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: second_turn.sub_id.clone(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        )
+        .await;
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after follow-up starts");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let worker = result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/worker")
+        .expect("followed-up worker should remain listed");
+    assert_eq!(worker.agent_state, "running");
+    assert_eq!(worker.residency, "resident");
+
     thread
         .session
         .send_event(
@@ -2582,9 +2725,16 @@ async fn send_input_interrupts_before_prompt() {
         .iter()
         .filter_map(|(id, op)| (*id == agent_id).then_some(op))
         .collect();
-    assert_eq!(ops_for_agent.len(), 2);
+    assert_eq!(ops_for_agent.len(), 1);
     assert!(matches!(ops_for_agent[0], Op::Interrupt));
-    assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[UserInput::Text {
+            text: "hi".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2621,31 +2771,20 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    let expected_items = vec![
-        UserInput::Mention {
-            name: "drive".to_string(),
-            path: "app://google_drive".to_string(),
-        },
-        UserInput::Text {
-            text: "read the folder".to_string(),
-            text_elements: Vec::new(),
-        },
-    ];
-    assert!(manager.captured_ops().iter().any(|(id, op)| {
-        *id == agent_id
-            && matches!(
-                op,
-                Op::UserInput {
-                    items,
-                    final_output_json_schema: None,
-                    responsesapi_client_metadata: None,
-                    additional_context,
-                    thread_settings,
-                } if items == &expected_items
-                    && additional_context.is_empty()
-                    && thread_settings == &Default::default()
-            )
-    }));
+    wait_for_recorded_user_input(
+        thread.thread.as_ref(),
+        &[
+            UserInput::Mention {
+                name: "drive".to_string(),
+                path: "app://google_drive".to_string(),
+            },
+            UserInput::Text {
+                text: "read the folder".to_string(),
+                text_elements: Vec::new(),
+            },
+        ],
+    )
+    .await;
 
     let _ = thread
         .thread
@@ -2741,15 +2880,18 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let thread = manager
         .resume_thread_with_history(
             config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "materialized".to_string(),
-                }],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            })]),
+            InitialHistory::Forked(vec![RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "materialized".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )]),
             AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
@@ -2973,6 +3115,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3477,6 +3620,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3553,6 +3697,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3655,6 +3800,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3746,6 +3892,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
                 /*trigger_turn*/ false,
             ),
             /*parent_turn_id*/ None,
+            /*root_turn_id*/ None,
         )
         .await;
 
@@ -3977,6 +4124,58 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
         ))
         .await
         .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    assert_eq!(result.agents.len(), 2);
+    assert_eq!(result.agents[0].agent_name, "/root");
+    assert_eq!(result.agents[1].agent_name, "/root/worker");
+    assert_eq!(result.agents[1].agent_state, "stopped");
+    assert_eq!(result.agents[1].residency, "unloaded");
+    assert_eq!(result.agents[1].agent_status, json!("not_found"));
+
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("close_agent should accept unloaded v2 task names");
+    let (content, success) = expect_text_output(output);
+    let result: CloseAgentResultV2 =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert!(result.closed);
+    assert_eq!(result.previous_status, AgentStatus::NotFound);
+    assert_eq!(success, Some(true));
+
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load after close");
+    assert_eq!(open_children, Vec::<ThreadId>::new());
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed children should load after close");
+    assert_eq!(closed_children, vec![agent_id]);
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after close");
     let (content, _) = expect_text_output(output);
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");

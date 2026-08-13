@@ -45,6 +45,7 @@ use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::PLAINTEXT_MULTI_AGENT_V2_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -606,8 +607,7 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
             turn_context.config.agent_max_depth,
         ),
         MultiAgentVersion::V2 => {
-            turn_context.session_source.get_agent_path().is_none()
-                || turn_context.model_info.multi_agent_version == Some(MultiAgentVersion::V2)
+            crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context).tools_included
         }
     }
 }
@@ -1134,66 +1134,69 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
     let turn_context = context.turn_context;
     if collab_tools_enabled(turn_context) {
         if multi_agent_v2_enabled(turn_context) {
+            let capability_projection =
+                crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context);
             let exposure = if turn_context.config.multi_agent_v2.non_code_mode_only {
                 ToolExposure::DirectModelOnly
             } else {
                 ToolExposure::Direct
             };
-            let tool_namespace = namespace_tools_enabled(turn_context)
-                .then_some(turn_context.config.multi_agent_v2.tool_namespace.as_deref())
-                .flatten();
+            let tool_namespace = capability_projection.tool_namespace.as_deref();
             // The built-in collaboration namespace has a server-reserved encrypted schema. The
             // explicit Lumi namespace is the compatibility route for non-OpenAI child providers.
-            let plaintext_spawn_message =
-                tool_namespace == Some(PLAINTEXT_MULTI_AGENT_V2_NAMESPACE);
-            let agent_type_description =
-                agent_type_description(turn_context, context.default_agent_type_description);
-            let hide_spawn_agent_metadata =
-                turn_context.config.multi_agent_v2.hide_spawn_agent_metadata;
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(
-                    SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
-                        available_models: turn_context.available_models.clone(),
-                        agent_type_description,
-                        expose_agent_type: !turn_context.config.agent_roles.is_empty(),
-                        hide_agent_type_model_reasoning: hide_spawn_agent_metadata,
-                        expose_spawn_agent_model_overrides: turn_context
-                            .config
-                            .multi_agent_v2
-                            .expose_spawn_agent_model_overrides,
-                        multi_agent_version: turn_context.multi_agent_version,
-                        usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
-                        plaintext_message: plaintext_spawn_message,
-                    }),
-                    tool_namespace,
-                ),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace),
-                exposure,
-            );
-            if turn_context.config.multi_agent_v2.wait_agent_enabled {
-                registry.register_trusted_with_exposure(
-                    multi_agent_v2_handler(
+            let plaintext_spawn_message = capability_projection.plaintext_messages;
+            for action in capability_projection.actions {
+                use crate::multi_agent_v2_capability::MultiAgentV2Action;
+
+                let runtime = match action {
+                    MultiAgentV2Action::SpawnAgent => multi_agent_v2_handler(
+                        SpawnAgentHandlerV2::new(SpawnAgentToolOptions {
+                            available_models: turn_context.available_models.clone(),
+                            agent_type_description: agent_type_description(
+                                turn_context,
+                                context.default_agent_type_description,
+                            ),
+                            expose_agent_type: !turn_context.config.agent_roles.is_empty(),
+                            hide_agent_type_model_reasoning: turn_context
+                                .config
+                                .multi_agent_v2
+                                .hide_spawn_agent_metadata,
+                            expose_spawn_agent_model_overrides: turn_context
+                                .config
+                                .multi_agent_v2
+                                .expose_spawn_agent_model_overrides,
+                            multi_agent_version: turn_context.multi_agent_version,
+                            usage_hint_text: turn_context
+                                .config
+                                .multi_agent_v2
+                                .usage_hint_text
+                                .clone(),
+                            plaintext_message: plaintext_spawn_message,
+                        }),
+                        tool_namespace,
+                    ),
+                    MultiAgentV2Action::SendMessage => {
+                        multi_agent_v2_handler(SendMessageHandlerV2, tool_namespace)
+                    }
+                    MultiAgentV2Action::FollowupTask => {
+                        multi_agent_v2_handler(FollowupTaskHandlerV2, tool_namespace)
+                    }
+                    MultiAgentV2Action::WaitAgent => multi_agent_v2_handler(
                         WaitAgentHandlerV2::new(context.wait_agent_timeouts),
                         tool_namespace,
                     ),
-                    exposure,
-                );
+                    MultiAgentV2Action::InterruptAgent => {
+                        multi_agent_v2_handler(InterruptAgentHandler, tool_namespace)
+                    }
+                    MultiAgentV2Action::CloseAgent => {
+                        multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace)
+                    }
+                    MultiAgentV2Action::ListAgents => {
+                        multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace)
+                    }
+                };
+                registry.register_trusted_with_exposure(runtime, exposure);
             }
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
-                exposure,
-            );
-            registry.register_trusted_with_exposure(
-                multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
-                exposure,
-            );
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);

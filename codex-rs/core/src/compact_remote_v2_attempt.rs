@@ -2,10 +2,10 @@ use std::sync::Arc;
 
 use super::RemoteCompactionV2Output;
 use super::run_remote_compaction_request_v2;
-use crate::Prompt;
 use crate::client::ModelClientSession;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact_remote::trim_function_call_history_to_fit_context_window;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -20,7 +20,6 @@ use tracing::info;
 
 pub(super) struct RemoteCompactV2Attempt {
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
-    pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) compaction_output: ResponseItem,
     pub(super) token_usage: Option<TokenUsage>,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
@@ -65,18 +64,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
 
     let trace_input_history = compaction_trace
         .is_enabled()
-        .then(|| history.raw_items().to_vec());
-    let mut input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = &step_context.tool_router;
-    input.push(ResponseItem::CompactionTrigger {});
-    let prompt = Prompt {
-        input,
-        tools: tool_router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
-        base_instructions,
-        output_schema: None,
-        output_schema_strict: true,
-    };
+        .then(|| history.raw_items().cloned().collect());
+    let input = history
+        .for_prompt_annotated(&turn_context.model_info.input_modalities)
+        .into_iter()
+        .map(|envelope| envelope.item)
+        .collect::<Vec<_>>();
+    let prompt = PromptCompiler::for_remote_compaction_v2(step_context.as_ref(), base_instructions)
+        .compile_prompt(input);
 
     let window_id = sess.current_window_id().await;
     let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
@@ -84,16 +79,10 @@ pub(super) async fn run_remote_compact_v2_attempt(
         window_id,
         CodexResponsesRequestKind::Compaction(compaction_metadata),
     );
-    let trace_attempt = compaction_trace.start_attempt(&serde_json::json!({
-        "model": turn_context.model_info.slug.as_str(),
-        "instructions": prompt.base_instructions.text.as_str(),
-        "input": &prompt.input,
-        "parallel_tool_calls": prompt.parallel_tool_calls,
-    }));
     let mut owned_client_session = None;
     let client_session = match client_session {
         Some(client_session) => client_session,
-        None => owned_client_session.insert(turn_context.model_client.new_session()),
+        None => owned_client_session.insert(sess.services.model_client.current().new_session()),
     };
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,
@@ -101,13 +90,9 @@ pub(super) async fn run_remote_compact_v2_attempt(
         client_session,
         &prompt,
         &responses_metadata,
+        compaction_trace,
     )
     .await;
-    trace_attempt.record_result(
-        compaction_output_result
-            .as_ref()
-            .map(|output| std::slice::from_ref(&output.compaction_output)),
-    );
     let RemoteCompactionV2Output {
         compaction_output,
         response_id,
@@ -123,11 +108,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
         }),
     )
     .await;
-    let mut prompt_input = prompt.input;
-    prompt_input.pop();
     Ok(RemoteCompactV2Attempt {
         trace_input_history,
-        prompt_input,
         compaction_output,
         token_usage,
         owned_client_session,

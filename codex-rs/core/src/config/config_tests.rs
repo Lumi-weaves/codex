@@ -123,6 +123,80 @@ fn stdio_mcp(command: &str) -> McpServerConfig {
     stdio_mcp_with_args(command, &[])
 }
 
+#[tokio::test]
+async fn agent_selection_is_optional_versioned_and_independent_of_model() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let legacy = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(legacy.agent, None);
+
+    let configured = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agent: Some("codex@1".to_string()),
+            model: Some("gpt-5.4".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+    let selection = configured.agent.expect("configured Agent selection");
+    assert_eq!(selection.agent.id, "codex");
+    assert_eq!(selection.agent.revision, 1);
+    assert_eq!(selection.origin, AgentSelectionOrigin::Config);
+    assert_eq!(configured.model.as_deref(), Some("gpt-5.4"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_agent_override_wins_and_records_cli_origin() -> std::io::Result<()> {
+    let codex_home = tempdir()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agent: Some("codex".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            agent: Some("codex@1".to_string()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.agent.map(|selection| selection.origin),
+        Some(AgentSelectionOrigin::Cli)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_agent_selector_fails_closed() {
+    let codex_home = tempdir().expect("tempdir");
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            agent: Some("missing".to_string()),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("unknown Agent must fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(
+        error
+            .to_string()
+            .contains("unknown Agent selector `missing`")
+    );
+}
+
 fn stdio_mcp_with_args(command: &str, args: &[&str]) -> McpServerConfig {
     McpServerConfig {
         auth: Default::default(),
@@ -159,6 +233,7 @@ fn http_mcp(url: &str) -> McpServerConfig {
             bearer_token_env_var: None,
             http_headers: None,
             env_http_headers: None,
+            http_headers_helper: None,
         },
         environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
@@ -5034,7 +5109,6 @@ async fn rebuild_preserving_session_layers_refreshes_requirements() -> std::io::
         refreshed_toml,
         ConfigOverrides {
             cwd: Some(codex_home.path().to_path_buf()),
-            psp: Some(true),
             ..Default::default()
         },
         codex_home.abs(),
@@ -5112,8 +5186,6 @@ async fn rebuild_preserving_session_layers_refreshes_requirements() -> std::io::
         .rebuild_preserving_session_layers(&refreshed_config)
         .await?;
 
-    assert!(config.psp);
-    assert!(config.http_client_factory().has_chatgpt_cookies());
     assert_eq!(
         config.mcp_servers.get(),
         &HashMap::from([
@@ -6885,6 +6957,7 @@ async fn replace_mcp_servers_streamable_http_serializes_bearer_token() -> anyhow
                 bearer_token_env_var: Some("MCP_TOKEN".to_string()),
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
@@ -6928,6 +7001,7 @@ startup_timeout_sec = 2.0
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert_eq!(bearer_token_env_var.as_deref(), Some("MCP_TOKEN"));
@@ -6957,6 +7031,7 @@ async fn replace_mcp_servers_streamable_http_serializes_custom_headers() -> anyh
                     "X-Auth".to_string(),
                     "DOCS_AUTH".to_string(),
                 )])),
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
@@ -7041,6 +7116,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
                     "X-Auth".to_string(),
                     "DOCS_AUTH".to_string(),
                 )])),
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
@@ -7078,6 +7154,7 @@ async fn replace_mcp_servers_streamable_http_removes_optional_sections() -> anyh
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,
@@ -7117,6 +7194,7 @@ url = "https://example.com/mcp"
             bearer_token_env_var,
             http_headers,
             env_http_headers,
+            ..
         } => {
             assert_eq!(url, "https://example.com/mcp");
             assert!(bearer_token_env_var.is_none());
@@ -7150,6 +7228,7 @@ async fn replace_mcp_servers_streamable_http_isolates_headers_between_servers() 
                         "X-Auth".to_string(),
                         "DOCS_AUTH".to_string(),
                     )])),
+                    http_headers_helper: None,
                 },
                 environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
                 enabled: true,
@@ -7428,6 +7507,7 @@ async fn replace_mcp_servers_streamable_http_serializes_oauth_resource() -> anyh
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             },
             environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
             enabled: true,

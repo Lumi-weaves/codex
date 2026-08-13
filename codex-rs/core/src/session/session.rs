@@ -60,8 +60,6 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
-    pub(crate) pending_user_message_admissions:
-        crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
     /// Tracks live terminal ids yielded to the model whose background
     /// completion must keep the session status non-final (see
@@ -178,6 +176,7 @@ impl SessionConfiguration {
                 .permissions
                 .allow_login_shell,
             permission_profile: self.permission_profile_state.snapshot(),
+            selected_capability_roots: None,
         }
     }
 
@@ -774,6 +773,7 @@ impl Session {
                             source: session_source,
                             thread_source: session_configuration.thread_source.clone(),
                             originator: session_configuration.originator.clone(),
+                            agent_selection: config.agent.clone(),
                             base_instructions: BaseInstructions {
                                 text: session_configuration.base_instructions.clone(),
                                 provenance: base_instructions_provenance.clone(),
@@ -1222,6 +1222,7 @@ impl Session {
             ));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
+            session_extension_data.insert(analytics_events_client.clone());
             let mcp_resource_client = Arc::new(McpResourceClient::new(Arc::clone(&mcp_runtime)));
             let extension_metrics =
                 extension_metrics::from_session_telemetry(session_telemetry.clone());
@@ -1354,7 +1355,6 @@ impl Session {
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 async_hook_results,
-                pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
                 awaited_terminals: AwaitedTerminals::new(),
                 internal_session_event_tx,

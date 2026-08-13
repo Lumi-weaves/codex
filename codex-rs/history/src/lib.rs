@@ -1,9 +1,13 @@
 //! Model-history and persisted-rollout domain types.
 
+use std::borrow::Borrow;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_protocol::ThreadId;
+use codex_protocol::agent::AgentSelection;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -23,13 +27,73 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
+use serde::Serializer;
+use serde::de::Error as _;
+
+/// A model-history item with room for history-only metadata.
+///
+/// Persistence keeps the response item intact and stores its metadata separately.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResponseItemEnvelope {
+    pub item: ResponseItem,
+    pub metadata: Option<CodexHarnessMetadata>,
+}
+
+/// Metadata owned by the Codex harness and persisted with a response item.
+///
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+pub struct CodexHarnessMetadata {
+    /// Whether a developer message was supplied by an app-server client.
+    #[serde(default)]
+    pub client_authored: bool,
+}
+
+impl ResponseItemEnvelope {
+    /// Wraps a raw Responses API item for persisted history.
+    pub fn new(item: ResponseItem) -> Self {
+        Self {
+            item,
+            metadata: None,
+        }
+    }
+
+    /// Unwraps the raw Responses API item.
+    pub fn into_item(self) -> ResponseItem {
+        self.item
+    }
+}
+
+impl From<ResponseItem> for ResponseItemEnvelope {
+    fn from(item: ResponseItem) -> Self {
+        Self::new(item)
+    }
+}
+
+impl Deref for ResponseItemEnvelope {
+    type Target = ResponseItem;
+
+    fn deref(&self) -> &Self::Target {
+        &self.item
+    }
+}
+
+impl DerefMut for ResponseItemEnvelope {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.item
+    }
+}
+
+impl Borrow<ResponseItem> for ResponseItemEnvelope {
+    fn borrow(&self) -> &ResponseItem {
+        &self.item
+    }
+}
 
 /// Persisted rollout item used by core history and rollout storage.
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema)]
-#[serde(tag = "type", content = "payload", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
-    ResponseItem(ResponseItem),
+    ResponseItem(ResponseItemEnvelope),
     InterAgentCommunication(InterAgentCommunication),
     InterAgentCommunicationMetadata { trigger_turn: bool },
     Compacted(CompactedItem),
@@ -38,19 +102,104 @@ pub enum RolloutItem {
     EventMsg(EventMsg),
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, JsonSchema)]
+impl Serialize for RolloutItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        rollout_payload::RolloutItemWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for RolloutItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        rollout_payload::RolloutItemWire::deserialize(deserializer).map(Into::into)
+    }
+}
+
+impl JsonSchema for RolloutItem {
+    fn schema_name() -> String {
+        "RolloutItem".to_string()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::RolloutItem"))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        rollout_payload::RolloutItemWire::json_schema(generator)
+    }
+}
+
+mod rollout_payload;
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CompactedItem {
     pub message: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub replacement_history: Option<Vec<ResponseItem>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Stable identity and small durable index for the compaction operation that installed this
+    /// checkpoint. Detailed request/response evidence belongs in rollout traces; this record keeps
+    /// the persisted history joinable across resume and fork even when tracing was disabled.
+    pub continuity: Option<CompactionContinuity>,
+    pub replacement_history: Option<Vec<ResponseItemEnvelope>>,
     pub window_number: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_window_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_window_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+}
+
+/// Durable, content-free index for one installed compaction checkpoint.
+///
+/// The exact replacement is already carried by [`CompactedItem::replacement_history`]. These
+/// fields describe why that replacement was selected and which canonical context was installed
+/// beside it without duplicating model-visible content into another receipt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct CompactionContinuity {
+    pub compaction_id: String,
+    pub trigger: String,
+    pub reason: String,
+    pub implementation: String,
+    pub phase: String,
+    pub model: String,
+    pub provider: String,
+    pub reference_context_installed: bool,
+    pub world_state_baseline_installed: bool,
+}
+
+impl Serialize for CompactedItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        rollout_payload::CompactedItemWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactedItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        rollout_payload::CompactedItemWire::deserialize(deserializer)?
+            .try_into()
+            .map_err(D::Error::custom)
+    }
+}
+
+impl JsonSchema for CompactedItem {
+    fn schema_name() -> String {
+        "CompactedItem".to_string()
+    }
+
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(concat!(module_path!(), "::CompactedItem"))
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::schema::Schema {
+        rollout_payload::CompactedItemWire::json_schema(generator)
+    }
 }
 
 impl From<CompactedItem> for ResponseItem {
@@ -65,56 +214,6 @@ impl From<CompactedItem> for ResponseItem {
             internal_chat_message_metadata_passthrough: None,
         }
     }
-}
-
-// Before window_number was introduced, the numeric window number was serialized as
-// window_id. Accept that shape so existing rollouts remain resumable.
-impl<'de> Deserialize<'de> for CompactedItem {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let serialized = SerializedCompactedItem::deserialize(deserializer)?;
-        let mut window_number = serialized.window_number;
-        let window_id = match serialized.window_id {
-            Some(SerializedWindowId::Id(window_id)) => Some(window_id),
-            Some(SerializedWindowId::LegacyWindowNumber(legacy_window_number)) => {
-                window_number.get_or_insert(legacy_window_number);
-                None
-            }
-            None => None,
-        };
-        Ok(Self {
-            message: serialized.message,
-            replacement_history: serialized.replacement_history,
-            window_number,
-            first_window_id: serialized.first_window_id,
-            previous_window_id: serialized.previous_window_id,
-            window_id,
-        })
-    }
-}
-
-#[derive(Deserialize)]
-struct SerializedCompactedItem {
-    message: String,
-    #[serde(default)]
-    replacement_history: Option<Vec<ResponseItem>>,
-    #[serde(default)]
-    window_number: Option<u64>,
-    #[serde(default)]
-    first_window_id: Option<String>,
-    #[serde(default)]
-    previous_window_id: Option<String>,
-    #[serde(default)]
-    window_id: Option<SerializedWindowId>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SerializedWindowId {
-    Id(String),
-    LegacyWindowNumber(u64),
 }
 
 #[derive(Serialize, Deserialize, Clone, JsonSchema)]
@@ -237,6 +336,11 @@ impl InitialHistory {
         self.get_session_meta()
             .map(|meta| meta.selected_capability_roots.clone())
             .unwrap_or_default()
+    }
+
+    pub fn get_agent_selection(&self) -> Option<&AgentSelection> {
+        self.get_session_meta()
+            .and_then(|meta| meta.agent_selection.as_ref())
     }
 
     pub fn get_multi_agent_version(&self) -> Option<MultiAgentVersion> {

@@ -7,6 +7,7 @@ use codex_core::build_prompt_request_receipt;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::UserInstructionsProvider;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -17,6 +18,24 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
 const TEST_INSTRUCTIONS: &str = "Global test instructions";
+
+fn strip_runtime_request_identity(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.retain(|key, _| {
+                !matches!(
+                    key.as_str(),
+                    "client_metadata" | "create_time" | "id" | "prompt_cache_key"
+                )
+            });
+            object.values_mut().for_each(strip_runtime_request_identity);
+        }
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(strip_runtime_request_identity);
+        }
+        _ => {}
+    }
+}
 
 #[tokio::test]
 async fn build_prompt_input_includes_context_and_user_message() -> Result<()> {
@@ -124,7 +143,8 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         .await?;
 
         let metadata_json = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
-        assert_eq!(metadata_json["schemaVersion"], 4);
+        assert_eq!(metadata_json["schemaVersion"], 6);
+        assert!(metadata_json.get("agentSelection").is_none());
         assert_eq!(
             metadata_json["compilerRevision"],
             "responses_request_lowering_v1"
@@ -144,6 +164,10 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         assert_eq!(metadata_json["provenance"]["censusSchemaVersion"], 2);
         assert_eq!(metadata_json["cockpitContract"]["status"], "excluded");
         assert_eq!(metadata_json["cockpitContract"]["effectiveCopyCount"], 0);
+        assert_eq!(
+            metadata_json["multiAgentV2Capability"]["status"],
+            "excluded"
+        );
         assert_eq!(
             metadata_json["contextInheritance"]["lifecycleOrigin"],
             "root_fresh"
@@ -213,5 +237,48 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
             assert!(request.get("tools").is_some());
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn prompt_receipt_exposes_agent_identity_without_changing_request() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            agent: Some("codex@1".to_string()),
+            cwd: Some(cwd.path().to_path_buf()),
+            codex_self_exe: Some(std::env::current_exe()?),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+    let provider: Arc<dyn UserInstructionsProvider> = Arc::new(
+        CodexHomeUserInstructionsProvider::new(config.codex_home.clone()),
+    );
+    let extensions = Arc::new(ExtensionRegistryBuilder::new().build());
+    let mut legacy_config = config.clone();
+    legacy_config.agent = None;
+    let legacy = build_prompt_request_receipt(
+        legacy_config,
+        Vec::new(),
+        None,
+        Arc::clone(&extensions),
+        Arc::clone(&provider),
+    )
+    .await?;
+    let selected =
+        build_prompt_request_receipt(config, Vec::new(), None, extensions, provider).await?;
+    let selected_metadata = serde_json::to_value(selected.render(PromptReceiptView::MetadataOnly))?;
+
+    assert_eq!(selected_metadata["agentSelection"]["agent"]["id"], "codex");
+    assert_eq!(selected_metadata["agentSelection"]["agent"]["revision"], 1);
+    assert_eq!(selected_metadata["agentSelection"]["origin"], "cli");
+    let mut selected_request = serde_json::to_value(selected.request())?;
+    let mut legacy_request = serde_json::to_value(legacy.request())?;
+    strip_runtime_request_identity(&mut selected_request);
+    strip_runtime_request_identity(&mut legacy_request);
+    assert_eq!(selected_request, legacy_request);
     Ok(())
 }

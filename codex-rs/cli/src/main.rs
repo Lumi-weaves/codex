@@ -107,10 +107,6 @@ use codex_terminal_detection::TerminalName;
     override_usage = "codex [OPTIONS] [PROMPT]\n       codex [OPTIONS] <COMMAND> [ARGS]"
 )]
 struct MultitoolCli {
-    /// Enable process-only PSP routing for first-party ChatGPT requests.
-    #[arg(long, global = true, hide = true)]
-    psp: bool,
-
     #[clap(flatten)]
     pub config_overrides: CliConfigOverrides,
 
@@ -239,6 +235,9 @@ enum DebugSubcommand {
     /// Render the raw model catalog as JSON.
     Models(DebugModelsCommand),
 
+    /// Render the validated Agent Definition and Launch Preset catalog as JSON.
+    Agents,
+
     /// Tooling: helps debug the app server.
     AppServer(DebugAppServerCommand),
 
@@ -250,6 +249,12 @@ enum DebugSubcommand {
 
     /// Render the versioned model invocation and prompt contribution census as JSON.
     PromptCensus,
+
+    /// Render the validated flat prompt-resource manifest and source navigation as JSON.
+    PromptResources,
+
+    /// Render cross-tool capability/play declarations and source navigation as JSON.
+    PromptCapabilities,
 
     /// Render the versioned root/shadow prompt inheritance contract as JSON.
     PromptInheritance,
@@ -1065,15 +1070,12 @@ async fn cli_main(
     remote_control_disabled: bool,
 ) -> anyhow::Result<()> {
     let MultitoolCli {
-        psp,
         config_overrides: mut root_config_overrides,
         feature_toggles,
         remote,
         mut interactive,
         subcommand,
     } = MultitoolCli::parse();
-    interactive.psp = psp;
-
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
@@ -1112,7 +1114,6 @@ async fn cli_main(
             exec_cli
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
-            exec_cli.psp = psp;
             exec_cli.strict_config |= root_strict_config;
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
@@ -1133,7 +1134,6 @@ async fn cli_main(
             exec_cli
                 .shared
                 .inherit_exec_root_options(&interactive.shared);
-            exec_cli.psp = psp;
             exec_cli.command = Some(ExecCommand::Review(review_args));
             exec_cli.strict_config = strict_config || root_strict_config;
             prepend_config_flags(
@@ -1243,7 +1243,6 @@ async fn cli_main(
                                 codex_app_server::RemoteControlStartupMode::ResolvePersisted
                             }
                         },
-                        psp,
                         ..Default::default()
                     };
                     codex_app_server::run_main_with_transport_options(
@@ -1346,7 +1345,6 @@ async fn cli_main(
                 remote_control_cli,
                 arg0_paths.clone(),
                 root_config_overrides,
-                psp,
             )
             .await?;
         }
@@ -1627,6 +1625,17 @@ async fn cli_main(
             }
         }
         Some(Subcommand::Debug(DebugCommand { subcommand })) => match subcommand {
+            DebugSubcommand::Agents => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug agents",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::agent_catalog_manifest()?)?
+                );
+            }
             DebugSubcommand::Models(cmd) => {
                 reject_remote_mode_for_subcommand(
                     root_remote.as_deref(),
@@ -1683,6 +1692,28 @@ async fn cli_main(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&codex_core::prompt_context_census())?
+                );
+            }
+            DebugSubcommand::PromptResources => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-resources",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::prompt_resource_manifest()?)?
+                );
+            }
+            DebugSubcommand::PromptCapabilities => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-capabilities",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::prompt_capability_manifest())?
                 );
             }
             DebugSubcommand::PromptInheritance => {
@@ -2192,6 +2223,7 @@ async fn run_debug_prompt_command(
         shared.sandbox_mode.map(Into::into)
     };
     let overrides = ConfigOverrides {
+        agent: shared.agent,
         model: shared.model,
         approval_policy,
         sandbox_mode,
@@ -2913,7 +2945,6 @@ mod tests {
     fn finalize_resume_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
-            psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
             subcommand,
@@ -2951,7 +2982,6 @@ mod tests {
     fn finalize_fork_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
-            psp: _,
             mut interactive,
             config_overrides: mut root_overrides,
             subcommand,
@@ -2996,7 +3026,6 @@ mod tests {
     fn finalize_archive_from_args(args: &[&str]) -> (String, TuiCli, InteractiveRemoteOptions) {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");
         let MultitoolCli {
-            psp: _,
             interactive,
             config_overrides: root_overrides,
             subcommand,
@@ -3394,6 +3423,44 @@ mod tests {
             cli.subcommand,
             Some(Subcommand::Debug(DebugCommand {
                 subcommand: DebugSubcommand::PromptCensus,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_prompt_resources_parses_without_runtime_configuration() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "debug", "prompt-resources"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::PromptResources,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_agents_parses_without_runtime_configuration() {
+        let cli = MultitoolCli::try_parse_from(["codex", "debug", "agents"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::Agents,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_prompt_capabilities_parses_without_runtime_configuration() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "debug", "prompt-capabilities"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::PromptCapabilities,
             }))
         ));
     }
@@ -4298,19 +4365,6 @@ mod tests {
     }
 
     #[test]
-    fn psp_is_a_global_runtime_argument() {
-        for args in [
-            ["codex", "--psp"].as_slice(),
-            ["codex", "app-server", "--psp"].as_slice(),
-            ["codex", "remote-control", "--psp"].as_slice(),
-        ] {
-            let cli = MultitoolCli::try_parse_from(args).expect("parse runtime PSP flag");
-            assert!(cli.psp);
-            assert!(cli.config_overrides.raw_overrides.is_empty());
-        }
-    }
-
-    #[test]
     fn app_server_code_mode_host_url_parses_independently_of_listen_transport() {
         let app_server = app_server_from_args(
             [
@@ -4340,17 +4394,44 @@ mod tests {
     }
 
     #[test]
+    fn app_server_grpc_code_mode_host_url_parses_independently_of_listen_transport() {
+        let app_server = app_server_from_args(
+            [
+                "codex",
+                "app-server",
+                "--code-mode-host",
+                "https://example.test",
+                "--listen",
+                "ws://127.0.0.1:4500",
+            ]
+            .as_ref(),
+        );
+
+        assert_eq!(
+            app_server.code_mode_host.code_mode_host,
+            Some(url::Url::parse("https://example.test").expect("test endpoint should parse"))
+        );
+    }
+
+    #[test]
     fn app_server_rejects_invalid_code_mode_host_urls() {
         for endpoint in [
-            "http://127.0.0.1:8765",
+            "ftp://127.0.0.1:8765",
             "ws://",
             "wss://example.test/code-mode#fragment",
+            "https://example.test/code-mode",
+            "http://alice:secret@example.test",
+            "https://alice:secret@example.test",
+            "http://example.test/?token=secret",
         ] {
             let error =
                 MultitoolCli::try_parse_from(["codex", "app-server", "--code-mode-host", endpoint])
                     .expect_err("invalid code-mode host endpoint should fail argument parsing");
 
             assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
+            let rendered_error = error.to_string();
+            assert!(!rendered_error.contains("alice"));
+            assert!(!rendered_error.contains("secret"));
         }
     }
 

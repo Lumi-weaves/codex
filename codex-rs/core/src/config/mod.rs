@@ -89,6 +89,8 @@ use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::built_in_model_providers;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_models_manager::ModelsManagerConfig;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -626,6 +628,9 @@ pub struct Config {
     /// Warnings collected during config load that should be shown on startup.
     pub startup_warnings: Vec<String>,
 
+    /// Optional versioned Agent identity selected independently of the model.
+    pub agent: Option<AgentSelection>,
+
     /// Optional override of model selection.
     pub model: Option<String>,
 
@@ -992,9 +997,6 @@ pub struct Config {
 
     /// Whether Codex-owned clients should respect host system proxy settings.
     pub respect_system_proxy: bool,
-
-    /// Process-only ChatGPT routing selection supplied when Codex is launched.
-    pub psp: bool,
 
     /// Optional product SKU forwarded to the host-owned apps MCP server.
     pub apps_mcp_product_sku: Option<String>,
@@ -1662,7 +1664,7 @@ impl Config {
             OutboundProxyPolicy::ReqwestDefault
         };
         let factory = HttpClientFactory::new(outbound_proxy_policy);
-        if self.psp {
+        if self.features.enabled(Feature::Psp) {
             factory.with_chatgpt_cookies([HeaderValue::from_static("oai-chat-psp=true")])
         } else {
             factory
@@ -1868,19 +1870,20 @@ impl Config {
             .map(AbsolutePathBuf::try_from)
             .transpose()?;
 
-        Self::load_config_with_layer_stack(
+        let mut config = Self::load_config_with_layer_stack(
             LOCAL_FS.as_ref(),
             cfg,
             ConfigOverrides {
                 cwd: Some(self.cwd.to_path_buf()),
                 default_zsh_path,
-                psp: Some(refreshed_config.psp),
                 ..Default::default()
             },
             refreshed_config.codex_home.clone(),
             config_layer_stack,
         )
-        .await
+        .await?;
+        config.agent.clone_from(&self.agent);
+        Ok(config)
     }
 
     /// This is the preferred way to create an instance of [Config].
@@ -2597,6 +2600,7 @@ fn apply_managed_filesystem_constraints(
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
+    pub agent: Option<String>,
     pub model: Option<String>,
     pub review_model: Option<String>,
     pub cwd: Option<PathBuf>,
@@ -2619,7 +2623,6 @@ pub struct ConfigOverrides {
     pub tools_web_search_request: Option<bool>,
     pub ephemeral: Option<bool>,
     pub bypass_hook_trust: Option<bool>,
-    pub psp: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
     pub additional_writable_roots: Vec<PathBuf>,
     /// Explicit absolute runtime workspace roots for this session. When set,
@@ -3288,6 +3291,7 @@ impl Config {
 
         // Destructure ConfigOverrides fully to ensure all overrides are applied.
         let ConfigOverrides {
+            agent: agent_override,
             model,
             review_model: override_review_model,
             cwd,
@@ -3310,7 +3314,6 @@ impl Config {
             tools_web_search_request: override_tools_web_search_request,
             ephemeral,
             bypass_hook_trust,
-            psp,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
         } = overrides;
@@ -3771,6 +3774,20 @@ impl Config {
             }
         }
 
+        let agent = match agent_override {
+            Some(selector) => Some((selector, AgentSelectionOrigin::Cli)),
+            None => cfg
+                .agent
+                .clone()
+                .map(|selector| (selector, AgentSelectionOrigin::Config)),
+        }
+        .map(|(selector, origin)| {
+            crate::agent_selection::resolve_agent_selector(&selector)
+                .map(|agent| AgentSelection { agent, origin })
+                .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidInput, message))
+        })
+        .transpose()?;
+
         let model = model.or_else(|| cfg.model.clone());
         let model_provider_override = model_provider.or(cfg.model_provider);
         let model_provider_id = model
@@ -4135,6 +4152,7 @@ impl Config {
         .map_err(std::io::Error::from)?;
         let otel = otel::resolve_config(cfg.otel.unwrap_or_default(), &mut startup_warnings);
         let config = Self {
+            agent,
             model,
             service_tier,
             review_model,
@@ -4262,7 +4280,6 @@ impl Config {
                 .chatgpt_base_url
                 .unwrap_or("https://chatgpt.com/backend-api/".to_string()),
             respect_system_proxy,
-            psp: psp.unwrap_or_default(),
             apps_mcp_product_sku: cfg.apps_mcp_product_sku.clone(),
             responses_api_metadata: cfg.responses_api_metadata.unwrap_or_default(),
             realtime_audio: cfg

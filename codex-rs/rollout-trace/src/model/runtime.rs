@@ -13,6 +13,7 @@ use super::CompactionId;
 use super::CompactionRequestId;
 use super::ConversationItemId;
 use super::EdgeId;
+use super::InferenceCallId;
 use super::McpCallId;
 use super::ModelVisibleCallId;
 use super::TerminalId;
@@ -89,9 +90,36 @@ pub struct Compaction {
     pub input_item_ids: Vec<ConversationItemId>,
     /// Replacement conversation items installed by the checkpoint.
     pub replacement_item_ids: Vec<ConversationItemId>,
+    /// First ordinary inference that consumed this installed checkpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuation_inference_call_id: Option<InferenceCallId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_number: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_context_installed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub world_state_baseline_installed: Option<bool>,
 }
 
-/// One upstream remote request made while computing a compaction checkpoint.
+/// One upstream request made while computing a compaction checkpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionRequest {
     pub compaction_request_id: CompactionRequestId,
@@ -101,6 +129,9 @@ pub struct CompactionRequest {
     pub execution: ExecutionWindow,
     pub model: String,
     pub provider_name: String,
+    /// Responses API response id, used by a WebSocket continuation after compaction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_id: Option<String>,
     pub raw_request_payload_id: RawPayloadId,
     /// Full compaction response payload. `None` while running or after pre-response failures.
     pub raw_response_payload_id: Option<RawPayloadId>,
