@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "sourceRepository": "https://github.com/lidge-jun/opencodex",
+  "sourceCommit": "cbbfdd8773e68a5dc2391ddeb32f33a225373c1a",
+  "archiveDigest": "sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78",
+  "archiveDigestRecipe": "git archive --format=tar <sourceCommit> | sha256sum",
+  "license": "MIT",
+  "compositionVersion": 1
+}

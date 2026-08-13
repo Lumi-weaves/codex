@@ -116,6 +116,7 @@ mod otel_reloader;
 mod outgoing_message;
 mod request_processors;
 mod request_serialization;
+mod richcodex_backend;
 mod server_request_error;
 mod skills_watcher;
 mod thread_state;
@@ -683,6 +684,19 @@ pub async fn run_main_with_transport_options(
             None => error!("{}", warning.summary),
         }
     }
+    let richcodex_backend =
+        richcodex_backend::RichCodexBackend::start_if_bundled(codex_home.as_path()).await?;
+    if let Some(backend) = &richcodex_backend {
+        let snapshot = backend.snapshot();
+        info!(
+            backend_instance_id = %snapshot.instance_id,
+            kernel_source_commit = %snapshot.kernel.source_commit,
+            catalog_revision = snapshot.catalog_revision,
+            provider_count = snapshot.providers.len(),
+            model_count = snapshot.models.len(),
+            "bundled RichCodex model backend is ready"
+        );
+    }
     let remote_control_policy = if config
         .config_layer_stack
         .requirements()
@@ -1192,6 +1206,11 @@ pub async fn run_main_with_transport_options(
     let _ = otel_reloader_handle.await;
     for handle in transport_accept_handles {
         let _ = handle.await;
+    }
+    if let Some(backend) = richcodex_backend
+        && let Err(err) = backend.shutdown().await
+    {
+        warn!(error = %err, "failed to stop bundled RichCodex model backend cleanly");
     }
 
     Ok(())
