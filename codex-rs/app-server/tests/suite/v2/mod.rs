@@ -59,6 +59,7 @@ mod plugin_search;
 mod plugin_share;
 mod plugin_uninstall;
 mod process_exec;
+mod provider_account;
 mod rate_limit_reset_credits;
 mod rate_limits;
 mod realtime_conversation;
