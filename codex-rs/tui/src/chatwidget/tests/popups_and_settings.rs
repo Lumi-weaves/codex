@@ -16,6 +16,8 @@ use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
@@ -3327,10 +3329,12 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
     });
     let provider_popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(provider_popup.contains("Provider accounts"));
+    assert!(provider_popup.contains("Sign in with OpenAI"));
     assert!(provider_popup.contains("Add OpenAI API key"));
     assert!(provider_popup.contains("Secondary Codex"));
     assert!(!provider_popup.contains("opaque-provider-id-must-not-render"));
 
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),
@@ -3366,6 +3370,42 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
         }
         other => panic!("expected SubmitProviderApiKey, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.open_provider_oauth_label_prompt();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitProviderOAuthLogin { user_label }) if user_label == "OpenAI Codex"
+    ));
+
+    chat.show_provider_oauth_login(Ok(ProviderAccountLogin {
+        login_id: "opaque-login-handle-must-not-render".to_string(),
+        status: ProviderAccountLoginStatus::AwaitingUser,
+        verification_url: Some("https://auth.openai.com/codex/device".to_string()),
+        user_code: Some("ABCD-EFGH".to_string()),
+        expires_at: 2_000,
+        failure: None,
+        account: None,
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+    }));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains("https://auth.openai.com/codex/device"));
+    assert!(popup.contains("ABCD-EFGH"));
+    assert!(!popup.contains("opaque-login-handle-must-not-render"));
+    assert_chatwidget_snapshot!("provider_oauth_device_login", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CancelProviderOAuthLogin { login_id })
+            if login_id == "opaque-login-handle-must-not-render"
+    ));
 }
 
 #[tokio::test]

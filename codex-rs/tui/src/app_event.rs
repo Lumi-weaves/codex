@@ -37,6 +37,7 @@ use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -933,6 +934,34 @@ pub(crate) enum AppEvent {
     /// Report the safe account projection returned after API-key persistence.
     ProviderApiKeyAddCompleted {
         result: Result<ProviderAccountAddApiKeyResponse, String>,
+    },
+
+    /// Start an additional backend-owned OpenAI device login.
+    OpenProviderOAuthLabelPrompt,
+
+    /// Submit the user-owned label for a new OpenAI OAuth account.
+    SubmitProviderOAuthLogin {
+        user_label: String,
+    },
+
+    /// Present the safe verification URL and device code returned by the backend.
+    ProviderOAuthLoginStarted {
+        result: Result<ProviderAccountLogin, String>,
+    },
+
+    /// Finish one provider login after background status polling reaches a terminal state.
+    ProviderOAuthLoginFinished {
+        result: Result<ProviderAccountLogin, String>,
+    },
+
+    /// Cancel an in-flight provider login by its opaque local handle.
+    CancelProviderOAuthLogin {
+        login_id: String,
+    },
+
+    /// Report only cancellation request failures; terminal state arrives through polling.
+    ProviderOAuthLoginCancelCompleted {
+        result: Result<(), String>,
     },
 
     /// Load one managed route plus safe provider accounts for target editing.

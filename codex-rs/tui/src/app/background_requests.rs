@@ -31,6 +31,13 @@ use codex_app_server_protocol::ProviderAccountAddApiKeyParams;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListParams;
 use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLoginCancelParams;
+use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
+use codex_app_server_protocol::ProviderAccountLoginStartParams;
+use codex_app_server_protocol::ProviderAccountLoginStartResponse;
+use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountLoginStatusParams;
+use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
 
 use codex_app_server_protocol::RequestId;
 
@@ -88,6 +95,96 @@ impl App {
                 .await
                 .map_err(|error| error.to_string());
             app_event_tx.send(AppEvent::ProviderApiKeyAddCompleted { result });
+        });
+    }
+
+    pub(super) fn submit_provider_oauth_login(
+        &mut self,
+        app_server: &AppServerSession,
+        user_label: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-login-start-{}", Uuid::new_v4()));
+            let started: Result<ProviderAccountLoginStartResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountLoginStart {
+                    request_id,
+                    params: ProviderAccountLoginStartParams { user_label },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            let started = match started {
+                Ok(started) => started,
+                Err(error) => {
+                    app_event_tx.send(AppEvent::ProviderOAuthLoginStarted { result: Err(error) });
+                    return;
+                }
+            };
+            let login_id = started.login.login_id.clone();
+            app_event_tx.send(AppEvent::ProviderOAuthLoginStarted {
+                result: Ok(started.login),
+            });
+
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(/*secs*/ 2)).await;
+                let request_id =
+                    RequestId::String(format!("provider-account-login-status-{}", Uuid::new_v4()));
+                let status: Result<ProviderAccountLoginStatusResponse, String> = request_handle
+                    .request_typed(ClientRequest::ProviderAccountLoginStatus {
+                        request_id,
+                        params: ProviderAccountLoginStatusParams {
+                            login_id: login_id.clone(),
+                        },
+                    })
+                    .await
+                    .map_err(|error| error.to_string());
+                match status {
+                    Ok(response)
+                        if matches!(
+                            response.login.status,
+                            ProviderAccountLoginStatus::Completed
+                                | ProviderAccountLoginStatus::Failed
+                                | ProviderAccountLoginStatus::Cancelled
+                        ) =>
+                    {
+                        app_event_tx.send(AppEvent::ProviderOAuthLoginFinished {
+                            result: Ok(response.login),
+                        });
+                        return;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        app_event_tx
+                            .send(AppEvent::ProviderOAuthLoginFinished { result: Err(error) });
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
+    pub(super) fn cancel_provider_oauth_login(
+        &mut self,
+        app_server: &AppServerSession,
+        login_id: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-login-cancel-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountLoginCancelResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountLoginCancel {
+                    request_id,
+                    params: ProviderAccountLoginCancelParams { login_id },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderOAuthLoginCancelCompleted {
+                result: result.map(|_| ()),
+            });
         });
     }
 

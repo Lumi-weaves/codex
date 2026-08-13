@@ -1329,6 +1329,27 @@ impl App {
             AppEvent::ProviderApiKeyAddCompleted { result } => {
                 self.chat_widget.finish_provider_api_key_add(result);
             }
+            AppEvent::OpenProviderOAuthLabelPrompt => {
+                self.chat_widget.open_provider_oauth_label_prompt();
+            }
+            AppEvent::SubmitProviderOAuthLogin { user_label } => {
+                self.submit_provider_oauth_login(app_server, user_label);
+            }
+            AppEvent::ProviderOAuthLoginStarted { result } => {
+                self.chat_widget.show_provider_oauth_login(result);
+            }
+            AppEvent::ProviderOAuthLoginFinished { result } => {
+                self.chat_widget.finish_provider_oauth_login(result);
+            }
+            AppEvent::CancelProviderOAuthLogin { login_id } => {
+                self.cancel_provider_oauth_login(app_server, login_id);
+            }
+            AppEvent::ProviderOAuthLoginCancelCompleted { result } => {
+                if let Err(error) = result {
+                    self.chat_widget
+                        .add_error_message(format!("Could not cancel provider login: {error}"));
+                }
+            }
             AppEvent::OpenModelRouteTagPrompt {
                 display_name,
                 selected_model,
