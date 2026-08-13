@@ -25,6 +25,8 @@ use codex_app_server_protocol::ModelRouteReadParams;
 use codex_app_server_protocol::ModelRouteReadResponse;
 use codex_app_server_protocol::ModelRouteRetireParams;
 use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ProviderAccountAddApiKeyParams;
+use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListParams;
 use codex_app_server_protocol::ProviderAccountListResponse;
 
@@ -43,6 +45,50 @@ const WORKSPACE_HEADLINE_FETCH_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(/*millis*/ 2000);
 
 impl App {
+    pub(super) fn begin_provider_account_manage(&mut self, app_server: &AppServerSession) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id = RequestId::String(format!("provider-account-list-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountListResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountList {
+                    request_id,
+                    params: ProviderAccountListParams {
+                        cursor: None,
+                        limit: Some(100),
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderAccountsLoaded { result });
+        });
+    }
+
+    pub(super) fn submit_provider_api_key(
+        &mut self,
+        app_server: &AppServerSession,
+        user_label: String,
+        api_key: crate::app_event::ProviderApiKey,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-api-key-add-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountAddApiKeyResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountAddApiKey {
+                    request_id,
+                    params: ProviderAccountAddApiKeyParams {
+                        api_key: api_key.into_inner(),
+                        user_label,
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderApiKeyAddCompleted { result });
+        });
+    }
+
     pub(super) fn begin_model_route_create(
         &mut self,
         app_server: &AppServerSession,

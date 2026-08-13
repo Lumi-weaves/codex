@@ -12,6 +12,7 @@ use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
+use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
@@ -3235,6 +3236,78 @@ async fn model_picker_d_opens_non_cascading_retire_confirmation() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert_chatwidget_snapshot!("model_route_retire_confirmation", popup);
+}
+
+#[tokio::test]
+async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('p')));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::BeginProviderAccountManage)
+    ));
+
+    chat.show_provider_accounts(ProviderAccountListResponse {
+        data: vec![ProviderAccount {
+            id: "opaque-provider-id-must-not-render".to_string(),
+            provider_id: "openai".to_string(),
+            user_label: "Secondary Codex".to_string(),
+            credential_kind: ProviderAccountCredentialKind::OAuth,
+            status: ProviderAccountStatus::Ready,
+            added_at: 1,
+        }],
+        providers: Vec::new(),
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+        next_cursor: None,
+    });
+    let provider_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(provider_popup.contains("Provider accounts"));
+    assert!(provider_popup.contains("Add OpenAI API key"));
+    assert!(provider_popup.contains("Secondary Codex"));
+    assert!(!provider_popup.contains("opaque-provider-id-must-not-render"));
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenProviderApiKeyLabelPrompt)
+    ));
+    chat.open_provider_api_key_label_prompt();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let user_label = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeySecretPrompt { user_label }) => user_label,
+        other => panic!("expected OpenProviderApiKeySecretPrompt, got {other:?}"),
+    };
+    assert_eq!(user_label, "OpenAI API");
+
+    chat.open_provider_api_key_secret_prompt(user_label);
+    let secret = "sk-provider-secret-canary";
+    chat.handle_paste(secret.to_string());
+    let secret_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!secret_popup.contains(secret));
+    assert!(secret_popup.contains(&"*".repeat(secret.len())));
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let event = rx.try_recv().expect("provider API-key submit event");
+    let debug = format!("{event:?}");
+    assert!(!debug.contains(secret));
+    assert!(debug.contains("[REDACTED]"));
+    match event {
+        AppEvent::SubmitProviderApiKey {
+            user_label,
+            api_key,
+        } => {
+            assert_eq!(user_label, "OpenAI API");
+            assert_eq!(api_key.into_inner(), secret);
+        }
+        other => panic!("expected SubmitProviderApiKey, got {other:?}"),
+    }
 }
 
 #[tokio::test]

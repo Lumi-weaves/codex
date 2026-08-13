@@ -385,6 +385,7 @@ use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
 mod model_routes;
 mod notifications;
+mod provider_accounts;
 use self::notifications::Notification;
 mod permission_popups;
 mod permissions_menu;

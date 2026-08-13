@@ -12,6 +12,25 @@ use codex_app_server_protocol::ProviderAccountStatus;
 
 impl ChatWidget {
     pub(super) fn handle_model_route_key(&mut self, key_event: KeyEvent) -> bool {
+        if matches!(
+            key_event,
+            KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::NONE,
+                kind: KeyEventKind::Press,
+                ..
+            }
+        ) && self
+            .bottom_pane
+            .selected_index_for_active_view(ALL_MODELS_POPUP_VIEW_ID)
+            .is_some()
+        {
+            self.bottom_pane
+                .dismiss_active_view_if_id(ALL_MODELS_POPUP_VIEW_ID);
+            self.app_event_tx.send(AppEvent::BeginProviderAccountManage);
+            return true;
+        }
+
         let action = match key_event {
             KeyEvent {
                 code: KeyCode::Char('i'),

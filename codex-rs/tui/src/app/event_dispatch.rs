@@ -1304,6 +1304,31 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::BeginProviderAccountManage => {
+                self.begin_provider_account_manage(app_server);
+            }
+            AppEvent::ProviderAccountsLoaded { result } => match result {
+                Ok(response) => self.chat_widget.show_provider_accounts(response),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not load provider accounts: {error}")),
+            },
+            AppEvent::OpenProviderApiKeyLabelPrompt => {
+                self.chat_widget.open_provider_api_key_label_prompt();
+            }
+            AppEvent::OpenProviderApiKeySecretPrompt { user_label } => {
+                self.chat_widget
+                    .open_provider_api_key_secret_prompt(user_label);
+            }
+            AppEvent::SubmitProviderApiKey {
+                user_label,
+                api_key,
+            } => {
+                self.submit_provider_api_key(app_server, user_label, api_key);
+            }
+            AppEvent::ProviderApiKeyAddCompleted { result } => {
+                self.chat_widget.finish_provider_api_key_add(result);
+            }
             AppEvent::OpenModelRouteTagPrompt {
                 display_name,
                 selected_model,

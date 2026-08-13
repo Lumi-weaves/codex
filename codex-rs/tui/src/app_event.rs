@@ -32,6 +32,8 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
+use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -206,6 +208,25 @@ pub(crate) struct ModelRouteAccountChoices {
     pub(crate) semantic_model: String,
     pub(crate) upstream_model_id: String,
     pub(crate) accounts: Vec<ProviderAccount>,
+}
+
+/// Secret-bearing provider input with deliberately redacted event diagnostics.
+pub(crate) struct ProviderApiKey(String);
+
+impl ProviderApiKey {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -875,6 +896,33 @@ pub(crate) enum AppEvent {
     /// Open the full model picker (non-auto models).
     OpenAllModelsPopup {
         models: Vec<ModelPreset>,
+    },
+
+    /// Load the provider plane from the model picker's explicit `p` control.
+    BeginProviderAccountManage,
+
+    /// Present the current safe provider-account projection.
+    ProviderAccountsLoaded {
+        result: Result<ProviderAccountListResponse, String>,
+    },
+
+    /// Start the API-key account wizard by collecting a safe display label.
+    OpenProviderApiKeyLabelPrompt,
+
+    /// Continue the API-key account wizard after accepting its display label.
+    OpenProviderApiKeySecretPrompt {
+        user_label: String,
+    },
+
+    /// Submit one write-only API key to the bundled provider plane.
+    SubmitProviderApiKey {
+        user_label: String,
+        api_key: ProviderApiKey,
+    },
+
+    /// Report the safe account projection returned after API-key persistence.
+    ProviderApiKeyAddCompleted {
+        result: Result<ProviderAccountAddApiKeyResponse, String>,
     },
 
     /// Continue the RichCodex route wizard after the display name is accepted.
