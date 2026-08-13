@@ -19,7 +19,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
-const BACKEND_PROTOCOL_VERSION: u32 = 1;
+const BACKEND_PROTOCOL_VERSION: u32 = 2;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +48,7 @@ pub(crate) struct ModelSummary {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BackendSnapshot {
     pub instance_id: String,
+    pub desired_state_revision: u64,
     pub catalog_revision: u64,
     pub kernel: KernelProvenance,
     pub providers: Vec<ProviderSummary>,
@@ -60,6 +61,7 @@ pub(crate) struct KernelProvenance {
     pub source_repository: String,
     pub source_commit: String,
     pub content_digest: String,
+    pub selection_digest: String,
     pub composition_version: u32,
 }
 
@@ -72,6 +74,9 @@ struct KernelLock {
     archive_digest: String,
     archive_digest_recipe: String,
     license: String,
+    selection_manifest: String,
+    selection_digest: String,
+    selection_digest_recipe: String,
     composition_version: u32,
 }
 
@@ -86,6 +91,7 @@ enum BackendMessage {
     Ready {
         protocol_version: u32,
         instance_id: String,
+        desired_state_revision: u64,
         catalog_revision: u64,
         kernel: KernelProvenance,
         providers: Vec<ProviderSummary>,
@@ -244,6 +250,7 @@ where
     let BackendMessage::Ready {
         protocol_version,
         instance_id,
+        desired_state_revision,
         catalog_revision,
         kernel,
         providers,
@@ -266,6 +273,7 @@ where
     validate_snapshot(&instance_id, &kernel, &providers, &models)?;
     Ok(BackendSnapshot {
         instance_id,
+        desired_state_revision,
         catalog_revision,
         kernel,
         providers,
@@ -401,6 +409,8 @@ fn expected_kernel_provenance() -> io::Result<KernelProvenance> {
     if lock.schema_version != 1
         || lock.archive_digest_recipe != "git archive --format=tar <sourceCommit> | sha256sum"
         || lock.license != "MIT"
+        || lock.selection_manifest != "richcodex-model-backend/kernel-selection.json"
+        || lock.selection_digest_recipe != "sha256sum richcodex-model-backend/kernel-selection.json"
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -411,6 +421,7 @@ fn expected_kernel_provenance() -> io::Result<KernelProvenance> {
         source_repository: lock.source_repository,
         source_commit: lock.source_commit,
         content_digest: lock.archive_digest,
+        selection_digest: lock.selection_digest,
         composition_version: lock.composition_version,
     })
 }

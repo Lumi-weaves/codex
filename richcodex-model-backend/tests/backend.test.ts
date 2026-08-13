@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -28,6 +28,20 @@ async function runBackend(input: string, stateRoot: string): Promise<{ lines: un
     stderr: line => { stderr.push(line); },
   });
   return { lines, result, stderr };
+}
+
+function jwt(payload: Record<string, unknown>): string {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.signature`;
+}
+
+function codexAuthJson(accountId: string, expiresAtMs: number): string {
+  return JSON.stringify({
+    tokens: {
+      access_token: jwt({ exp: Math.floor(expiresAtMs / 1000), chatgpt_account_id: accountId }),
+      refresh_token: `refresh-${accountId}`,
+      account_id: accountId,
+    },
+  });
 }
 
 describe("RichCodex headless backend composition root", () => {
@@ -69,10 +83,11 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 1,
+      protocolVersion: 2,
       kernel: RICHCODEX_BACKEND_KERNEL,
+      desiredStateRevision: 0,
       catalogRevision: 0,
-      providers: [],
+      providers: [{ id: "openai", displayName: "OpenAI", accountCount: 0, status: "needsAccount" }],
       models: [],
     });
     expect(JSON.stringify(shutdown.lines[0]).length).toBeLessThanOrEqual(RICHCODEX_BACKEND_MAX_MESSAGE_BYTES);
@@ -102,6 +117,100 @@ describe("RichCodex headless backend composition root", () => {
     expect(result.lines[4]).toEqual({ type: "shutdownComplete", requestId: "request-43" });
     expect(JSON.stringify(result.lines)).not.toContain(secret);
     expect(result.stderr).toEqual([]);
+  });
+
+  test("imports an explicitly selected Codex login and lists only safe account state", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-provider-account-"));
+    const stateRoot = join(root, "backend-state");
+    const source = join(root, "selected-auth.json");
+    const accountId = "provider-account-identity-canary";
+    const sourceBytes = codexAuthJson(accountId, Date.now() + 3_600_000);
+    writeFileSync(source, sourceBytes, { mode: 0o600 });
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountImport",
+        requestId: "import-1",
+        authJsonPath: source,
+        userLabel: "Secondary ChatGPT",
+      })}\n${JSON.stringify({
+        type: "providerAccountList",
+        requestId: "list-1",
+        cursor: null,
+        limit: 10,
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "shutdown-1" })}\n`,
+      stateRoot,
+    );
+
+    expect(result.result).toEqual({ exitCode: 0, reason: "shutdown" });
+    expect(result.stderr).toEqual([]);
+    expect(result.lines[0]).toMatchObject({
+      type: "ready",
+      desiredStateRevision: 0,
+      catalogRevision: 0,
+      providers: [{ id: "openai", accountCount: 0, status: "needsAccount" }],
+    });
+    expect(result.lines[1]).toMatchObject({
+      type: "providerAccountImportResult",
+      requestId: "import-1",
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      account: {
+        providerId: "openai",
+        userLabel: "Secondary ChatGPT",
+        status: "verificationRequired",
+      },
+    });
+    expect(result.lines[2]).toMatchObject({
+      type: "providerAccountListResult",
+      requestId: "list-1",
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      providers: [{ id: "openai", accountCount: 1, status: "ready" }],
+      data: [{ providerId: "openai", userLabel: "Secondary ChatGPT", status: "verificationRequired" }],
+      nextCursor: null,
+    });
+    const output = JSON.stringify(result.lines);
+    expect(output).not.toContain(accountId);
+    expect(output).not.toContain("refresh-");
+    expect(output).not.toContain(source);
+    expect(readFileSync(source, "utf8")).toBe(sourceBytes);
+    const persisted = join(stateRoot, "providers", "openai", "accounts.json");
+    expect(existsSync(persisted)).toBe(true);
+    if (process.platform !== "win32") expect(statSync(persisted).mode & 0o777).toBe(0o600);
+  });
+
+  test("failed imports preserve revisions and do not reflect credential-shaped input", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-provider-account-failure-"));
+    const stateRoot = join(root, "backend-state");
+    const source = join(root, "invalid-auth.json");
+    const canary = "credential-canary-must-not-be-reflected";
+    writeFileSync(source, JSON.stringify({ tokens: { access_token: canary } }), { mode: 0o600 });
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountImport",
+        requestId: "import-failed",
+        authJsonPath: source,
+        userLabel: "Invalid",
+      })}\n${JSON.stringify({ type: "providerAccountList", requestId: "list-after-failure" })}\n`,
+      stateRoot,
+    );
+
+    expect(result.lines[1]).toEqual({
+      type: "operationError",
+      requestId: "import-failed",
+      code: "invalid_auth_document",
+      message: "selected credential source is not a supported Codex login",
+    });
+    expect(result.lines[2]).toMatchObject({
+      type: "providerAccountListResult",
+      desiredStateRevision: 0,
+      catalogRevision: 0,
+      data: [],
+    });
+    expect(JSON.stringify(result.lines)).not.toContain(canary);
+    expect(existsSync(stateRoot)).toBe(false);
   });
 
   test("does not create backend or legacy artifacts in an isolated home", async () => {

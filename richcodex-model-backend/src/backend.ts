@@ -1,9 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { RICHCODEX_BACKEND_KERNEL, type RichCodexBackendKernel } from "./kernel-manifest";
+import {
+  createProviderAccountStore,
+  ProviderAccountImportError,
+  type ProviderAccountImportCode,
+  type ProviderAccountStore,
+  type SafeProviderAccount,
+  type SafeProviderSummary,
+} from "./provider-account";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 1 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 2 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -55,6 +63,8 @@ export interface HeadlessBackendOptions {
   readonly env?: BackendEnvironment;
   /** Internal deterministic seam; production uses a fresh random UUID. */
   readonly createInstanceId?: () => string;
+  /** Internal persistence seam for focused tests and future embeddings. */
+  readonly accountStore?: ProviderAccountStore;
 }
 
 export interface HeadlessBackendRunIo {
@@ -91,8 +101,9 @@ export type HeadlessReadyMessage = {
   readonly protocolVersion: typeof RICHCODEX_BACKEND_PROTOCOL_VERSION;
   readonly instanceId: string;
   readonly kernel: RichCodexBackendKernel;
-  readonly catalogRevision: 0;
-  readonly providers: readonly [];
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
+  readonly providers: readonly SafeProviderSummary[];
   readonly models: readonly [];
 };
 
@@ -114,10 +125,45 @@ export type HeadlessProtocolErrorMessage = {
   readonly message: string;
 };
 
-type HeadlessInboundMessage = {
-  readonly type: "shutdown";
+export type HeadlessProviderAccountListResultMessage = {
+  readonly type: "providerAccountListResult";
   readonly requestId: string;
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
+  readonly providers: readonly SafeProviderSummary[];
+  readonly data: readonly SafeProviderAccount[];
+  readonly nextCursor: string | null;
 };
+
+export type HeadlessProviderAccountImportResultMessage = {
+  readonly type: "providerAccountImportResult";
+  readonly requestId: string;
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
+  readonly account: SafeProviderAccount;
+};
+
+export type HeadlessOperationErrorMessage = {
+  readonly type: "operationError";
+  readonly requestId: string;
+  readonly code: ProviderAccountImportCode | "invalid_request";
+  readonly message: string;
+};
+
+type HeadlessInboundMessage =
+  | { readonly type: "shutdown"; readonly requestId: string }
+  | {
+    readonly type: "providerAccountList";
+    readonly requestId: string;
+    readonly cursor: string | null;
+    readonly limit: number | null;
+  }
+  | {
+    readonly type: "providerAccountImport";
+    readonly requestId: string;
+    readonly authJsonPath: string;
+    readonly userLabel: string;
+  };
 
 type EncodedInputLine =
   | { readonly oversized: true }
@@ -208,7 +254,10 @@ function defaultInstanceId(): string {
 function encodeMessage(message:
   | HeadlessReadyMessage
   | HeadlessShutdownCompleteMessage
-  | HeadlessProtocolErrorMessage,
+  | HeadlessProtocolErrorMessage
+  | HeadlessProviderAccountListResultMessage
+  | HeadlessProviderAccountImportResultMessage
+  | HeadlessOperationErrorMessage,
 ): string {
   const line = JSON.stringify(message);
   if (Buffer.byteLength(line, "utf8") > RICHCODEX_BACKEND_MAX_MESSAGE_BYTES) {
@@ -220,14 +269,16 @@ function encodeMessage(message:
   return line;
 }
 
-function readyMessage(instanceId: string): HeadlessReadyMessage {
+function readyMessage(instanceId: string, accountStore: ProviderAccountStore): HeadlessReadyMessage {
+  const snapshot = accountStore.snapshot();
   return {
     type: "ready",
     protocolVersion: RICHCODEX_BACKEND_PROTOCOL_VERSION,
     instanceId,
     kernel: RICHCODEX_BACKEND_KERNEL,
-    catalogRevision: 0,
-    providers: [],
+    desiredStateRevision: snapshot.desiredStateRevision,
+    catalogRevision: snapshot.catalogRevision,
+    providers: snapshot.providers,
     models: [],
   };
 }
@@ -247,6 +298,16 @@ function ownKeys(value: Record<string, unknown>): string[] {
   return Object.keys(value);
 }
 
+function hasExactlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = ownKeys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function parseRequestId(value: unknown): string | null {
+  return isBoundedOpaqueText(value, RICHCODEX_BACKEND_MAX_REQUEST_ID_BYTES) ? value : null;
+}
+
 function parseInboundMessage(text: string):
   | { readonly ok: true; readonly message: HeadlessInboundMessage }
   | { readonly ok: false; readonly error: HeadlessProtocolErrorMessage } {
@@ -264,20 +325,53 @@ function parseInboundMessage(text: string):
   if (typeof record.type !== "string") {
     return { ok: false, error: protocolError("malformed_message") };
   }
-  if (record.type !== "shutdown") {
-    return { ok: false, error: protocolError("unknown_message_type") };
+  if (record.type === "shutdown") {
+    const requestId = parseRequestId(record.requestId);
+    if (!hasExactlyKeys(record, ["type", "requestId"]) || !requestId) {
+      return { ok: false, error: protocolError("malformed_shutdown") };
+    }
+    return { ok: true, message: { type: "shutdown", requestId } };
   }
-  if (ownKeys(record).length !== 2 || typeof record.requestId !== "string") {
-    return { ok: false, error: protocolError("malformed_shutdown") };
+  if (record.type === "providerAccountList") {
+    const requestId = parseRequestId(record.requestId);
+    const cursor = record.cursor === undefined || record.cursor === null ? null : record.cursor;
+    const limit = record.limit === undefined || record.limit === null ? null : record.limit;
+    const keys = ownKeys(record);
+    if (
+      !requestId
+      || keys.some(key => !["type", "requestId", "cursor", "limit"].includes(key))
+      || typeof cursor !== "string" && cursor !== null
+      || typeof cursor === "string" && !isBoundedOpaqueText(cursor, 64)
+      || typeof limit !== "number" && limit !== null
+      || (typeof limit === "number" && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100))
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return { ok: true, message: { type: "providerAccountList", requestId, cursor, limit } };
   }
-
-  const requestId = record.requestId;
-  if (
-    !isBoundedOpaqueText(requestId, RICHCODEX_BACKEND_MAX_REQUEST_ID_BYTES)
-  ) {
-    return { ok: false, error: protocolError("malformed_shutdown") };
+  if (record.type === "providerAccountImport") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "authJsonPath", "userLabel"])
+      || !requestId
+      || !isBoundedOpaqueText(record.authJsonPath, RICHCODEX_BACKEND_MAX_STATE_ROOT_BYTES)
+      || !isAbsolute(record.authJsonPath)
+      || !isBoundedOpaqueText(record.userLabel, 80)
+      || record.userLabel.trim() !== record.userLabel
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountImport",
+        requestId,
+        authJsonPath: record.authJsonPath,
+        userLabel: record.userLabel,
+      },
+    };
   }
-  return { ok: true, message: { type: "shutdown", requestId } };
+  return { ok: false, error: protocolError("unknown_message_type") };
 }
 
 function isBoundedOpaqueText(value: unknown, maxBytes: number): value is string {
@@ -359,9 +453,47 @@ function defaultStderrMessage(error: unknown): string {
     : "backend process failed";
 }
 
-/** Create the filesystem-free RichCodex composition root. */
+function operationErrorForCode(
+  requestId: string,
+  code: ProviderAccountImportCode | "invalid_request",
+): HeadlessOperationErrorMessage {
+  const messages: Record<ProviderAccountImportCode | "invalid_request", string> = {
+    source_unavailable: "selected credential source is unavailable",
+    source_too_large: "selected credential source exceeds its limit",
+    invalid_auth_document: "selected credential source is not a supported Codex login",
+    credential_expired: "selected Codex login has expired",
+    account_already_exists: "this provider account is already configured",
+    account_limit_reached: "provider account limit reached",
+    store_unavailable: "provider account store is unavailable",
+    invalid_request: "provider account request is invalid",
+  };
+  return { type: "operationError", requestId, code, message: messages[code] };
+}
+
+function operationError(requestId: string, error: unknown): HeadlessOperationErrorMessage {
+  return operationErrorForCode(
+    requestId,
+    error instanceof ProviderAccountImportError ? error.code : "store_unavailable",
+  );
+}
+
+function pageAccounts(
+  accounts: readonly SafeProviderAccount[],
+  cursor: string | null,
+  requestedLimit: number | null,
+): { readonly data: readonly SafeProviderAccount[]; readonly nextCursor: string | null } | null {
+  const offset = cursor === null ? 0 : Number(cursor);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > accounts.length) return null;
+  const limit = requestedLimit ?? 50;
+  const data = accounts.slice(offset, offset + limit);
+  const nextOffset = offset + data.length;
+  return { data, nextCursor: nextOffset < accounts.length ? String(nextOffset) : null };
+}
+
+/** Create the RichCodex-owned composition root. */
 export function createHeadlessBackend(options: HeadlessBackendOptions = {}): HeadlessBackend {
   const stateRoot = resolveBackendStateRoot(options);
+  const accountStore = options.accountStore ?? createProviderAccountStore(stateRoot);
   const instanceId = options.createInstanceId?.() ?? defaultInstanceId();
   if (!isBoundedOpaqueText(instanceId, RICHCODEX_BACKEND_MAX_MESSAGE_BYTES)) {
     throw new HeadlessBackendConfigurationError("instance_id_invalid");
@@ -373,7 +505,12 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
     async run(io): Promise<HeadlessBackendRunResult> {
       let readyWritten = false;
       const write = async (
-        message: HeadlessReadyMessage | HeadlessShutdownCompleteMessage | HeadlessProtocolErrorMessage,
+        message: HeadlessReadyMessage
+          | HeadlessShutdownCompleteMessage
+          | HeadlessProtocolErrorMessage
+          | HeadlessProviderAccountListResultMessage
+          | HeadlessProviderAccountImportResultMessage
+          | HeadlessOperationErrorMessage,
       ): Promise<boolean> => {
         try {
           await io.stdout(encodeMessage(message));
@@ -388,7 +525,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
         }
       };
 
-      if (!await write(readyMessage(instanceId))) {
+      if (!await write(readyMessage(instanceId, accountStore))) {
         return { exitCode: 1, reason: "output_error" };
       }
       readyWritten = true;
@@ -419,10 +556,49 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             continue;
           }
 
-          if (!await write({ type: "shutdownComplete", requestId: parsed.message.requestId })) {
-            return { exitCode: 1, reason: "output_error" };
+          if (parsed.message.type === "shutdown") {
+            if (!await write({ type: "shutdownComplete", requestId: parsed.message.requestId })) {
+              return { exitCode: 1, reason: "output_error" };
+            }
+            return { exitCode: 0, reason: "shutdown" };
           }
-          return { exitCode: 0, reason: "shutdown" };
+          if (parsed.message.type === "providerAccountList") {
+            const snapshot = accountStore.snapshot();
+            const page = pageAccounts(snapshot.accounts, parsed.message.cursor, parsed.message.limit);
+            const response = page === null
+              ? operationErrorForCode(parsed.message.requestId, "invalid_request")
+              : {
+                  type: "providerAccountListResult" as const,
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  providers: snapshot.providers,
+                  data: page.data,
+                  nextCursor: page.nextCursor,
+                };
+            if (!await write(response)) return { exitCode: 1, reason: "output_error" };
+            continue;
+          }
+          try {
+            const account = accountStore.importCodexAuthJson(
+              parsed.message.authJsonPath,
+              parsed.message.userLabel,
+            );
+            const snapshot = accountStore.snapshot();
+            if (!await write({
+              type: "providerAccountImportResult",
+              requestId: parsed.message.requestId,
+              desiredStateRevision: snapshot.desiredStateRevision,
+              catalogRevision: snapshot.catalogRevision,
+              account,
+            })) {
+              return { exitCode: 1, reason: "output_error" };
+            }
+          } catch (error) {
+            if (!await write(operationError(parsed.message.requestId, error))) {
+              return { exitCode: 1, reason: "output_error" };
+            }
+          }
         }
       } catch (error) {
         try {
