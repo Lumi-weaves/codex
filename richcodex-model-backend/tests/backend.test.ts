@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -192,7 +200,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(output).not.toContain("refresh-");
     expect(output).not.toContain(source);
     expect(readFileSync(source, "utf8")).toBe(sourceBytes);
-    const persisted = join(stateRoot, "providers", "openai", "accounts.json");
+    const persisted = join(stateRoot, "model-plane.json");
     expect(existsSync(persisted)).toBe(true);
     if (process.platform !== "win32") expect(statSync(persisted).mode & 0o777).toBe(0o600);
   });
@@ -224,6 +232,188 @@ describe("RichCodex headless backend composition root", () => {
       catalogRevision: 1,
       account: { providerId: "openai", status: "verificationRequired" },
     });
+  });
+
+  test("creates, reads, retires, and restores one account-bound model route", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-model-route-"));
+    const stateRoot = join(root, "backend-state");
+    const source = join(root, "selected-auth.json");
+    writeFileSync(source, codexAuthJson("route-account", Date.now() + 3_600_000), { mode: 0o600 });
+
+    const imported = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountImport",
+        requestId: "import-route-account",
+        authJsonPath: source,
+        userLabel: "Route Account",
+      })}\n`,
+      stateRoot,
+    );
+    const importedAccount = (imported.lines[1] as { account: { id: string } }).account;
+    const created = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteCreate",
+        requestId: "create-route",
+        expectedRevision: 1,
+        modelTag: "gpt-primary",
+        displayName: "GPT Primary",
+        semanticModel: "openai/gpt-primary",
+        providerId: "openai",
+        accountId: importedAccount.id,
+        upstreamModelId: "gpt-primary-2026-08-13",
+      })}\n${JSON.stringify({ type: "modelRouteRead", requestId: "read-route" })}\n`,
+      stateRoot,
+    );
+
+    expect(created.lines[0]).toMatchObject({
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      models: [],
+    });
+    expect(created.lines[1]).toMatchObject({
+      type: "modelRouteCreateResult",
+      desiredStateRevision: 2,
+      catalogRevision: 2,
+      route: {
+        modelTag: "gpt-primary",
+        displayName: "GPT Primary",
+        retired: false,
+        semanticModel: "openai/gpt-primary",
+        targets: [{
+          providerId: "openai",
+          accountId: importedAccount.id,
+          upstreamModelId: "gpt-primary-2026-08-13",
+          priority: 0,
+          status: "unverified",
+        }],
+      },
+    });
+    expect(created.lines[2]).toMatchObject({
+      type: "modelRouteReadResult",
+      desiredStateRevision: 2,
+      catalogRevision: 2,
+      data: [{ modelTag: "gpt-primary", retired: false }],
+    });
+
+    const retired = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteRetire",
+        requestId: "retire-route",
+        expectedRevision: 2,
+        modelTag: "gpt-primary",
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "shutdown-route" })}\n`,
+      stateRoot,
+    );
+    expect(retired.lines[0]).toMatchObject({
+      desiredStateRevision: 2,
+      catalogRevision: 2,
+      models: [{ modelTag: "gpt-primary", retired: false }],
+    });
+    expect(retired.lines[1]).toMatchObject({
+      type: "modelRouteRetireResult",
+      desiredStateRevision: 3,
+      catalogRevision: 3,
+      route: { modelTag: "gpt-primary", retired: true },
+    });
+
+    const restored = await runBackend(
+      `${JSON.stringify({ type: "modelRouteRead", requestId: "read-restored-route" })}\n`,
+      stateRoot,
+    );
+    expect(restored.lines[0]).toMatchObject({
+      desiredStateRevision: 3,
+      catalogRevision: 3,
+      models: [],
+    });
+    expect(restored.lines[1]).toMatchObject({
+      type: "modelRouteReadResult",
+      data: [{ modelTag: "gpt-primary", retired: true, targets: [{ accountId: importedAccount.id }] }],
+    });
+    const serialized = JSON.stringify([...created.lines, ...retired.lines, ...restored.lines]);
+    expect(serialized).not.toContain("refresh-route-account");
+    expect(serialized).not.toContain("route-account");
+  });
+
+  test("rejects stale route creation without changing the model plane", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-model-route-conflict-"));
+    const stateRoot = join(root, "backend-state");
+    const source = join(root, "selected-auth.json");
+    writeFileSync(source, codexAuthJson("conflict-account", Date.now() + 3_600_000), { mode: 0o600 });
+    const imported = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountImport",
+        requestId: "import-conflict-account",
+        authJsonPath: source,
+        userLabel: "Conflict Account",
+      })}\n`,
+      stateRoot,
+    );
+    const accountId = (imported.lines[1] as { account: { id: string } }).account.id;
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteCreate",
+        requestId: "stale-route",
+        expectedRevision: 0,
+        modelTag: "stale-route",
+        displayName: "Stale Route",
+        semanticModel: "openai/stale-route",
+        providerId: "openai",
+        accountId,
+        upstreamModelId: "stale-route",
+      })}\n${JSON.stringify({ type: "modelRouteRead", requestId: "read-after-conflict" })}\n`,
+      stateRoot,
+    );
+    expect(result.lines[1]).toEqual({
+      type: "operationError",
+      requestId: "stale-route",
+      code: "revision_conflict",
+      message: "model plane revision does not match",
+    });
+    expect(result.lines[2]).toMatchObject({
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      data: [],
+    });
+  });
+
+  test("migrates the Slice 1A account document into one revisioned model plane", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-model-plane-migration-"));
+    const stateRoot = join(root, "backend-state");
+    const legacyDirectory = join(stateRoot, "providers", "openai");
+    const legacyPath = join(legacyDirectory, "accounts.json");
+    mkdirSync(legacyDirectory, { recursive: true, mode: 0o700 });
+    writeFileSync(legacyPath, JSON.stringify({
+      schemaVersion: 1,
+      desiredStateRevision: 4,
+      catalogRevision: 4,
+      accounts: [{
+        id: "account-legacy",
+        providerId: "openai",
+        userLabel: "Legacy",
+        status: "verificationRequired",
+        addedAt: 1,
+        credential: {
+          accessToken: jwt({ exp: Math.floor(Date.now() / 1000) + 3600, chatgpt_account_id: "legacy" }),
+          refreshToken: "refresh-legacy",
+          chatgptAccountId: "legacy",
+          expiresAt: Date.now() + 3_600_000,
+        },
+      }],
+    }), { mode: 0o600 });
+
+    const migrated = await runBackend(
+      `${JSON.stringify({ type: "modelRouteRead", requestId: "read-migrated" })}\n`,
+      stateRoot,
+    );
+    expect(migrated.lines[0]).toMatchObject({ desiredStateRevision: 4, catalogRevision: 4 });
+    expect(migrated.lines[1]).toMatchObject({
+      type: "modelRouteReadResult",
+      desiredStateRevision: 4,
+      catalogRevision: 4,
+      data: [],
+    });
+    expect(existsSync(join(stateRoot, "model-plane.json"))).toBe(true);
+    expect(existsSync(legacyPath)).toBe(false);
   });
 
   test("failed imports preserve revisions and do not reflect credential-shaped input", async () => {

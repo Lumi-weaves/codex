@@ -2,13 +2,15 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { RICHCODEX_BACKEND_KERNEL, type RichCodexBackendKernel } from "./kernel-manifest";
 import {
-  createProviderAccountStore,
-  ProviderAccountImportError,
+  createModelPlaneStore,
+  ModelPlaneError,
+  type ModelPlaneStore,
+  type ModelRouteMutationCode,
   type ProviderAccountImportCode,
-  type ProviderAccountStore,
   type SafeProviderAccount,
+  type SafeModelRoute,
   type SafeProviderSummary,
-} from "./provider-account";
+} from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
 export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 2 as const;
@@ -64,7 +66,7 @@ export interface HeadlessBackendOptions {
   /** Internal deterministic seam; production uses a fresh random UUID. */
   readonly createInstanceId?: () => string;
   /** Internal persistence seam for focused tests and future embeddings. */
-  readonly accountStore?: ProviderAccountStore;
+  readonly modelPlaneStore?: ModelPlaneStore;
 }
 
 export interface HeadlessBackendRunIo {
@@ -104,7 +106,7 @@ export type HeadlessReadyMessage = {
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
   readonly providers: readonly SafeProviderSummary[];
-  readonly models: readonly [];
+  readonly models: readonly SafeModelRoute[];
 };
 
 export type HeadlessShutdownCompleteMessage = {
@@ -143,10 +145,26 @@ export type HeadlessProviderAccountImportResultMessage = {
   readonly account: SafeProviderAccount;
 };
 
+export type HeadlessModelRouteReadResultMessage = {
+  readonly type: "modelRouteReadResult";
+  readonly requestId: string;
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
+  readonly data: readonly SafeModelRoute[];
+};
+
+export type HeadlessModelRouteMutationResultMessage = {
+  readonly type: "modelRouteCreateResult" | "modelRouteRetireResult";
+  readonly requestId: string;
+  readonly desiredStateRevision: number;
+  readonly catalogRevision: number;
+  readonly route: SafeModelRoute;
+};
+
 export type HeadlessOperationErrorMessage = {
   readonly type: "operationError";
   readonly requestId: string;
-  readonly code: ProviderAccountImportCode | "invalid_request";
+  readonly code: ProviderAccountImportCode | ModelRouteMutationCode;
   readonly message: string;
 };
 
@@ -163,6 +181,24 @@ type HeadlessInboundMessage =
     readonly requestId: string;
     readonly authJsonPath: string;
     readonly userLabel: string;
+  }
+  | { readonly type: "modelRouteRead"; readonly requestId: string }
+  | {
+    readonly type: "modelRouteCreate";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly modelTag: string;
+    readonly displayName: string;
+    readonly semanticModel: string;
+    readonly providerId: "openai";
+    readonly accountId: string;
+    readonly upstreamModelId: string;
+  }
+  | {
+    readonly type: "modelRouteRetire";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly modelTag: string;
   };
 
 type EncodedInputLine =
@@ -257,6 +293,8 @@ function encodeMessage(message:
   | HeadlessProtocolErrorMessage
   | HeadlessProviderAccountListResultMessage
   | HeadlessProviderAccountImportResultMessage
+  | HeadlessModelRouteReadResultMessage
+  | HeadlessModelRouteMutationResultMessage
   | HeadlessOperationErrorMessage,
 ): string {
   const line = JSON.stringify(message);
@@ -269,8 +307,8 @@ function encodeMessage(message:
   return line;
 }
 
-function readyMessage(instanceId: string, accountStore: ProviderAccountStore): HeadlessReadyMessage {
-  const snapshot = accountStore.snapshot();
+function readyMessage(instanceId: string, modelPlaneStore: ModelPlaneStore): HeadlessReadyMessage {
+  const snapshot = modelPlaneStore.snapshot();
   return {
     type: "ready",
     protocolVersion: RICHCODEX_BACKEND_PROTOCOL_VERSION,
@@ -279,7 +317,7 @@ function readyMessage(instanceId: string, accountStore: ProviderAccountStore): H
     desiredStateRevision: snapshot.desiredStateRevision,
     catalogRevision: snapshot.catalogRevision,
     providers: snapshot.providers,
-    models: [],
+    models: snapshot.modelRoutes.filter(route => !route.retired),
   };
 }
 
@@ -371,6 +409,81 @@ function parseInboundMessage(text: string):
       },
     };
   }
+  if (record.type === "modelRouteRead") {
+    const requestId = parseRequestId(record.requestId);
+    if (!hasExactlyKeys(record, ["type", "requestId"]) || !requestId) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return { ok: true, message: { type: "modelRouteRead", requestId } };
+  }
+  if (record.type === "modelRouteCreate") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, [
+        "type",
+        "requestId",
+        "expectedRevision",
+        "modelTag",
+        "displayName",
+        "semanticModel",
+        "providerId",
+        "accountId",
+        "upstreamModelId",
+      ])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.modelTag, 80)
+      || record.modelTag.trim() !== record.modelTag
+      || !/^[a-z0-9][a-z0-9._/-]*$/.test(record.modelTag)
+      || !isBoundedOpaqueText(record.displayName, 80)
+      || record.displayName.trim() !== record.displayName
+      || !isBoundedOpaqueText(record.semanticModel, 200)
+      || record.semanticModel.trim() !== record.semanticModel
+      || record.providerId !== "openai"
+      || !isBoundedOpaqueText(record.accountId, 80)
+      || !isBoundedOpaqueText(record.upstreamModelId, 512)
+      || record.upstreamModelId.trim() !== record.upstreamModelId
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: {
+        type: "modelRouteCreate",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        modelTag: record.modelTag,
+        displayName: record.displayName,
+        semanticModel: record.semanticModel,
+        providerId: "openai",
+        accountId: record.accountId,
+        upstreamModelId: record.upstreamModelId,
+      },
+    };
+  }
+  if (record.type === "modelRouteRetire") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "modelTag"])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.modelTag, 80)
+      || record.modelTag.trim() !== record.modelTag
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: {
+        type: "modelRouteRetire",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        modelTag: record.modelTag,
+      },
+    };
+  }
   return { ok: false, error: protocolError("unknown_message_type") };
 }
 
@@ -455,17 +568,21 @@ function defaultStderrMessage(error: unknown): string {
 
 function operationErrorForCode(
   requestId: string,
-  code: ProviderAccountImportCode | "invalid_request",
+  code: ProviderAccountImportCode | ModelRouteMutationCode,
 ): HeadlessOperationErrorMessage {
-  const messages: Record<ProviderAccountImportCode | "invalid_request", string> = {
+  const messages: Record<ProviderAccountImportCode | ModelRouteMutationCode, string> = {
     source_unavailable: "selected credential source is unavailable",
     source_too_large: "selected credential source exceeds its limit",
     invalid_auth_document: "selected credential source is not a supported Codex login",
     credential_expired: "selected Codex login has expired",
     account_already_exists: "this provider account is already configured",
     account_limit_reached: "provider account limit reached",
-    store_unavailable: "provider account store is unavailable",
-    invalid_request: "provider account request is invalid",
+    store_unavailable: "RichCodex model plane store is unavailable",
+    invalid_request: "model plane request is invalid",
+    revision_conflict: "model plane revision does not match",
+    model_tag_exists: "model tag already exists",
+    model_tag_not_found: "model tag does not exist",
+    account_unavailable: "selected provider account is unavailable",
   };
   return { type: "operationError", requestId, code, message: messages[code] };
 }
@@ -473,7 +590,7 @@ function operationErrorForCode(
 function operationError(requestId: string, error: unknown): HeadlessOperationErrorMessage {
   return operationErrorForCode(
     requestId,
-    error instanceof ProviderAccountImportError ? error.code : "store_unavailable",
+    error instanceof ModelPlaneError ? error.code : "store_unavailable",
   );
 }
 
@@ -493,7 +610,7 @@ function pageAccounts(
 /** Create the RichCodex-owned composition root. */
 export function createHeadlessBackend(options: HeadlessBackendOptions = {}): HeadlessBackend {
   const stateRoot = resolveBackendStateRoot(options);
-  const accountStore = options.accountStore ?? createProviderAccountStore(stateRoot);
+  const modelPlaneStore = options.modelPlaneStore ?? createModelPlaneStore(stateRoot);
   const instanceId = options.createInstanceId?.() ?? defaultInstanceId();
   if (!isBoundedOpaqueText(instanceId, RICHCODEX_BACKEND_MAX_MESSAGE_BYTES)) {
     throw new HeadlessBackendConfigurationError("instance_id_invalid");
@@ -510,6 +627,8 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
           | HeadlessProtocolErrorMessage
           | HeadlessProviderAccountListResultMessage
           | HeadlessProviderAccountImportResultMessage
+          | HeadlessModelRouteReadResultMessage
+          | HeadlessModelRouteMutationResultMessage
           | HeadlessOperationErrorMessage,
       ): Promise<boolean> => {
         try {
@@ -525,7 +644,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
         }
       };
 
-      if (!await write(readyMessage(instanceId, accountStore))) {
+      if (!await write(readyMessage(instanceId, modelPlaneStore))) {
         return { exitCode: 1, reason: "output_error" };
       }
       readyWritten = true;
@@ -563,7 +682,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             return { exitCode: 0, reason: "shutdown" };
           }
           if (parsed.message.type === "providerAccountList") {
-            const snapshot = accountStore.snapshot();
+            const snapshot = modelPlaneStore.snapshot();
             const page = pageAccounts(snapshot.accounts, parsed.message.cursor, parsed.message.limit);
             const response = page === null
               ? operationErrorForCode(parsed.message.requestId, "invalid_request")
@@ -579,21 +698,49 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             if (!await write(response)) return { exitCode: 1, reason: "output_error" };
             continue;
           }
-          try {
-            const account = accountStore.importCodexAuthJson(
-              parsed.message.authJsonPath,
-              parsed.message.userLabel,
-            );
-            const snapshot = accountStore.snapshot();
+          if (parsed.message.type === "modelRouteRead") {
+            const snapshot = modelPlaneStore.snapshot();
             if (!await write({
-              type: "providerAccountImportResult",
+              type: "modelRouteReadResult",
               requestId: parsed.message.requestId,
               desiredStateRevision: snapshot.desiredStateRevision,
               catalogRevision: snapshot.catalogRevision,
-              account,
-            })) {
-              return { exitCode: 1, reason: "output_error" };
+              data: snapshot.modelRoutes,
+            })) return { exitCode: 1, reason: "output_error" };
+            continue;
+          }
+          try {
+            if (parsed.message.type === "providerAccountImport") {
+              const account = modelPlaneStore.importCodexAuthJson(
+                parsed.message.authJsonPath,
+                parsed.message.userLabel,
+              );
+              const snapshot = modelPlaneStore.snapshot();
+              if (!await write({
+                type: "providerAccountImportResult",
+                requestId: parsed.message.requestId,
+                desiredStateRevision: snapshot.desiredStateRevision,
+                catalogRevision: snapshot.catalogRevision,
+                account,
+              })) return { exitCode: 1, reason: "output_error" };
+              continue;
             }
+            const route = parsed.message.type === "modelRouteCreate"
+              ? modelPlaneStore.createModelRoute(parsed.message)
+              : modelPlaneStore.retireModelRoute(
+                  parsed.message.modelTag,
+                  parsed.message.expectedRevision,
+                );
+            const snapshot = modelPlaneStore.snapshot();
+            if (!await write({
+              type: parsed.message.type === "modelRouteCreate"
+                ? "modelRouteCreateResult"
+                : "modelRouteRetireResult",
+              requestId: parsed.message.requestId,
+              desiredStateRevision: snapshot.desiredStateRevision,
+              catalogRevision: snapshot.catalogRevision,
+              route,
+            })) return { exitCode: 1, reason: "output_error" };
           } catch (error) {
             if (!await write(operationError(parsed.message.requestId, error))) {
               return { exitCode: 1, reason: "output_error" };
