@@ -14,6 +14,8 @@ from codex_package.prototype import PrototypeProfile
 from codex_package.prototype import builder_command
 from codex_package.prototype import export_profile
 from codex_package.prototype import load_profile
+from codex_package.prototype import model_backend_builder_command
+from codex_package.prototype import model_backend_entrypoint
 from codex_package.prototype import prototype_entrypoint
 from codex_package.prototype import replace_directory
 from codex_package.targets import native_target
@@ -100,6 +102,26 @@ class ExportProfileTest(unittest.TestCase):
             prototype_entrypoint(windows_profile, Path("C:/prototype")),
             Path("C:/prototype/bin/codex-app-server.exe"),
         )
+        self.assertEqual(
+            model_backend_entrypoint(windows_profile, Path("C:/prototype")),
+            Path("C:/prototype/bin/richcodex-model-backend.exe"),
+        )
+
+    def test_backend_builder_uses_frozen_package_and_native_output(self) -> None:
+        command = model_backend_builder_command(
+            PrototypeProfile(
+                name="local-test",
+                variant="codex",
+                target="native",
+                cargo_profile="dev-small",
+            ),
+            Path("/tmp/staging"),
+        )
+
+        self.assertEqual(command[1:4], ["build", "--compile", "src/index.ts"])
+        self.assertEqual(
+            command[-1], "/tmp/staging/bin/richcodex-model-backend"
+        )
 
     @mock.patch(
         "codex_package.prototype.source_provenance",
@@ -115,12 +137,19 @@ class ExportProfileTest(unittest.TestCase):
             def fake_run(
                 command: list[str], **_kwargs: object
             ) -> subprocess.CompletedProcess[str]:
-                package_dir = Path(command[command.index("--package-dir") + 1])
-                (package_dir / "codex-package.json").write_text(
-                    json.dumps({"version": "0.0.0"}), encoding="utf-8"
-                )
-                (package_dir / "bin").mkdir()
-                (package_dir / "bin" / "codex").write_text("new", encoding="utf-8")
+                if "--package-dir" in command:
+                    package_dir = Path(command[command.index("--package-dir") + 1])
+                    (package_dir / "codex-package.json").write_text(
+                        json.dumps({"version": "0.0.0"}), encoding="utf-8"
+                    )
+                    (package_dir / "bin").mkdir()
+                    (package_dir / "bin" / "codex").write_text(
+                        "new", encoding="utf-8"
+                    )
+                else:
+                    Path(command[command.index("--outfile") + 1]).write_text(
+                        "backend", encoding="utf-8"
+                    )
                 return subprocess.CompletedProcess(command, 0)
 
             destination = export_profile(self.profile, output_root, run=fake_run)
@@ -131,12 +160,20 @@ class ExportProfileTest(unittest.TestCase):
             self.assertFalse((destination / "old").exists())
             self.assertEqual((destination / "bin" / "codex").read_text(), "new")
             self.assertEqual(
+                (destination / "bin" / "richcodex-model-backend").read_text(),
+                "backend",
+            )
+            self.assertEqual(
                 metadata["prototype"],
                 {
                     "profile": "local-test",
                     "sourceRevision": "abc123",
                     "sourceDirty": True,
                 },
+            )
+            self.assertEqual(
+                metadata["richcodexModelBackend"]["kernel"]["sourceCommit"],
+                "cbbfdd8773e68a5dc2391ddeb32f33a225373c1a",
             )
 
     def test_failed_swap_restores_previous_directory(self) -> None:
