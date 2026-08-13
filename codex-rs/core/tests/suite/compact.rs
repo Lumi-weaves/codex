@@ -701,6 +701,8 @@ async fn local_compaction_retains_agent_input_but_not_completion() {
     let request_log = mount_sse_sequence(
         &server,
         vec![
+            sse(vec![ev_completed("mail1")]),
+            sse(vec![ev_completed("mail2")]),
             sse(vec![
                 ev_assistant_message("m1", FIRST_REPLY),
                 ev_completed("r1"),
@@ -733,34 +735,29 @@ async fn local_compaction_retains_agent_input_but_not_completion() {
             worker_path.clone(),
             Vec::new(),
             RETAINED.to_string(),
-            /*trigger_turn*/ false,
+            /*trigger_turn*/ true,
         ),
         InterAgentCommunication::new(
             worker_path,
             AgentPath::root(),
             Vec::new(),
             COMPLETION.to_string(),
-            /*trigger_turn*/ false,
+            /*trigger_turn*/ true,
         ),
     ];
-    // Queue both messages before a regular turn so they are committed to history before compact.
+    // Give each message a turn so both are committed to history before compact.
     for communication in communications {
         codex
             .submit(Op::InterAgentCommunication { communication })
             .await
             .unwrap();
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     }
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "hello world".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "hello world".into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
@@ -769,24 +766,18 @@ async fn local_compaction_retains_agent_input_but_not_completion() {
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: THIRD_USER_MSG.into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: THIRD_USER_MSG.into(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .unwrap();
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     let requests = request_log.requests();
-    assert_eq!(requests.len(), 3);
-    let compact_body = requests[1].body_json().to_string();
-    let follow_up_body = requests[2].body_json().to_string();
+    assert_eq!(requests.len(), 5);
+    let compact_body = requests[3].body_json().to_string();
+    let follow_up_body = requests[4].body_json().to_string();
 
     assert!(body_contains_text(&compact_body, RETAINED));
     assert!(body_contains_text(&compact_body, COMPLETION));

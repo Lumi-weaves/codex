@@ -1239,16 +1239,10 @@ async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
     .await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "manual continuity".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "manual continuity".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_turn_complete(&codex).await;
     codex.submit(Op::Compact).await?;
@@ -1284,7 +1278,7 @@ async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
         .expect("manual v2 replacement history");
     assert!(
         matches!(
-            replacement_history.first(),
+            replacement_history.first().map(|envelope| &envelope.item),
             Some(ResponseItem::Compaction {
                 encrypted_content,
                 ..
@@ -1296,10 +1290,15 @@ async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
     assert!(
         replacement_history[1..]
             .iter()
-            .all(|item| matches!(item, ResponseItem::Message { .. })),
+            .all(|envelope| matches!(&envelope.item, ResponseItem::Message { .. })),
         "only freshly rendered current context should follow the checkpoint"
     );
-    let replacement_text = serde_json::to_string(&replacement_history)?;
+    let replacement_text = serde_json::to_string(
+        &replacement_history
+            .iter()
+            .map(|envelope| &envelope.item)
+            .collect::<Vec<_>>(),
+    )?;
     assert!(!replacement_text.contains("manual continuity"));
     assert!(!replacement_text.contains("BEFORE_COMPACT"));
     assert_eq!(checkpoint.window_number, Some(1));
@@ -4121,30 +4120,18 @@ async fn remote_pre_turn_compact_v2_installs_checkpoint_before_post_boundary_use
     .await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "PRE_BOUNDARY_USER".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "PRE_BOUNDARY_USER".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_turn_complete(&codex).await;
 
     codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "POST_BOUNDARY_USER".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        })
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "POST_BOUNDARY_USER".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     let compaction_id = wait_for_event_match(&codex, |event| match event {
         EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -4199,7 +4186,7 @@ async fn remote_pre_turn_compact_v2_installs_checkpoint_before_post_boundary_use
         .expect("pre-turn v2 replacement history");
     assert!(
         matches!(
-            replacement_history.first(),
+            replacement_history.first().map(|envelope| &envelope.item),
             Some(ResponseItem::Compaction {
                 encrypted_content,
                 ..
@@ -4208,7 +4195,12 @@ async fn remote_pre_turn_compact_v2_installs_checkpoint_before_post_boundary_use
         "the checkpoint should be the first item in the new window"
     );
     assert!(replacement_history.len() > 1);
-    let replacement_text = serde_json::to_string(&replacement_history)?;
+    let replacement_text = serde_json::to_string(
+        &replacement_history
+            .iter()
+            .map(|envelope| &envelope.item)
+            .collect::<Vec<_>>(),
+    )?;
     assert!(!replacement_text.contains("PRE_BOUNDARY_USER"));
     assert!(!replacement_text.contains("POST_BOUNDARY_USER"));
 
@@ -4415,7 +4407,7 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
         .expect("mid-turn v2 replacement history");
     assert!(
         matches!(
-            replacement_history.first(),
+            replacement_history.first().map(|envelope| &envelope.item),
             Some(ResponseItem::Compaction {
                 encrypted_content,
                 ..
@@ -4424,7 +4416,12 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
         "the checkpoint should be the first item in the new window"
     );
     assert!(replacement_history.len() > 1);
-    let replacement_text = serde_json::to_string(&replacement_history)?;
+    let replacement_text = serde_json::to_string(
+        &replacement_history
+            .iter()
+            .map(|envelope| &envelope.item)
+            .collect::<Vec<_>>(),
+    )?;
     assert!(!replacement_text.contains("RUN_WITH_MID_TURN_COMPACT_V2"));
     assert_eq!(requests[2].input()[0]["type"], "compaction");
     assert!(
