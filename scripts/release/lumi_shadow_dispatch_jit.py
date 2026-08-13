@@ -100,7 +100,9 @@ RUNNER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-_]{1,64}$")
 Headers = dict[str, str]
 # Injected transport: (method, url, headers, body) -> (status, headers, body).
 # The base URL is fixed; tests mock the transport and never override it.
-Transport = Callable[[str, str, Headers, bytes | None], tuple[int, dict[str, str], bytes]]
+Transport = Callable[
+    [str, str, Headers, bytes | None], tuple[int, dict[str, str], bytes]
+]
 PopenFactory = Callable[..., Any]
 
 
@@ -153,7 +155,9 @@ def default_transport(
     """Real transport: urllib with a finite timeout; never includes secrets."""
     request = urllib.request.Request(url, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+        with urllib.request.urlopen(
+            request, timeout=REQUEST_TIMEOUT_SECONDS
+        ) as response:
             return response.status, dict(response.headers.items()), response.read()
     except urllib.error.HTTPError as error:
         raise ApiError(f"GitHub API returned HTTP {error.code} for {url}") from None
@@ -190,9 +194,7 @@ def _parse_json(status: int, body: bytes, path: str) -> Any:
         raise ApiError(f"GitHub API returned invalid JSON for {path}") from None
 
 
-def _get_json(
-    transport: Transport, method: str, path: str, headers: Headers
-) -> Any:
+def _get_json(transport: Transport, method: str, path: str, headers: Headers) -> Any:
     status, _resp_headers, body = _request(transport, method, path, headers)
     return _parse_json(status, body, path)
 
@@ -246,9 +248,7 @@ def _fetch_all_jobs(
     return collected
 
 
-def _check_run(
-    run: Any, run_id: int, run_attempt: int
-) -> tuple[str, int]:
+def _check_run(run: Any, run_id: int, run_attempt: int) -> tuple[str, int]:
     """Verify the run payload; return (head_sha, workflow_id)."""
     _require(isinstance(run, dict), "run payload is not an object")
     _require(run.get("id") == run_id, "run id does not match the requested run id")
@@ -281,17 +281,15 @@ def _check_run(
         repo = run.get(field)
         _require(isinstance(repo, dict), f"run {field} is missing")
         _require(repo.get("name") == "codex", f"run {field} name mismatch")
-        _require(
-            repo.get("full_name") == REPO, f"run {field} full name mismatch"
-        )
-        _require(
-            repo.get("url") == expected_repo_url, f"run {field} url mismatch"
-        )
+        _require(repo.get("full_name") == REPO, f"run {field} full name mismatch")
+        _require(repo.get("url") == expected_repo_url, f"run {field} url mismatch")
     _require(
         run.get("status") in {"queued", "requested", "waiting", "in_progress"},
         "run is not in a live state",
     )
-    _require(run.get("conclusion") is None, "run already concluded (completed/cancelled)")
+    _require(
+        run.get("conclusion") is None, "run already concluded (completed/cancelled)"
+    )
     return head_sha, workflow_id
 
 
@@ -336,7 +334,8 @@ def _select_job(
     """Verify gate + chosen job and return the chosen job (fail closed)."""
     _require(isinstance(jobs, list), "jobs payload is not a list")
     gate_jobs = [
-        job for job in jobs
+        job
+        for job in jobs
         if isinstance(job, dict) and job.get("name") == GATE_JOB_NAME
     ]
     _require(len(gate_jobs) == 1, "gate job must appear exactly once")
@@ -346,8 +345,7 @@ def _select_job(
 
     chosen_name = JOB_NAMES[target]
     chosen = [
-        job for job in jobs
-        if isinstance(job, dict) and job.get("name") == chosen_name
+        job for job in jobs if isinstance(job, dict) and job.get("name") == chosen_name
     ]
     _require(len(chosen) == 1, f"chosen job {chosen_name!r} must appear exactly once")
     job = chosen[0]
@@ -370,7 +368,9 @@ def _select_job(
     )
     _require(job.get("run_id") == run_id, "chosen job run_id mismatch")
     if job.get("run_attempt") is not None:
-        _require(job.get("run_attempt") == run_attempt, "chosen job run_attempt mismatch")
+        _require(
+            job.get("run_attempt") == run_attempt, "chosen job run_attempt mismatch"
+        )
     _require(
         job.get("workflow_name") == WORKFLOW_NAME,
         "chosen job workflow_name mismatch",
@@ -480,11 +480,7 @@ def _sanitize_env(env: dict[str, str]) -> dict[str, str]:
     sanitized: dict[str, str] = {}
     for key, value in env.items():
         upper = key.upper()
-        if (
-            upper in TOKEN_ENV_NAMES
-            or "TOKEN" in upper
-            or "AUTHORIZATION" in upper
-        ):
+        if upper in TOKEN_ENV_NAMES or "TOKEN" in upper or "AUTHORIZATION" in upper:
             continue
         sanitized[key] = value
     return sanitized
@@ -602,10 +598,10 @@ def dispatch(
         json.dumps(body, separators=(",", ":")).encode("utf-8"),
     )
     if status != 201:
-        raise ApiError(
-            f"generate-jitconfig returned HTTP {status}, expected 201"
-        )
-    data = _parse_json(status, resp_body, f"/repos/{REPO}/actions/runners/generate-jitconfig")
+        raise ApiError(f"generate-jitconfig returned HTTP {status}, expected 201")
+    data = _parse_json(
+        status, resp_body, f"/repos/{REPO}/actions/runners/generate-jitconfig"
+    )
     encoded = _check_jit_response(data, runner_name, expected_label)
 
     return _run_child(popen, runner_command, env, encoded.encode("ascii") + b"\n")
@@ -671,7 +667,9 @@ def main(
     except DispatchError as error:
         print(f"dispatch failed: {error}", file=sys.stderr)
         return 1
-    print(f"JIT config streamed to the runner; child exited with {code}", file=sys.stderr)
+    print(
+        f"JIT config streamed to the runner; child exited with {code}", file=sys.stderr
+    )
     return code
 
 

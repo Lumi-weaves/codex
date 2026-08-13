@@ -96,11 +96,12 @@ impl Session {
         config: &Config,
     ) -> (McpConfig, McpRuntimeContext) {
         let originator = self.originator().await;
-        let (windows_sandbox_level, session_source) = {
+        let (windows_sandbox_level, session_source, host_fallback_cwd) = {
             let state = self.state.lock().await;
             (
                 state.session_configuration.windows_sandbox_level,
                 state.session_configuration.session_source.clone(),
+                state.session_configuration.cwd().clone(),
             )
         };
         let environments = self.services.turn_environments.snapshot().await;
@@ -133,14 +134,13 @@ impl Session {
             )
             .await
             .config;
-        let local_stdio_fallback_cwd = environments
-            .primary()
-            .and_then(|environment| environment.cwd().to_abs_path().ok())
+        let local_process_cwd = environments
+            .local_environment_cwd()
             .map(|cwd| cwd.to_path_buf())
-            .unwrap_or_else(|| config.cwd.to_path_buf());
+            .unwrap_or_else(|| host_fallback_cwd.to_path_buf());
         let runtime_context = McpRuntimeContext::new(
             self.services.turn_environments.environment_manager(),
-            local_stdio_fallback_cwd,
+            local_process_cwd,
         );
         (mcp_config, runtime_context)
     }
@@ -442,11 +442,13 @@ impl Session {
             .selected_capability_roots
             .iter()
             .cloned()
-            .chain(
-                environments
-                    .turn_environments()
-                    .flat_map(|environment| environment.environment.selected_capability_roots()),
-            )
+            .chain(environments.turn_environments().flat_map(|environment| {
+                environment
+                    .config
+                    .selected_capability_roots
+                    .clone()
+                    .unwrap_or_else(|| environment.environment.selected_capability_roots())
+            }))
             .enumerate()
         {
             if let Some(kept_location) = root_locations_by_id.get(&root.id) {
@@ -1011,6 +1013,7 @@ fn mcp_elicitation_response_from_guardian_decision(
     match decision {
         ReviewDecision::Approved
         | ReviewDecision::ApprovedForSession
+        | ReviewDecision::ApprovedMcpPolicyAmendment
         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
         | ReviewDecision::NetworkPolicyAmendment { .. } => ElicitationResponse {
             action: ElicitationAction::Accept,

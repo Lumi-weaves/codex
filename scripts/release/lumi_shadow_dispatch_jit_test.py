@@ -148,7 +148,9 @@ def make_build_job(target: str = "arm64", labels=None, **overrides):
     job = make_job(
         jit.JOB_NAMES[target],
         status="queued",
-        labels=labels if labels is not None else ["self-hosted", expected_label(target)],
+        labels=labels
+        if labels is not None
+        else ["self-hosted", expected_label(target)],
     )
     job.update(overrides)
     return job
@@ -270,7 +272,11 @@ def responses_for(
     jobs_headers=None,
 ):
     jobs = make_jobs(target, jobs)
-    payload = jobs_payload_override if jobs_payload_override is not None else jobs_payload(jobs)
+    payload = (
+        jobs_payload_override
+        if jobs_payload_override is not None
+        else jobs_payload(jobs)
+    )
     jobs_read = (200, jobs_headers or {}, payload)
     return [
         (200, {}, make_run()),
@@ -281,7 +287,11 @@ def responses_for(
         (200, {}, make_workflow()),
         (200, {}, make_main_ref()),
         jobs_read,
-        (201, {}, jit_response if jit_response is not None else make_jit_response(target)),
+        (
+            201,
+            {},
+            jit_response if jit_response is not None else make_jit_response(target),
+        ),
     ]
 
 
@@ -295,8 +305,12 @@ def run_cli(
     transport=None,
     argv=None,
 ):
-    transport = transport if transport is not None else MockTransport(
-        responses if responses is not None else responses_for(target)
+    transport = (
+        transport
+        if transport is not None
+        else MockTransport(
+            responses if responses is not None else responses_for(target)
+        )
     )
     fake_popen = popen if popen is not None else FakePopen(exit_code=exit_code)
     env = {
@@ -311,13 +325,22 @@ def run_cli(
     }
     if environ is not None:
         env = dict(environ)
-    cli_argv = argv if argv is not None else [
-        "--run-id", str(RUN_ID),
-        "--run-attempt", str(ATTEMPT),
-        "--target", target,
-        "--runner-group-id", str(GROUP),
-        "--",
-    ] + (command if command is not None else list(RUNNER_CMD))
+    cli_argv = (
+        argv
+        if argv is not None
+        else [
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            target,
+            "--runner-group-id",
+            str(GROUP),
+            "--",
+        ]
+        + (command if command is not None else list(RUNNER_CMD))
+    )
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
         code = jit.main(cli_argv, environ=env, transport=transport, popen=fake_popen)
@@ -352,8 +375,11 @@ class SuccessDispatchTest(unittest.TestCase):
         self.assertIs(popen.calls[0]["kwargs"]["stdin"], subprocess.PIPE)
         child_env = popen.calls[0]["kwargs"]["env"]
         for key in (
-            "LUMI_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN",
-            "SOME_TOKEN_VAR", "FOO_AUTHORIZATION",
+            "LUMI_GITHUB_TOKEN",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "SOME_TOKEN_VAR",
+            "FOO_AUTHORIZATION",
         ):
             self.assertNotIn(key, child_env)
         for key in ("PATH", "HOME", "http_proxy"):
@@ -367,8 +393,14 @@ class SuccessDispatchTest(unittest.TestCase):
         self.assertEqual(
             [request["url"] for request in transport.requests],
             [
-                RUN_URL, WORKFLOW_URL, REF_URL, JOBS_URL,
-                RUN_URL, WORKFLOW_URL, REF_URL, JOBS_URL,
+                RUN_URL,
+                WORKFLOW_URL,
+                REF_URL,
+                JOBS_URL,
+                RUN_URL,
+                WORKFLOW_URL,
+                REF_URL,
+                JOBS_URL,
                 POST_URL,
             ],
         )
@@ -420,7 +452,7 @@ class SuccessDispatchTest(unittest.TestCase):
         ]
         page1, page2 = jobs[:100], jobs[100:]
         link = (
-            f'<{jit.API_BASE}/repos/{jit.REPO}/actions/runs/{RUN_ID}'
+            f"<{jit.API_BASE}/repos/{jit.REPO}/actions/runs/{RUN_ID}"
             f'/attempts/{ATTEMPT}/jobs?per_page=100&page=2>; rel="next"'
         )
         # GitHub reports the overall total_count on every page.
@@ -531,8 +563,13 @@ class FailClosedTest(unittest.TestCase):
         responses[0] = (
             200,
             {},
-            make_run(repository={"name": "other", "full_name": "Other/codex",
-                                 "url": f"{jit.API_BASE}/repos/Other/codex"}),
+            make_run(
+                repository={
+                    "name": "other",
+                    "full_name": "Other/codex",
+                    "url": f"{jit.API_BASE}/repos/Other/codex",
+                }
+            ),
         )
         self.assert_rejected(responses, 1)
 
@@ -541,8 +578,13 @@ class FailClosedTest(unittest.TestCase):
         responses[0] = (
             200,
             {},
-            make_run(head_repository={"name": "other", "full_name": "Other/codex",
-                                      "url": f"{jit.API_BASE}/repos/Other/codex"}),
+            make_run(
+                head_repository={
+                    "name": "other",
+                    "full_name": "Other/codex",
+                    "url": f"{jit.API_BASE}/repos/Other/codex",
+                }
+            ),
         )
         self.assert_rejected(responses, 1)
 
@@ -551,8 +593,13 @@ class FailClosedTest(unittest.TestCase):
         responses[0] = (
             200,
             {},
-            make_run(repository={"name": "codex", "full_name": jit.REPO,
-                                 "url": "https://api.github.com/repos/other/codex"}),
+            make_run(
+                repository={
+                    "name": "codex",
+                    "full_name": jit.REPO,
+                    "url": "https://api.github.com/repos/other/codex",
+                }
+            ),
         )
         self.assert_rejected(responses, 1)
 
@@ -618,7 +665,9 @@ class FailClosedTest(unittest.TestCase):
         self.assert_rejected(responses, 4)
 
     def test_gate_job_not_completed(self):
-        responses = responses_for(jobs=[make_gate(status="in_progress"), make_build_job()])
+        responses = responses_for(
+            jobs=[make_gate(status="in_progress"), make_build_job()]
+        )
         self.assert_rejected(responses, 4)
 
     def test_gate_job_failed(self):
@@ -638,7 +687,9 @@ class FailClosedTest(unittest.TestCase):
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_not_queued(self):
-        responses = responses_for(jobs=[make_gate(), make_build_job(status="in_progress")])
+        responses = responses_for(
+            jobs=[make_gate(), make_build_job(status="in_progress")]
+        )
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_concluded(self):
@@ -654,21 +705,15 @@ class FailClosedTest(unittest.TestCase):
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_runner_id_assigned(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(runner_id=5)]
-        )
+        responses = responses_for(jobs=[make_gate(), make_build_job(runner_id=5)])
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_runner_group_assigned(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(runner_group_id=3)]
-        )
+        responses = responses_for(jobs=[make_gate(), make_build_job(runner_group_id=3)])
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_run_id_mismatch(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(run_id=999)]
-        )
+        responses = responses_for(jobs=[make_gate(), make_build_job(run_id=999)])
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_workflow_name_mismatch(self):
@@ -678,15 +723,11 @@ class FailClosedTest(unittest.TestCase):
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_head_branch_mismatch(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(head_branch="dev")]
-        )
+        responses = responses_for(jobs=[make_gate(), make_build_job(head_branch="dev")])
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_head_sha_mismatch(self):
-        responses = responses_for(
-            jobs=[make_gate(), make_build_job(head_sha="b" * 40)]
-        )
+        responses = responses_for(jobs=[make_gate(), make_build_job(head_sha="b" * 40)])
         self.assert_rejected(responses, 4)
 
     def test_chosen_job_missing_expected_label(self):
@@ -707,7 +748,9 @@ class FailClosedTest(unittest.TestCase):
         responses = responses_for(
             jobs=[
                 make_gate(),
-                make_build_job(labels=["self-hosted", label, "lumi-shadow-arm64-999-9"]),
+                make_build_job(
+                    labels=["self-hosted", label, "lumi-shadow-arm64-999-9"]
+                ),
             ]
         )
         self.assert_rejected(responses, 4)
@@ -844,14 +887,10 @@ class JitResponseValidationTest(unittest.TestCase):
         )
 
     def test_runner_id_missing(self):
-        self.assert_response_rejected(
-            make_jit_response(runner_overrides={"id": None})
-        )
+        self.assert_response_rejected(make_jit_response(runner_overrides={"id": None}))
 
     def test_runner_id_zero(self):
-        self.assert_response_rejected(
-            make_jit_response(runner_overrides={"id": 0})
-        )
+        self.assert_response_rejected(make_jit_response(runner_overrides={"id": 0}))
 
     def test_runner_status_online_rejected(self):
         # The documented JIT creation response marks the runner offline.
@@ -865,7 +904,9 @@ class JitResponseValidationTest(unittest.TestCase):
         )
 
     def test_runner_busy(self):
-        self.assert_response_rejected(make_jit_response(runner_overrides={"busy": True}))
+        self.assert_response_rejected(
+            make_jit_response(runner_overrides={"busy": True})
+        )
 
     def test_runner_missing_expected_custom_label(self):
         self.assert_response_rejected(
@@ -912,9 +953,7 @@ class JitResponseValidationTest(unittest.TestCase):
     def test_runner_invalid_label_type(self):
         label = expected_label("arm64")
         self.assert_response_rejected(
-            make_jit_response(
-                labels=[{"id": 1, "name": label, "type": "weird"}]
-            )
+            make_jit_response(labels=[{"id": 1, "name": label, "type": "weird"}])
         )
 
     def test_runner_underscore_label_type_rejected(self):
@@ -952,8 +991,15 @@ class SecretRedactionTest(unittest.TestCase):
     def _cli(self, transport, popen=None):
         err = io.StringIO()
         argv = [
-            "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-            "--target", "arm64", "--runner-group-id", str(GROUP), "--",
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            "arm64",
+            "--runner-group-id",
+            str(GROUP),
+            "--",
             *RUNNER_CMD,
         ]
         with contextlib.redirect_stderr(err):
@@ -998,8 +1044,15 @@ class SecretRedactionTest(unittest.TestCase):
         transport = MockTransport(responses)
         err = io.StringIO()
         argv = [
-            "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-            "--target", "arm64", "--runner-group-id", str(GROUP), "--",
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            "arm64",
+            "--runner-group-id",
+            str(GROUP),
+            "--",
             *RUNNER_CMD,
         ]
         with contextlib.redirect_stderr(err):
@@ -1019,8 +1072,15 @@ class SecretRedactionTest(unittest.TestCase):
         transport = MockTransport(responses)
         err = io.StringIO()
         argv = [
-            "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-            "--target", "arm64", "--runner-group-id", str(GROUP), "--",
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            "arm64",
+            "--runner-group-id",
+            str(GROUP),
+            "--",
             *RUNNER_CMD,
         ]
         with contextlib.redirect_stderr(err):
@@ -1045,50 +1105,106 @@ class CliTest(unittest.TestCase):
 
     def test_missing_double_dash(self):
         with self.assertRaises(SystemExit) as cm:
-            self._main([
-                "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-                "--target", "arm64", "--runner-group-id", str(GROUP), "./run.sh",
-            ])
+            self._main(
+                [
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    str(ATTEMPT),
+                    "--target",
+                    "arm64",
+                    "--runner-group-id",
+                    str(GROUP),
+                    "./run.sh",
+                ]
+            )
         self.assertEqual(cm.exception.code, 2)
 
     def test_empty_command_after_double_dash(self):
         with self.assertRaises(SystemExit) as cm:
-            self._main([
-                "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-                "--target", "arm64", "--runner-group-id", str(GROUP), "--",
-            ])
+            self._main(
+                [
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    str(ATTEMPT),
+                    "--target",
+                    "arm64",
+                    "--runner-group-id",
+                    str(GROUP),
+                    "--",
+                ]
+            )
         self.assertEqual(cm.exception.code, 2)
 
     def test_zero_run_id(self):
         with self.assertRaises(SystemExit) as cm:
-            self._main([
-                "--run-id", "0", "--run-attempt", str(ATTEMPT),
-                "--target", "arm64", "--runner-group-id", str(GROUP), "--", "./run.sh",
-            ])
+            self._main(
+                [
+                    "--run-id",
+                    "0",
+                    "--run-attempt",
+                    str(ATTEMPT),
+                    "--target",
+                    "arm64",
+                    "--runner-group-id",
+                    str(GROUP),
+                    "--",
+                    "./run.sh",
+                ]
+            )
         self.assertEqual(cm.exception.code, 2)
 
     def test_non_integer_run_id(self):
         with self.assertRaises(SystemExit) as cm:
-            self._main([
-                "--run-id", "abc", "--run-attempt", str(ATTEMPT),
-                "--target", "arm64", "--runner-group-id", str(GROUP), "--", "./run.sh",
-            ])
+            self._main(
+                [
+                    "--run-id",
+                    "abc",
+                    "--run-attempt",
+                    str(ATTEMPT),
+                    "--target",
+                    "arm64",
+                    "--runner-group-id",
+                    str(GROUP),
+                    "--",
+                    "./run.sh",
+                ]
+            )
         self.assertEqual(cm.exception.code, 2)
 
     def test_unknown_target(self):
         with self.assertRaises(SystemExit) as cm:
-            self._main([
-                "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-                "--target", "mips", "--runner-group-id", str(GROUP), "--", "./run.sh",
-            ])
+            self._main(
+                [
+                    "--run-id",
+                    str(RUN_ID),
+                    "--run-attempt",
+                    str(ATTEMPT),
+                    "--target",
+                    "mips",
+                    "--runner-group-id",
+                    str(GROUP),
+                    "--",
+                    "./run.sh",
+                ]
+            )
         self.assertEqual(cm.exception.code, 2)
 
     def test_token_absent_makes_no_api_calls(self):
         transport = MockTransport([])
         err = io.StringIO()
         argv = [
-            "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-            "--target", "arm64", "--runner-group-id", str(GROUP), "--", "./run.sh",
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            "arm64",
+            "--runner-group-id",
+            str(GROUP),
+            "--",
+            "./run.sh",
         ]
         with contextlib.redirect_stderr(err):
             code = jit.main(argv, environ={}, transport=transport, popen=FakePopen())
@@ -1113,8 +1229,15 @@ class ChildCommandValidationTest(unittest.TestCase):
 
     def _argv(self, command):
         return [
-            "--run-id", str(RUN_ID), "--run-attempt", str(ATTEMPT),
-            "--target", "arm64", "--runner-group-id", str(GROUP), "--",
+            "--run-id",
+            str(RUN_ID),
+            "--run-attempt",
+            str(ATTEMPT),
+            "--target",
+            "arm64",
+            "--runner-group-id",
+            str(GROUP),
+            "--",
             *command,
         ]
 

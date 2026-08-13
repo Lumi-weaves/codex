@@ -30,10 +30,7 @@ class InstallKitTest(unittest.TestCase):
                     "--target",
                     "x86_64-unknown-linux-musl",
                     "--package-archive",
-                    str(
-                        fixture.kit
-                        / "codex-package-x86_64-unknown-linux-musl.tar.gz"
-                    ),
+                    str(fixture.kit / "codex-package-x86_64-unknown-linux-musl.tar.gz"),
                     "--checksum-manifest",
                     str(fixture.kit / "codex-package_SHA256SUMS"),
                 ],
@@ -117,9 +114,7 @@ class KitFixture:
         self.home.mkdir()
         self.bin_dir.mkdir()
         shutil.copyfile(KIT_SCRIPT, self.kit / "install-lumi.sh")
-        (self.kit / "VERSION").write_text(
-            "0.148.0-alpha.7-lumi.1\n", encoding="utf-8"
-        )
+        (self.kit / "VERSION").write_text("0.148.0-alpha.7-lumi.1\n", encoding="utf-8")
         (self.kit / "TARGET").write_text(
             "x86_64-unknown-linux-musl\n", encoding="utf-8"
         )

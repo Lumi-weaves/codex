@@ -171,7 +171,6 @@ async fn forward_ops_preserves_submission_trace_context() {
     let submission = Submission {
         id: "sub-1".to_string(),
         op: Op::Interrupt,
-        client_user_message_id: None,
         trace: Some(codex_protocol::protocol::W3cTraceContext {
             traceparent: Some(
                 "00-1234567890abcdef1234567890abcdef-1234567890abcdef-01".to_string(),
@@ -179,6 +178,7 @@ async fn forward_ops_preserves_submission_trace_context() {
             tracestate: Some("vendor=state".to_string()),
         }),
         parent_turn_id: Some("parent-turn".to_string()),
+        root_turn_id: Some("root-turn".to_string()),
     };
     tx_ops
         .send(crate::session::SessionIngress::Submission(submission))

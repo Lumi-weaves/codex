@@ -28,6 +28,7 @@ use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
+use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -279,13 +280,15 @@ async fn run_remote_compact_task_inner_impl(
         sess.build_world_state_for_step(projection_step_context)
             .await?,
     );
-    let mut new_history = vec![compaction_output];
+    let mut new_history = vec![ResponseItemEnvelope::new(compaction_output)];
     new_history.extend(
         sess.build_initial_context_with_world_state(
             projection_turn_context.as_ref(),
             world_state_baseline.as_ref(),
         )
-        .await,
+        .await
+        .into_iter()
+        .map(ResponseItemEnvelope::new),
     );
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
     let reference_context_item = Some(projection_turn_context.to_turn_context_item());

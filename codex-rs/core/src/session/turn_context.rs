@@ -4,11 +4,14 @@ use crate::exec_policy::AllowPrefixRules;
 use crate::shell_snapshot::ShellSnapshotFile;
 use crate::tools::sandboxing::executor_windows_sandbox_level;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_core_plugins::ResolvedPluginMetricsOperation;
 use codex_core_plugins::TrustedPluginRoots;
+use codex_exec_server::ExecutorFileSystem;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
@@ -33,6 +36,8 @@ pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSn
 pub(crate) struct TurnEnvironmentConfig {
     pub(crate) allow_login_shell: bool,
     pub(crate) permission_profile: PermissionProfileSnapshot,
+    /// None preserves legacy executor roots; Some, including empty, is owner-installed.
+    pub(crate) selected_capability_roots: Option<Vec<SelectedCapabilityRoot>>,
 }
 
 #[derive(Clone)]
@@ -209,6 +214,18 @@ impl TurnContext {
             .resolve_attribution(command, cwd)
     }
 
+    pub(crate) async fn plugin_attribution_for_executor_command(
+        &self,
+        command: &[String],
+        cwd: &PathUri,
+        file_system: &dyn ExecutorFileSystem,
+    ) -> Option<PluginCommandAttribution> {
+        self.extension_data
+            .get::<TrustedPluginRoots>()?
+            .resolve_executor_attribution(command, cwd, file_system)
+            .await
+    }
+
     pub(crate) fn approval_policy(&self) -> AskForApproval {
         self.config.permissions.approval_policy.value()
     }
@@ -227,6 +244,26 @@ impl TurnContext {
             AllowPrefixRules::IgnoreForCyberModel
         } else {
             AllowPrefixRules::Honor
+        }
+    }
+
+    pub(crate) async fn plugin_metrics_operation_for_command(
+        &self,
+        command: &[String],
+        cwd: &PathUri,
+        environment: &Environment,
+    ) -> Option<ResolvedPluginMetricsOperation> {
+        let trusted_roots = self.extension_data.get::<TrustedPluginRoots>()?;
+        if environment.is_remote() {
+            trusted_roots
+                .resolve_metrics_operation_in_filesystem(
+                    command,
+                    cwd,
+                    environment.get_filesystem().as_ref(),
+                )
+                .await
+        } else {
+            trusted_roots.resolve_metrics_operation(command, &cwd.to_abs_path().ok()?)
         }
     }
 
@@ -596,6 +633,10 @@ impl Session {
             &model_info,
         );
         let permission_profile = per_turn_config.permissions.effective_permission_profile();
+        let auto_review_enabled = crate::guardian::routes_approval_policy_to_guardian(
+            per_turn_config.permissions.approval_policy.value(),
+            per_turn_config.approvals_reviewer,
+        );
         let per_turn_config = Arc::new(per_turn_config);
         let turn_metadata_state = Arc::new(TurnMetadataState::new(
             session_id.to_string(),
@@ -609,6 +650,8 @@ impl Session {
             &permission_profile,
             session_configuration.windows_sandbox_level,
             network.is_some(),
+            auto_review_enabled,
+            &model_info,
         ));
         turn_metadata_state
             .set_responses_api_metadata(per_turn_config.responses_api_metadata.clone());

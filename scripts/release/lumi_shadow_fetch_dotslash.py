@@ -37,15 +37,12 @@ from pathlib import Path
 # overrides exist for the mock tests only; the workflow never sets them.
 CURL_RETRIES = int(os.environ.get("LUMI_SHADOW_CURL_RETRIES", "5"))
 CURL_RETRY_DELAY = int(os.environ.get("LUMI_SHADOW_CURL_RETRY_DELAY", "2"))
-CURL_CONNECT_TIMEOUT = int(
-    os.environ.get("LUMI_SHADOW_CURL_CONNECT_TIMEOUT", "20")
-)
+CURL_CONNECT_TIMEOUT = int(os.environ.get("LUMI_SHADOW_CURL_CONNECT_TIMEOUT", "20"))
 CURL_MAX_TIME = int(os.environ.get("LUMI_SHADOW_CURL_MAX_TIME", "300"))
 CURL_BIN = os.environ.get("LUMI_SHADOW_CURL", "curl")
 
 ZSH_MANIFEST_DEFAULT_URL = (
-    "https://github.com/openai/codex/releases/download/"
-    "codex-zsh-v0.1.0/codex-zsh"
+    "https://github.com/openai/codex/releases/download/codex-zsh-v0.1.0/codex-zsh"
 )
 
 

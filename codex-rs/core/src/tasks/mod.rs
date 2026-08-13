@@ -24,7 +24,6 @@ use tracing::trace_span;
 use tracing::warn;
 
 use crate::codex_thread::BackgroundTerminalInfo;
-use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
 use crate::session::TurnInput;
@@ -285,14 +284,8 @@ impl Session {
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
-        self.start_task(
-            turn_context,
-            input,
-            task,
-            /*input_persisted*/ None,
-            MailboxParentProvenance::Ignore,
-        )
-        .await;
+        self.start_task(turn_context, input, task, MailboxParentProvenance::Ignore)
+            .await;
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
@@ -300,9 +293,6 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-        input_persisted: Option<
-            tokio::sync::oneshot::Sender<Result<(), TryStartTurnIfIdleRejectionReason>>,
-        >,
         mailbox_parent_provenance: MailboxParentProvenance,
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
@@ -328,10 +318,18 @@ impl Session {
             .clear_turn(&turn_context.sub_id);
 
         let parent_turn_id = self.input_queue.peek_pending_session_parent_turn_id().await;
-        if let (MailboxParentProvenance::Attribute, Some(id)) =
-            (mailbox_parent_provenance, parent_turn_id)
+        let root_turn_id = self.input_queue.peek_pending_session_root_turn_id().await;
+        if let MailboxParentProvenance::Attribute = mailbox_parent_provenance {
+            if let Some(id) = parent_turn_id {
+                turn_context.turn_metadata_state.set_parent_turn_id(id);
+            }
+            if let Some(id) = root_turn_id {
+                turn_context.turn_metadata_state.set_root_turn_id(id);
+            }
+        } else if self.input_queue.has_trigger_turn_session_inputs().await
+            && turn_context.turn_metadata_state.root_turn_id() != root_turn_id
         {
-            turn_context.turn_metadata_state.set_parent_turn_id(id);
+            turn_context.turn_metadata_state.mark_root_turn_ambiguous();
         }
         let turn_state = {
             let mut active = self.active_turn.lock().await;
@@ -423,7 +421,6 @@ impl Session {
             handle: AbortOnDropHandle::new(handle),
             kind: task_kind,
             task,
-            input_persisted,
             cancellation_token,
             turn_context: Arc::clone(&turn_context),
             _agent_execution_guard: agent_execution_guard,
@@ -488,7 +485,6 @@ impl Session {
             turn_context,
             Vec::new(),
             RegularTask::new(),
-            /*input_persisted*/ None,
             MailboxParentProvenance::Attribute,
         )
         .await;
@@ -519,7 +515,6 @@ impl Session {
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             self.input_queue.clear_pending(&active_turn).await;
         }
-        self.maybe_finalize_awaited_idle().await;
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
@@ -558,7 +553,6 @@ impl Session {
         // Let interrupted tasks observe cancellation before dropping pending approvals, or an
         // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
         self.input_queue.clear_pending(&active_turn).await;
-        self.maybe_finalize_awaited_idle().await;
 
         if reason == TurnAbortReason::Interrupted {
             self.maybe_start_turn_for_pending_work().await;
@@ -600,24 +594,12 @@ impl Session {
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             active.as_mut().and_then(|active_turn| {
-                let mut task = active_turn.task.take()?;
-                let task_ended_before_persistence =
-                    if let Some(sender) = task.input_persisted.take() {
-                        let _ = sender.send(Err(
-                            TryStartTurnIfIdleRejectionReason::TaskEndedBeforePersistence,
-                        ));
-                        true
-                    } else {
-                        false
-                    };
+                let task = active_turn.task.take()?;
                 task.handle.detach();
-                Some((
-                    Arc::clone(&active_turn.turn_state),
-                    task_ended_before_persistence,
-                ))
+                Some(Arc::clone(&active_turn.turn_state))
             })
         };
-        let Some((turn_state, mut task_ended_before_persistence)) = turn_state else {
+        let Some(turn_state) = turn_state else {
             return;
         };
         let pending_input = self
@@ -639,9 +621,6 @@ impl Session {
             PersistContext::Standard,
         )
         .await;
-        task_ended_before_persistence |= self
-            .pending_user_message_admissions
-            .complete_task_end(&turn_context.sub_id);
         // Emit token usage metrics.
         {
             // TODO(jif): drop this
@@ -791,9 +770,7 @@ impl Session {
             });
         let idle_cause = if matches!(abort_reason.as_ref(), Some(TurnAbortReason::Interrupted)) {
             ThreadIdleCause::Interrupted
-        } else if task_ended_before_persistence
-            || (abort_reason.is_none() && turn_context.terminal_error.lock().await.is_some())
-        {
+        } else if abort_reason.is_none() && turn_context.terminal_error.lock().await.is_some() {
             ThreadIdleCause::Failed
         } else {
             ThreadIdleCause::Completed
@@ -899,19 +876,12 @@ impl Session {
         terminated
     }
 
-    async fn handle_task_abort(self: &Arc<Self>, mut task: RunningTask, reason: TurnAbortReason) {
+    async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
             return;
         }
 
-        if let Some(sender) = task.input_persisted.take() {
-            let _ = sender.send(Err(
-                TryStartTurnIfIdleRejectionReason::TaskEndedBeforePersistence,
-            ));
-        }
-        self.pending_user_message_admissions
-            .complete_task_end(&sub_id);
         trace!(task_kind = ?task.kind, sub_id, "aborting running task");
         task.cancellation_token.cancel();
         if reason == TurnAbortReason::Interrupted

@@ -173,6 +173,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         transcript,
         Instant::now(),
         Some(network_denial_monitor),
+        /*plugin_metrics_sidecar*/ None,
     );
 
     let exited_at = Instant::now();
@@ -353,6 +354,7 @@ async fn exit_watcher_sends_completion_event_once_for_background_exit() -> anyho
         transcript,
         Instant::now(),
         /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
     );
 
     exit_tx.send(0).expect("send exit");
@@ -404,6 +406,7 @@ async fn exit_watcher_skips_completion_when_exit_observed_synchronously() -> any
         transcript,
         Instant::now(),
         /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
     );
 
     exit_tx.send(0).expect("send exit");
@@ -445,6 +448,7 @@ async fn exit_watcher_waits_for_initial_exec_command_observation_lock() -> anyho
         transcript,
         Instant::now(),
         /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
     );
 
     exit_tx.send(0).expect("send exit");

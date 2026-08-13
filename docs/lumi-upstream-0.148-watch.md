@@ -96,39 +96,42 @@ Before this integration can advance Lumi `main`:
 The original prototype remains recoverable in stash
 `c69e323daa41a3f5c08b817daa8f56f4eefbdb14` until its rebased form is accepted.
 
-## Alpha.12 selective recheck
+## Alpha.12 ancestry integration
 
-Status recorded on 2026-08-13 after fetching `rust-v0.148.0-alpha.12`.
+Status recorded on 2026-08-13 after fetching and merging the annotated
+`rust-v0.148.0-alpha.12` tag (peeled commit
+`4af6dc74a035b8f177a1588abddef4f6c605464b`).
 
-Lumi `main` now contains the deliberate alpha.7 integration plus newer
-cockpit, prompt-receipt, and compaction-continuity work. A disposable alpha.12
-merge probe produced 22 conflicts concentrated in RichCodex-owned seams:
-turn-input admission and routing, delegated-turn lineage, compaction/history,
-authentication selection, awaited-terminal completion, and app-server status.
-The 96-commit alpha.7-to-alpha.12 delta therefore does **not** advance the
-RichCodex base release or downstream version as a unit.
+Alpha.12 is now an explicit parent of the RichCodex integration commit, rather
+than only a source inventory for cherry-picked patches. This is intentional:
+future upstream comparisons, release tracking, and bisects should be able to
+reason from the tagged baseline without reconstructing a synthetic list of
+borrowed commits. The downstream version records both halves of that fact as
+`0.148.0-alpha.12-lumi.1`.
 
-RichCodex treats tagged upstream releases as a source inventory rather than a
-replacement harness. Substrate fixes may be ported independently when they do
-not redefine cockpit ownership, attention ordering, lifecycle, or continuity.
-Changes to those semantics are omitted by default and must be reimplemented or
-explicitly reconciled against the central cockpit invariants before adoption;
-reverting them after a broad merge is a fallback, not the normal update route.
+Git ancestry does not transfer product authority. The merge imports the full
+tagged substrate, then resolves conflicting harness behavior against the
+RichCodex cockpit invariants. In particular, the integration preserves:
 
-The accepted alpha.12-derived substrate batch is limited to:
+- one Core-private serialized `SessionIngress` FIFO for external submissions,
+  inter-agent mail, and terminal lifecycle events, including parent/root-turn
+  provenance without creating a second admission plane;
+- session-owned awaited-terminal finality and the one-shot idle claim, so
+  background work keeps its owning task live and completion cannot be lost at
+  an interrupt or safe sampling boundary;
+- separate control-plane and model-inference authentication managers;
+- RichCodex delegated approval forwarding and Guardian-as-posture behavior,
+  rather than alpha.12's no-approval delegate restriction;
+- a single installed compaction boundary with canonical context/world-state
+  reconstruction, plus a durable `CompactionContinuity` receipt carried beside
+  alpha.12 response-item envelopes; and
+- Lumi-native CI and release automation rather than re-enabling upstream's
+  private infrastructure assumptions.
 
-- exec-server startup retry;
-- fail-closed Linux unreadable-glob handling;
-- MCP elicitation cleanup and local custom-CA propagation;
-- disabled Azure Responses storage;
-- Windows sandbox/proxy correctness and nested-repository support;
-- remote `apply_patch` sandbox hardening;
-- network credential-broker hardening with bounded fallback ports; and
-- protection against inline-visualization writes through the sandbox.
-
-In particular, the upstream queued-user-message rewrite, unified turn-input
-submission, root-turn tracking, interrupted-turn recovery, response-envelope
-history migration, rollout/thread identity migration, and approval-pipeline
-unification remain outside this batch. They overlap the RichCodex cockpit
-kernel and require their own invariant-led decision rather than tag-driven
-adoption.
+Alpha.12's turn-input requests, response-item envelopes, root-turn lineage,
+interrupted-turn recovery, rollout compatibility, security fixes, provider
+workload identity, and other non-conflicting substrate changes remain present.
+Where an upstream change redefined cockpit ownership or ordering, the merge
+contains an explicit downstream restoration or compatibility adapter. Those
+restorations are deliberate semantic reverse commits within the merge result,
+not evidence that the tag was only partially integrated.

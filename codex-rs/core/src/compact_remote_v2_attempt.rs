@@ -64,8 +64,12 @@ pub(super) async fn run_remote_compact_v2_attempt(
 
     let trace_input_history = compaction_trace
         .is_enabled()
-        .then(|| history.raw_items().to_vec());
-    let mut input = history.for_prompt(&turn_context.model_info.input_modalities);
+        .then(|| history.raw_items().cloned().collect());
+    let mut input = history
+        .for_prompt_annotated(&turn_context.model_info.input_modalities)
+        .into_iter()
+        .map(|envelope| envelope.item)
+        .collect::<Vec<_>>();
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
@@ -86,7 +90,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let mut owned_client_session = None;
     let client_session = match client_session {
         Some(client_session) => client_session,
-        None => owned_client_session.insert(turn_context.model_client.new_session()),
+        None => owned_client_session.insert(sess.services.model_client.current().new_session()),
     };
     let compaction_output_result = run_remote_compaction_request_v2(
         sess,

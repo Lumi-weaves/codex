@@ -27,6 +27,10 @@ use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
+use codex_protocol::turn_input::TurnInputMode;
+use codex_protocol::turn_input::TurnInputRequest;
+use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
 use std::time::Duration;
@@ -226,6 +230,7 @@ pub(crate) async fn run_codex_thread_one_shot(
     // requiring the caller to cancel the parent token.
     let child_cancel = cancel_token.child_token();
     let parent_turn_id = parent_ctx.sub_id.clone();
+    let root_turn_id = parent_ctx.turn_metadata_state.root_turn_id();
     let parent_environments = parent_ctx.environments.clone();
     let (session, io) = Box::pin(run_codex_thread_interactive(
         config,
@@ -243,18 +248,24 @@ pub(crate) async fn run_codex_thread_one_shot(
     .await?;
 
     // Send the initial input to kick off the one-shot turn.
-    io.submit_with_trace(
-        Op::UserInput {
-            items: input,
-            final_output_json_schema,
-            responsesapi_client_metadata: None,
-            additional_context: Default::default(),
-            thread_settings: Default::default(),
-        },
-        /*trace*/ None,
-        Some(parent_turn_id),
-    )
-    .await?;
+    let submission = io
+        .submit_turn_input(
+            TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+                final_output_json_schema,
+                parent_turn_id: Some(parent_turn_id),
+                root_turn_id,
+            }),
+            TurnInputMode::StartIfIdle,
+        )
+        .await?;
+    match submission {
+        TurnInputSubmission::Started { .. } => {}
+        submission => {
+            return Err(CodexErr::InvalidRequest(format!(
+                "delegate turn input was not started: {submission:?}"
+            )));
+        }
+    }
 
     // Bridge events so we can observe completion and shut down automatically.
     let (tx_bridge, rx_bridge) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
@@ -274,9 +285,9 @@ pub(crate) async fn run_codex_thread_one_shot(
                     .send(crate::session::SessionIngress::Submission(Submission {
                         id: "shutdown".to_string(),
                         op: Op::Shutdown {},
-                        client_user_message_id: None,
                         trace: None,
                         parent_turn_id: None,
+                        root_turn_id: None,
                     }))
                     .await;
                 child_cancel.cancel();
@@ -822,6 +833,7 @@ async fn maybe_auto_review_mcp_request_user_input(
             .unwrap_or_else(|| MCP_TOOL_APPROVAL_ACCEPT.to_string()),
         ReviewDecision::Approved
         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
+        | ReviewDecision::ApprovedMcpPolicyAmendment
         | ReviewDecision::NetworkPolicyAmendment { .. } => MCP_TOOL_APPROVAL_ACCEPT.to_string(),
         ReviewDecision::Denied { .. } | ReviewDecision::TimedOut | ReviewDecision::Abort => {
             MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC.to_string()
