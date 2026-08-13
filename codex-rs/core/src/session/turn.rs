@@ -11,6 +11,7 @@ use crate::compact::run_inline_auto_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
+use crate::context::ActiveResourceNoFinish;
 use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
@@ -1420,6 +1421,9 @@ async fn run_sampling_request(
                 .attach_pending_to_prompt(&mut prompt_input, &mut executed_tool_calls_by_output)
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
+        }
+        if sess.has_awaited_terminals().await {
+            prompt_input.push(ContextualUserFragment::into(ActiveResourceNoFinish));
         }
         let prompt = build_prompt(
             prompt_input,
