@@ -121,6 +121,7 @@ impl ChatWidget {
                 ProviderAccountStatus::ReauthenticationRequired
             );
             let status = match account.status {
+                ProviderAccountStatus::Ready => "ready",
                 ProviderAccountStatus::VerificationRequired => "verification pending",
                 ProviderAccountStatus::ReauthenticationRequired => "sign-in required",
             };
