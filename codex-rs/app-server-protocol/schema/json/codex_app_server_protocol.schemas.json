@@ -15979,6 +15979,89 @@
         ],
         "type": "string"
       },
+      "ProviderAccountLogin": {
+        "description": "Safe projection of a backend-owned login lifecycle.",
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ProviderAccount"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "catalogRevision": {
+            "type": "string"
+          },
+          "desiredStateRevision": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "description": "Unix timestamp in seconds when the device code expires.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ProviderAccountLoginFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loginId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ProviderAccountLoginStatus"
+          },
+          "userCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verificationUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "catalogRevision",
+          "desiredStateRevision",
+          "expiresAt",
+          "loginId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ProviderAccountLoginFailure": {
+        "enum": [
+          "expired",
+          "unavailable",
+          "invalidCredential",
+          "accountAlreadyExists",
+          "accountLimitReached",
+          "storeUnavailable"
+        ],
+        "type": "string"
+      },
+      "ProviderAccountLoginStatus": {
+        "enum": [
+          "awaitingUser",
+          "exchanging",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
       "ProviderAccountProvider": {
         "properties": {
           "accountCount": {

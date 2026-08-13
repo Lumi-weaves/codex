@@ -5,6 +5,10 @@ use super::ModelSummary;
 use super::ProviderSummary;
 use super::REQUEST_TIMEOUT;
 use super::SHUTDOWN_TIMEOUT;
+use super::provider_login::ProviderAccountLoginResult;
+use super::provider_login::request_provider_account_login_cancel;
+use super::provider_login::request_provider_account_login_start;
+use super::provider_login::request_provider_account_login_status;
 use super::read_message;
 use super::read_shutdown_complete;
 use super::write_message;
@@ -116,6 +120,9 @@ pub(super) enum BackendOperationErrorCode {
     AccountAlreadyExists,
     AccountLimitReached,
     InvalidApiKey,
+    LoginUnavailable,
+    LoginLimitReached,
+    LoginNotFound,
     StoreUnavailable,
     InvalidRequest,
     RevisionConflict,
@@ -134,6 +141,9 @@ pub(crate) enum RichCodexBackendClientError {
     AccountAlreadyExists,
     AccountLimitReached,
     InvalidApiKey,
+    LoginUnavailable,
+    LoginLimitReached,
+    LoginNotFound,
     StoreUnavailable,
     InvalidRequest,
     RevisionConflict,
@@ -152,6 +162,9 @@ impl From<BackendOperationErrorCode> for RichCodexBackendClientError {
             BackendOperationErrorCode::AccountAlreadyExists => Self::AccountAlreadyExists,
             BackendOperationErrorCode::AccountLimitReached => Self::AccountLimitReached,
             BackendOperationErrorCode::InvalidApiKey => Self::InvalidApiKey,
+            BackendOperationErrorCode::LoginUnavailable => Self::LoginUnavailable,
+            BackendOperationErrorCode::LoginLimitReached => Self::LoginLimitReached,
+            BackendOperationErrorCode::LoginNotFound => Self::LoginNotFound,
             BackendOperationErrorCode::StoreUnavailable => Self::StoreUnavailable,
             BackendOperationErrorCode::InvalidRequest => Self::InvalidRequest,
             BackendOperationErrorCode::RevisionConflict => Self::RevisionConflict,
@@ -181,6 +194,21 @@ enum BackendCommand {
         user_label: String,
         response:
             oneshot::Sender<Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>>,
+    },
+    StartLogin {
+        request_id: String,
+        user_label: String,
+        response: oneshot::Sender<Result<ProviderAccountLoginResult, RichCodexBackendClientError>>,
+    },
+    ReadLogin {
+        request_id: String,
+        login_id: String,
+        response: oneshot::Sender<Result<ProviderAccountLoginResult, RichCodexBackendClientError>>,
+    },
+    CancelLogin {
+        request_id: String,
+        login_id: String,
+        response: oneshot::Sender<Result<ProviderAccountLoginResult, RichCodexBackendClientError>>,
     },
     ReadModelRoutes {
         request_id: String,
@@ -287,6 +315,60 @@ impl RichCodexBackendClient {
                 request_id: self.request_id(),
                 api_key,
                 user_label,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn start_provider_account_login(
+        &self,
+        user_label: String,
+    ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::StartLogin {
+                request_id: self.request_id(),
+                user_label,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn provider_account_login_status(
+        &self,
+        login_id: String,
+    ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::ReadLogin {
+                request_id: self.request_id(),
+                login_id,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn cancel_provider_account_login(
+        &self,
+        login_id: String,
+    ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::CancelLogin {
+                request_id: self.request_id(),
+                login_id,
                 response,
             })
             .await
@@ -451,6 +533,69 @@ async fn run_backend_actor(
                     &request_id,
                     &api_key,
                     &user_label,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::StartLogin {
+                request_id,
+                user_label,
+                response,
+            } => {
+                let result = request_provider_account_login_start(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    &user_label,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::ReadLogin {
+                request_id,
+                login_id,
+                response,
+            } => {
+                let result = request_provider_account_login_status(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    &login_id,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::CancelLogin {
+                request_id,
+                login_id,
+                response,
+            } => {
+                let result = request_provider_account_login_cancel(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    &login_id,
                 )
                 .await;
                 let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
@@ -1066,7 +1211,7 @@ fn validate_trimmed_safe_text(value: &str, max_bytes: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()> {
+pub(super) fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()> {
     validate_safe_text(&account.id, 80)?;
     validate_safe_text(&account.provider_id, 256)?;
     validate_safe_text(&account.user_label, 80)?;
@@ -1094,7 +1239,7 @@ fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()>
     Ok(())
 }
 
-fn validate_safe_text(value: &str, max_bytes: usize) -> io::Result<()> {
+pub(super) fn validate_safe_text(value: &str, max_bytes: usize) -> io::Result<()> {
     if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

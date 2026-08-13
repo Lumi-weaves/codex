@@ -3,6 +3,7 @@ use crate::error_code::invalid_params;
 use crate::richcodex_backend::ProviderAccountAddApiKeyResult;
 use crate::richcodex_backend::ProviderAccountImportResult;
 use crate::richcodex_backend::ProviderAccountListResult;
+use crate::richcodex_backend::ProviderAccountLoginResult;
 use crate::richcodex_backend::ProviderAccountSummary;
 use crate::richcodex_backend::ProviderSummary;
 use crate::richcodex_backend::RichCodexBackendClient;
@@ -17,6 +18,15 @@ use codex_app_server_protocol::ProviderAccountImportParams;
 use codex_app_server_protocol::ProviderAccountImportResponse;
 use codex_app_server_protocol::ProviderAccountListParams;
 use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountLoginCancelParams;
+use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
+use codex_app_server_protocol::ProviderAccountLoginFailure;
+use codex_app_server_protocol::ProviderAccountLoginStartParams;
+use codex_app_server_protocol::ProviderAccountLoginStartResponse;
+use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountLoginStatusParams;
+use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
 use codex_app_server_protocol::ProviderAccountProvider;
 use codex_app_server_protocol::ProviderAccountProviderStatus;
 use codex_app_server_protocol::ProviderAccountStatus;
@@ -94,6 +104,65 @@ impl ProviderAccountRequestProcessor {
             .map(|response| Some(response.into()))
             .map_err(provider_account_error)
     }
+
+    pub(crate) async fn login_start(
+        &self,
+        params: ProviderAccountLoginStartParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !valid_safe_text(&params.user_label, 80) || params.user_label.trim() != params.user_label
+        {
+            return Err(invalid_params("provider account login label is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .start_provider_account_login(params.user_label)
+            .await
+            .map(|result| ProviderAccountLoginStartResponse {
+                login: provider_account_login(result),
+            })
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+
+    pub(crate) async fn login_status(
+        &self,
+        params: ProviderAccountLoginStatusParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !valid_safe_text(&params.login_id, 80) {
+            return Err(invalid_params("provider account login ID is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .provider_account_login_status(params.login_id)
+            .await
+            .map(|result| ProviderAccountLoginStatusResponse {
+                login: provider_account_login(result),
+            })
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+
+    pub(crate) async fn login_cancel(
+        &self,
+        params: ProviderAccountLoginCancelParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if !valid_safe_text(&params.login_id, 80) {
+            return Err(invalid_params("provider account login ID is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .cancel_provider_account_login(params.login_id)
+            .await
+            .map(|result| ProviderAccountLoginCancelResponse {
+                login: provider_account_login(result),
+            })
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+}
+
+fn valid_safe_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 fn provider_account_list_response(
@@ -123,6 +192,35 @@ fn provider_account_add_api_key_response(
 ) -> ProviderAccountAddApiKeyResponse {
     ProviderAccountAddApiKeyResponse {
         account: provider_account(result.account),
+        desired_state_revision: result.desired_state_revision.to_string(),
+        catalog_revision: result.catalog_revision.to_string(),
+    }
+}
+
+fn provider_account_login(result: ProviderAccountLoginResult) -> ProviderAccountLogin {
+    ProviderAccountLogin {
+        login_id: result.login_id,
+        status: match result.status.as_str() {
+            "awaitingUser" => ProviderAccountLoginStatus::AwaitingUser,
+            "exchanging" => ProviderAccountLoginStatus::Exchanging,
+            "completed" => ProviderAccountLoginStatus::Completed,
+            "failed" => ProviderAccountLoginStatus::Failed,
+            "cancelled" => ProviderAccountLoginStatus::Cancelled,
+            _ => unreachable!("backend response state is validated by the client actor"),
+        },
+        verification_url: result.verification_url,
+        user_code: result.user_code,
+        expires_at: result.expires_at as i64,
+        failure: result.failure.map(|failure| match failure.as_str() {
+            "expired" => ProviderAccountLoginFailure::Expired,
+            "unavailable" => ProviderAccountLoginFailure::Unavailable,
+            "invalidCredential" => ProviderAccountLoginFailure::InvalidCredential,
+            "accountAlreadyExists" => ProviderAccountLoginFailure::AccountAlreadyExists,
+            "accountLimitReached" => ProviderAccountLoginFailure::AccountLimitReached,
+            "storeUnavailable" => ProviderAccountLoginFailure::StoreUnavailable,
+            _ => unreachable!("backend response failure is validated by the client actor"),
+        }),
+        account: result.account.map(provider_account),
         desired_state_revision: result.desired_state_revision.to_string(),
         catalog_revision: result.catalog_revision.to_string(),
     }
@@ -189,6 +287,15 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
             invalid_params("provider account limit reached")
         }
         RichCodexBackendClientError::InvalidApiKey => invalid_params("API key is invalid"),
+        RichCodexBackendClientError::LoginUnavailable => {
+            internal_error("OpenAI provider login is unavailable")
+        }
+        RichCodexBackendClientError::LoginLimitReached => {
+            invalid_params("too many provider logins are active")
+        }
+        RichCodexBackendClientError::LoginNotFound => {
+            invalid_params("provider login does not exist")
+        }
         RichCodexBackendClientError::StoreUnavailable => {
             internal_error("RichCodex provider account store is unavailable")
         }

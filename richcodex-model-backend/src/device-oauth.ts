@@ -227,6 +227,9 @@ export function createDeviceOAuthCoordinator(
           throw new Error("device token response is invalid");
         }
         flow.status = "exchanging";
+        flow.deviceAuthId = null;
+        flow.verificationUrl = null;
+        flow.userCode = null;
         const tokenBody = new URLSearchParams({
           grant_type: "authorization_code",
           code: code.authorization_code,

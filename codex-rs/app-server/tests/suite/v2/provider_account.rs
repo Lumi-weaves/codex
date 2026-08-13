@@ -4,6 +4,10 @@ use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountImportResponse;
+use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
+use codex_app_server_protocol::ProviderAccountLoginStartResponse;
+use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_app_server_protocol::RequestId;
 use pretty_assertions::assert_eq;
@@ -158,6 +162,84 @@ async fn provider_account_api_key_add_returns_only_safe_account_state() -> Resul
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn provider_account_device_login_exposes_only_safe_lifecycle_state() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let codex_home = TempDir::new()?;
+    let fixture_root = TempDir::new()?;
+    let backend_path = fixture_root.path().join("fake-richcodex-model-backend");
+    std::fs::write(&backend_path, FAKE_BACKEND)?;
+    std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700))?;
+
+    let backend_path = backend_path.display().to_string();
+    let mut server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("RICHCX_MODEL_BACKEND_PATH", Some(&backend_path))])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+
+    let start_id = server
+        .send_raw_request(
+            "providerAccount/login/start",
+            Some(serde_json::json!({ "userLabel": "Third Codex" })),
+        )
+        .await?;
+    let started: ProviderAccountLoginStartResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(start_id)).await??;
+    assert_eq!(
+        started.login.status,
+        ProviderAccountLoginStatus::AwaitingUser
+    );
+    assert_eq!(
+        started.login.verification_url.as_deref(),
+        Some("https://auth.openai.com/codex/device")
+    );
+    assert_eq!(started.login.user_code.as_deref(), Some("SAFE-CODE"));
+
+    let status_id = server
+        .send_raw_request(
+            "providerAccount/login/status",
+            Some(serde_json::json!({ "loginId": started.login.login_id.clone() })),
+        )
+        .await?;
+    let completed: ProviderAccountLoginStatusResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(status_id)).await??;
+    assert_eq!(
+        completed.login.status,
+        ProviderAccountLoginStatus::Completed
+    );
+    assert_eq!(
+        completed
+            .login
+            .account
+            .as_ref()
+            .map(|account| account.user_label.as_str()),
+        Some("Third Codex")
+    );
+
+    let cancel_id = server
+        .send_raw_request(
+            "providerAccount/login/cancel",
+            Some(serde_json::json!({ "loginId": completed.login.login_id.clone() })),
+        )
+        .await?;
+    let cancelled: ProviderAccountLoginCancelResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(cancel_id)).await??;
+    assert_eq!(
+        cancelled.login.status,
+        ProviderAccountLoginStatus::Cancelled
+    );
+    let serialized = serde_json::to_string(&(started, completed, cancelled))?;
+    assert!(!serialized.contains("private-device-auth-id"));
+    assert!(!serialized.contains("private-refresh-token"));
+
+    assert!(server.shutdown_gracefully().await?.success());
+    Ok(())
+}
+
+#[cfg(unix)]
 const FAKE_BACKEND: &str = r#"#!/bin/sh
 set -eu
 test "$1" = "--state-root"
@@ -173,6 +255,15 @@ while IFS= read -r line; do
       ;;
     *'"type":"providerAccountAddApiKey"'*'sk-api-key-canary-must-not-return'*)
       printf '{"type":"providerAccountAddApiKeyResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"account":{"id":"local-api-key","providerId":"openai","userLabel":"OpenAI API","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountLoginStart"'*)
+      printf '{"type":"providerAccountLoginStartResult","requestId":"%s","loginId":"login-safe-handle","status":"awaitingUser","verificationUrl":"https://auth.openai.com/codex/device","userCode":"SAFE-CODE","expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":1,"catalogRevision":1}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountLoginStatus"'*)
+      printf '{"type":"providerAccountLoginStatusResult","requestId":"%s","loginId":"login-safe-handle","status":"completed","verificationUrl":null,"userCode":null,"expiresAt":2000,"failure":null,"account":{"id":"local-third","providerId":"openai","userLabel":"Third Codex","credentialKind":"oauth","status":"verificationRequired","addedAt":125},"desiredStateRevision":2,"catalogRevision":2}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountLoginCancel"'*)
+      printf '{"type":"providerAccountLoginCancelResult","requestId":"%s","loginId":"login-safe-handle","status":"cancelled","verificationUrl":null,"userCode":null,"expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":2,"catalogRevision":2}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

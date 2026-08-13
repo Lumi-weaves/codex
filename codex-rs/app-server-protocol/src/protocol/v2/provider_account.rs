@@ -40,6 +40,30 @@ pub struct ProviderAccountAddApiKeyParams {
     pub user_label: String,
 }
 
+/// Begin one backend-owned OpenAI device login.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginStartParams {
+    pub user_label: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginStatusParams {
+    /// Opaque login handle returned by `providerAccount/login/start`.
+    pub login_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginCancelParams {
+    /// Opaque login handle returned by `providerAccount/login/start`.
+    pub login_id: String,
+}
+
 impl std::fmt::Debug for ProviderAccountAddApiKeyParams {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -73,6 +97,31 @@ pub enum ProviderAccountCredentialKind {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ProviderAccountLoginStatus {
+    AwaitingUser,
+    Exchanging,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ProviderAccountLoginFailure {
+    Expired,
+    Unavailable,
+    InvalidCredential,
+    AccountAlreadyExists,
+    AccountLimitReached,
+    StoreUnavailable,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccount {
     /// Opaque local identifier. This is not the upstream provider account id.
@@ -84,6 +133,24 @@ pub struct ProviderAccount {
     /// Unix timestamp in seconds.
     #[ts(type = "number")]
     pub added_at: i64,
+}
+
+/// Safe projection of a backend-owned login lifecycle.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLogin {
+    pub login_id: String,
+    pub status: ProviderAccountLoginStatus,
+    pub verification_url: Option<String>,
+    pub user_code: Option<String>,
+    /// Unix timestamp in seconds when the device code expires.
+    #[ts(type = "number")]
+    pub expires_at: i64,
+    pub failure: Option<ProviderAccountLoginFailure>,
+    pub account: Option<ProviderAccount>,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -134,4 +201,25 @@ pub struct ProviderAccountAddApiKeyResponse {
     pub account: ProviderAccount,
     pub desired_state_revision: String,
     pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginStartResponse {
+    pub login: ProviderAccountLogin,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginStatusResponse {
+    pub login: ProviderAccountLogin,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountLoginCancelResponse {
+    pub login: ProviderAccountLogin,
 }

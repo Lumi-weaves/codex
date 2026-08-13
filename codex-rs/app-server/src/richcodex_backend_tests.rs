@@ -224,6 +224,57 @@ async fn provider_account_response_rejects_mismatched_correlation_or_secret_fiel
 }
 
 #[tokio::test]
+async fn provider_account_login_start_is_correlated_and_secret_free() {
+    let (mut app_side, backend_side) = tokio::io::duplex(4096);
+    let (backend_read, mut backend_write) = tokio::io::split(backend_side);
+    let mut backend_read = BufReader::new(backend_read);
+    let backend = tokio::spawn(async move {
+        let mut request = String::new();
+        backend_read.read_line(&mut request).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request).unwrap(),
+            serde_json::json!({
+                "type": "providerAccountLoginStart",
+                "requestId": "request-login",
+                "userLabel": "Third Codex",
+            })
+        );
+        backend_write
+            .write_all(br#"{"type":"providerAccountLoginStartResult","requestId":"request-login","loginId":"login-safe-handle","status":"awaitingUser","verificationUrl":"https://auth.openai.com/codex/device","userCode":"SAFE-CODE","expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":1,"catalogRevision":1}
+"#)
+            .await
+            .unwrap();
+    });
+
+    let (app_read, mut app_write) = tokio::io::split(&mut app_side);
+    let mut app_read = BufReader::new(app_read);
+    let result = request_provider_account_login_start(
+        &mut app_write,
+        &mut app_read,
+        "request-login",
+        "Third Codex",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result,
+        ProviderAccountLoginResult {
+            login_id: "login-safe-handle".to_string(),
+            status: "awaitingUser".to_string(),
+            verification_url: Some("https://auth.openai.com/codex/device".to_string()),
+            user_code: Some("SAFE-CODE".to_string()),
+            expires_at: 2000,
+            failure: None,
+            account: None,
+            desired_state_revision: 1,
+            catalog_revision: 1,
+        }
+    );
+    backend.await.unwrap();
+}
+
+#[tokio::test]
 async fn model_route_create_is_correlated_and_secret_free() {
     let (mut app_side, backend_side) = tokio::io::duplex(4096);
     let (backend_read, mut backend_write) = tokio::io::split(backend_side);

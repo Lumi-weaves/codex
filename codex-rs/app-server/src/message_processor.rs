@@ -1331,6 +1331,15 @@ impl MessageProcessor {
             ClientRequest::ProviderAccountAddApiKey { params, .. } => {
                 self.provider_account_processor.add_api_key(params).await
             }
+            ClientRequest::ProviderAccountLoginStart { params, .. } => {
+                self.provider_account_processor.login_start(params).await
+            }
+            ClientRequest::ProviderAccountLoginStatus { params, .. } => {
+                self.provider_account_processor.login_status(params).await
+            }
+            ClientRequest::ProviderAccountLoginCancel { params, .. } => {
+                self.provider_account_processor.login_cancel(params).await
+            }
             ClientRequest::ModelRouteRead { params, .. } => {
                 self.model_route_processor.read(params).await
             }

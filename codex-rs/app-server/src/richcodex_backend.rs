@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 #[path = "richcodex_backend_client.rs"]
 mod client;
+#[path = "richcodex_backend_provider_login.rs"]
+mod provider_login;
 use client::BackendOperationErrorCode;
 pub(crate) use client::ModelRouteCreateRequest;
 pub(crate) use client::ModelRouteMutationResult;
@@ -44,6 +46,9 @@ use client::request_model_route_set_targets;
 use client::request_provider_account_import;
 #[cfg(test)]
 use client::request_provider_account_list;
+pub(crate) use provider_login::ProviderAccountLoginResult;
+#[cfg(test)]
+use provider_login::request_provider_account_login_start;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
@@ -163,6 +168,42 @@ enum BackendMessage {
         catalog_revision: u64,
         account: ProviderAccountSummary,
     },
+    ProviderAccountLoginStartResult {
+        request_id: String,
+        login_id: String,
+        status: String,
+        verification_url: Option<String>,
+        user_code: Option<String>,
+        expires_at: u64,
+        failure: Option<String>,
+        account: Option<ProviderAccountSummary>,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+    },
+    ProviderAccountLoginStatusResult {
+        request_id: String,
+        login_id: String,
+        status: String,
+        verification_url: Option<String>,
+        user_code: Option<String>,
+        expires_at: u64,
+        failure: Option<String>,
+        account: Option<ProviderAccountSummary>,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+    },
+    ProviderAccountLoginCancelResult {
+        request_id: String,
+        login_id: String,
+        status: String,
+        verification_url: Option<String>,
+        user_code: Option<String>,
+        expires_at: u64,
+        failure: Option<String>,
+        account: Option<ProviderAccountSummary>,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+    },
     ModelRouteReadResult {
         request_id: String,
         desired_state_revision: u64,
@@ -223,6 +264,18 @@ enum AppServerMessage<'a> {
         request_id: &'a str,
         api_key: &'a str,
         user_label: &'a str,
+    },
+    ProviderAccountLoginStart {
+        request_id: &'a str,
+        user_label: &'a str,
+    },
+    ProviderAccountLoginStatus {
+        request_id: &'a str,
+        login_id: &'a str,
+    },
+    ProviderAccountLoginCancel {
+        request_id: &'a str,
+        login_id: &'a str,
     },
     ModelRouteRead {
         request_id: &'a str,
@@ -461,6 +514,9 @@ where
         | BackendMessage::ProviderAccountListResult { .. }
         | BackendMessage::ProviderAccountImportResult { .. }
         | BackendMessage::ProviderAccountAddApiKeyResult { .. }
+        | BackendMessage::ProviderAccountLoginStartResult { .. }
+        | BackendMessage::ProviderAccountLoginStatusResult { .. }
+        | BackendMessage::ProviderAccountLoginCancelResult { .. }
         | BackendMessage::ModelRouteReadResult { .. }
         | BackendMessage::ModelRouteCreateResult { .. }
         | BackendMessage::ModelRouteSetTargetsResult { .. }

@@ -947,6 +947,24 @@ client_request_definitions! {
         serialization: global("richcodex-model-plane"),
         response: v2::ProviderAccountAddApiKeyResponse,
     },
+    #[experimental("providerAccount/login/start")]
+    ProviderAccountLoginStart => "providerAccount/login/start" {
+        params: v2::ProviderAccountLoginStartParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginStartResponse,
+    },
+    #[experimental("providerAccount/login/status")]
+    ProviderAccountLoginStatus => "providerAccount/login/status" {
+        params: v2::ProviderAccountLoginStatusParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginStatusResponse,
+    },
+    #[experimental("providerAccount/login/cancel")]
+    ProviderAccountLoginCancel => "providerAccount/login/cancel" {
+        params: v2::ProviderAccountLoginCancelParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginCancelResponse,
+    },
     #[experimental("modelRoute/read")]
     ModelRouteRead => "modelRoute/read" {
         params: v2::ModelRouteReadParams,

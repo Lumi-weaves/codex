@@ -341,7 +341,10 @@ fn model_route_error(error: RichCodexBackendClientError) -> JSONRPCErrorError {
         | RichCodexBackendClientError::CredentialExpired
         | RichCodexBackendClientError::AccountAlreadyExists
         | RichCodexBackendClientError::AccountLimitReached
-        | RichCodexBackendClientError::InvalidApiKey => {
+        | RichCodexBackendClientError::InvalidApiKey
+        | RichCodexBackendClientError::LoginUnavailable
+        | RichCodexBackendClientError::LoginLimitReached
+        | RichCodexBackendClientError::LoginNotFound => {
             internal_error("RichCodex model-route backend returned an invalid operation error")
         }
     }
