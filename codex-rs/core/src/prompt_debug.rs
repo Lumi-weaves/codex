@@ -30,11 +30,11 @@ use crate::context::ContextualUserFragment;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
+use crate::prompt_compiler::PromptCompiler;
 use crate::prompt_inheritance::PromptInheritanceProvenance;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::session::Session;
-use crate::session::turn::build_prompt;
 use crate::state_db_bridge::StateDbHandle;
 use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
@@ -493,12 +493,8 @@ async fn build_prompt_from_session(
         .await
         .for_prompt(&turn_context.model_info.input_modalities);
     let base_instructions = sess.get_base_instructions().await;
-    let prompt = build_prompt(
-        prompt_input,
-        step_context.tool_router.as_ref(),
-        turn_context.as_ref(),
-        base_instructions,
-    );
+    let prompt = PromptCompiler::for_turn(step_context.as_ref(), base_instructions)
+        .compile_prompt(prompt_input);
     Ok((turn_context, prompt))
 }
 

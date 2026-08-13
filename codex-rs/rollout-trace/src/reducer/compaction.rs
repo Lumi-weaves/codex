@@ -1,4 +1,4 @@
-//! Reducer support for the remote compaction lifecycle.
+//! Reducer support for the compaction lifecycle.
 //!
 //! This module owns request/checkpoint bookkeeping. Conversation item reconciliation stays in
 //! `conversation` because it depends on the same normalization and reuse invariants as inference
@@ -79,7 +79,7 @@ impl TraceReducer {
 
     /// Completes an upstream compaction request attempt without modifying conversation history.
     ///
-    /// The request/response payloads are evidence for the remote call. The live
+    /// The request/response payloads are evidence for the model call. The live
     /// conversation changes only when a separate install event provides the checkpoint.
     pub(super) fn complete_compaction_request(
         &mut self,

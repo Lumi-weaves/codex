@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use super::trim_function_call_history_to_fit_context_window;
-use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
@@ -59,15 +59,8 @@ pub(super) async fn run_remote_compact_attempt(
         .is_enabled()
         .then(|| history.raw_items().cloned().collect());
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
-    let tool_router = &step_context.tool_router;
-    let prompt = Prompt {
-        input: prompt_input,
-        tools: tool_router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
-        base_instructions,
-        output_schema: None,
-        output_schema_strict: true,
-    };
+    let prompt = PromptCompiler::for_remote_compaction(step_context.as_ref(), base_instructions)
+        .compile_prompt(prompt_input);
     let window_id = sess.current_window_id().await;
     let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
         sess.installation_id.clone(),

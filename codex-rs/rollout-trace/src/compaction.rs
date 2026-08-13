@@ -1,6 +1,6 @@
-//! Hot-path helpers for recording upstream remote compaction attempts.
+//! Hot-path helpers for recording upstream compaction attempts.
 //!
-//! Remote compaction is a model-facing request with a different semantic role
+//! Compaction is a model-facing request with a different semantic role
 //! from normal sampling. Keeping the no-op capable trace handle in this crate
 //! lets `codex-core` record exact endpoint payloads without owning trace schema
 //! details.
@@ -28,7 +28,7 @@ use crate::writer::TraceWriter;
 
 static NEXT_COMPACTION_REQUEST: AtomicU64 = AtomicU64::new(1);
 
-/// Turn-local remote compaction tracing context.
+/// Turn-local compaction tracing context.
 ///
 /// A compaction can retry its upstream request before installing one checkpoint. The context
 /// owns the stable checkpoint ID; each request attempt gets a separate request ID.

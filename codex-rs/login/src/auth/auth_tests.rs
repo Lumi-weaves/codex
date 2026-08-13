@@ -1846,6 +1846,10 @@ impl AuthManagerConfig for TestAuthManagerConfig {
         self.0.auth_credentials_store_mode
     }
 
+    fn model_auth_source(&self) -> ModelAuthSource {
+        ModelAuthSource::Control
+    }
+
     fn auth_keyring_backend_kind(&self) -> AuthKeyringBackendKind {
         self.0.keyring_backend_kind
     }

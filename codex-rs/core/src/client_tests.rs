@@ -430,7 +430,7 @@ async fn prompt_receipt_request_matches_captured_outbound_body() -> anyhow::Resu
 }
 
 #[tokio::test]
-async fn remote_v2_compaction_trace_matches_captured_lowered_request() -> anyhow::Result<()> {
+async fn streaming_compaction_trace_matches_captured_lowered_request() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let response_mock = mount_sse_once(
         &server,
@@ -516,6 +516,7 @@ async fn remote_v2_compaction_trace_matches_captured_lowered_request() -> anyhow
     let mut stream = client
         .new_session()
         .stream_compaction(
+            PromptInvocationKind::LocalCompaction,
             &prompt,
             &test_model_info(),
             &test_session_telemetry(),

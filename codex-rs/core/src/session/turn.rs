@@ -29,6 +29,7 @@ use crate::mentions::collect_explicit_app_ids;
 use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::plugins::build_plugin_injections;
+use crate::prompt_compiler::PromptCompiler;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_retry::ResponsesStreamRequest;
@@ -90,7 +91,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::build_hook_prompt_message;
-use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseInputItem;
@@ -1356,25 +1356,6 @@ pub(super) fn collect_explicit_app_ids_from_skill_items(
     connector_ids
 }
 
-#[instrument(level = "trace", skip_all)]
-pub(crate) fn build_prompt(
-    input: Vec<ResponseItem>,
-    router: &ToolRouter,
-    turn_context: &TurnContext,
-    base_instructions: BaseInstructions,
-) -> Prompt {
-    Prompt {
-        input,
-        tools: router.model_visible_specs(),
-        parallel_tool_calls: turn_context.model_info.supports_parallel_tool_calls,
-        base_instructions,
-        output_schema: turn_context.final_output_json_schema.clone(),
-        output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
-            &turn_context.session_source,
-        ),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
 #[instrument(level = "trace",
@@ -1396,9 +1377,9 @@ async fn run_sampling_request(
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
-    let router = Arc::clone(&step_context.tool_router);
 
     let base_instructions = sess.get_base_instructions().await;
+    let prompt_compiler = PromptCompiler::for_turn(step_context.as_ref(), base_instructions);
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&sess),
@@ -1437,12 +1418,7 @@ async fn run_sampling_request(
         if let Some(no_finish) = active_resource_no_finish {
             prompt_input.push(ContextualUserFragment::into(no_finish));
         }
-        let prompt = build_prompt(
-            prompt_input,
-            router.as_ref(),
-            turn_context.as_ref(),
-            base_instructions.clone(),
-        );
+        let prompt = prompt_compiler.compile_prompt(prompt_input);
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),

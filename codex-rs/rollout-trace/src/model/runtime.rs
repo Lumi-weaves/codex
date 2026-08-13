@@ -119,7 +119,7 @@ pub struct Compaction {
     pub world_state_baseline_installed: Option<bool>,
 }
 
-/// One upstream remote request made while computing a compaction checkpoint.
+/// One upstream request made while computing a compaction checkpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompactionRequest {
     pub compaction_request_id: CompactionRequestId,
