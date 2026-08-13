@@ -18,13 +18,23 @@ use tokio::time::timeout;
 
 #[path = "richcodex_backend_client.rs"]
 mod client;
-use client::RichCodexBackendClient;
+use client::BackendOperationErrorCode;
+pub(crate) use client::ProviderAccountImportResult;
+pub(crate) use client::ProviderAccountListResult;
+pub(crate) use client::ProviderAccountSummary;
+pub(crate) use client::RichCodexBackendClient;
+pub(crate) use client::RichCodexBackendClientError;
+#[cfg(test)]
+use client::request_provider_account_import;
+#[cfg(test)]
+use client::request_provider_account_list;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_PROTOCOL_VERSION: u32 = 2;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const KERNEL_LOCK_JSON: &str = include_str!("../richcodex-kernel.lock.json");
 
@@ -102,6 +112,26 @@ enum BackendMessage {
     ShutdownComplete {
         request_id: String,
     },
+    ProviderAccountListResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        providers: Vec<ProviderSummary>,
+        data: Vec<ProviderAccountSummary>,
+        next_cursor: Option<String>,
+    },
+    ProviderAccountImportResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+    },
+    OperationError {
+        request_id: String,
+        code: BackendOperationErrorCode,
+        #[serde(rename = "message")]
+        _message: String,
+    },
     ProtocolError {
         #[serde(rename = "code")]
         _code: String,
@@ -115,7 +145,19 @@ enum BackendMessage {
     rename_all_fields = "camelCase"
 )]
 enum AppServerMessage<'a> {
-    Shutdown { request_id: &'a str },
+    Shutdown {
+        request_id: &'a str,
+    },
+    ProviderAccountList {
+        request_id: &'a str,
+        cursor: Option<&'a str>,
+        limit: Option<u32>,
+    },
+    ProviderAccountImport {
+        request_id: &'a str,
+        auth_json_path: &'a str,
+        user_label: &'a str,
+    },
 }
 
 pub(crate) struct RichCodexBackend {
@@ -174,6 +216,10 @@ impl RichCodexBackend {
 
     pub(crate) fn snapshot(&self) -> &BackendSnapshot {
         &self.snapshot
+    }
+
+    pub(crate) fn client(&self) -> RichCodexBackendClient {
+        self.client.clone()
     }
 
     pub(crate) async fn shutdown(self) -> io::Result<()> {
@@ -292,12 +338,14 @@ where
         BackendMessage::ProtocolError { .. } => {
             Err(io::Error::other("model backend rejected shutdown"))
         }
-        BackendMessage::ShutdownComplete { .. } | BackendMessage::Ready { .. } => {
-            Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "model backend sent an invalid shutdown acknowledgement",
-            ))
-        }
+        BackendMessage::ShutdownComplete { .. }
+        | BackendMessage::Ready { .. }
+        | BackendMessage::ProviderAccountListResult { .. }
+        | BackendMessage::ProviderAccountImportResult { .. }
+        | BackendMessage::OperationError { .. } => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid shutdown acknowledgement",
+        )),
     }
 }
 

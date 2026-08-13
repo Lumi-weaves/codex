@@ -35,6 +35,7 @@ use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
+use crate::request_processors::ProviderAccountRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
@@ -110,6 +111,7 @@ pub(crate) struct MessageProcessor {
     catalog_processor: CatalogRequestProcessor,
     command_exec_processor: CommandExecRequestProcessor,
     process_exec_processor: ProcessExecRequestProcessor,
+    provider_account_processor: ProviderAccountRequestProcessor,
     config_processor: ConfigRequestProcessor,
     environment_processor: EnvironmentRequestProcessor,
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
@@ -224,6 +226,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
+    pub(crate) richcodex_backend: Option<crate::richcodex_backend::RichCodexBackendClient>,
 }
 
 impl MessageProcessor {
@@ -249,6 +252,7 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            richcodex_backend,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -435,6 +439,7 @@ impl MessageProcessor {
             on_effective_plugins_changed,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
+        let provider_account_processor = ProviderAccountRequestProcessor::new(richcodex_backend);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -520,6 +525,7 @@ impl MessageProcessor {
             catalog_processor,
             command_exec_processor,
             process_exec_processor,
+            provider_account_processor,
             config_processor,
             environment_processor,
             external_agent_config_processor,
@@ -1298,6 +1304,12 @@ impl MessageProcessor {
             }
             ClientRequest::ModelList { params, .. } => {
                 self.catalog_processor.model_list(params).await
+            }
+            ClientRequest::ProviderAccountList { params, .. } => {
+                self.provider_account_processor.list(params).await
+            }
+            ClientRequest::ProviderAccountImport { params, .. } => {
+                self.provider_account_processor.import(params).await
             }
             ClientRequest::ExperimentalFeatureList { params, .. } => {
                 self.catalog_processor

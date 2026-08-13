@@ -98,6 +98,122 @@ async fn shutdown_request_and_acknowledgement_are_correlated() {
 }
 
 #[tokio::test]
+async fn provider_account_list_is_correlated_and_secret_free() {
+    let (mut app_side, backend_side) = tokio::io::duplex(4096);
+    let (backend_read, mut backend_write) = tokio::io::split(backend_side);
+    let mut backend_read = BufReader::new(backend_read);
+    let backend = tokio::spawn(async move {
+        let mut request = String::new();
+        backend_read.read_line(&mut request).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&request).unwrap(),
+            serde_json::json!({
+                "type": "providerAccountList",
+                "requestId": "request-8",
+                "cursor": "1",
+                "limit": 20
+            })
+        );
+        backend_write
+            .write_all(br#"{"type":"providerAccountListResult","requestId":"request-8","desiredStateRevision":2,"catalogRevision":3,"providers":[{"id":"openai","displayName":"OpenAI","accountCount":1,"status":"ready"}],"data":[{"id":"local-1","providerId":"openai","userLabel":"Secondary","status":"verificationRequired","addedAt":123}],"nextCursor":null}
+"#)
+            .await
+            .unwrap();
+    });
+
+    let (app_read, mut app_write) = tokio::io::split(&mut app_side);
+    let mut app_read = BufReader::new(app_read);
+    let result = request_provider_account_list(
+        &mut app_write,
+        &mut app_read,
+        "request-8",
+        Some("1"),
+        Some(20),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        result,
+        ProviderAccountListResult {
+            desired_state_revision: 2,
+            catalog_revision: 3,
+            providers: vec![ProviderSummary {
+                id: "openai".to_string(),
+                display_name: "OpenAI".to_string(),
+                account_count: 1,
+                status: "ready".to_string(),
+            }],
+            data: vec![ProviderAccountSummary {
+                id: "local-1".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Secondary".to_string(),
+                status: "verificationRequired".to_string(),
+                added_at: 123,
+            }],
+            next_cursor: None,
+        }
+    );
+    backend.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_account_import_maps_static_operation_errors() {
+    let (mut app_side, backend_side) = tokio::io::duplex(4096);
+    let (backend_read, mut backend_write) = tokio::io::split(backend_side);
+    let mut backend_read = BufReader::new(backend_read);
+    let backend = tokio::spawn(async move {
+        let mut request = String::new();
+        backend_read.read_line(&mut request).await.unwrap();
+        let request = serde_json::from_str::<serde_json::Value>(&request).unwrap();
+        assert_eq!(request["type"], "providerAccountImport");
+        assert_eq!(request["requestId"], "request-9");
+        backend_write
+            .write_all(br#"{"type":"operationError","requestId":"request-9","code":"invalid_auth_document","message":"selected credential source is not a supported Codex login"}
+"#)
+            .await
+            .unwrap();
+    });
+
+    let (app_read, mut app_write) = tokio::io::split(&mut app_side);
+    let mut app_read = BufReader::new(app_read);
+    let error = request_provider_account_import(
+        &mut app_write,
+        &mut app_read,
+        "request-9",
+        "/selected/auth.json",
+        "Secondary",
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RichCodexBackendClientError::InvalidAuthDocument);
+    backend.await.unwrap();
+}
+
+#[tokio::test]
+async fn provider_account_response_rejects_mismatched_correlation_or_secret_fields() {
+    for input in [
+        br#"{"type":"providerAccountListResult","requestId":"other","desiredStateRevision":0,"catalogRevision":0,"providers":[],"data":[],"nextCursor":null}
+"#
+        .as_slice(),
+        br#"{"type":"providerAccountListResult","requestId":"request-10","desiredStateRevision":0,"catalogRevision":0,"providers":[],"data":[{"id":"local-1","providerId":"openai","userLabel":"Secondary","status":"verificationRequired","addedAt":123,"accessToken":"must-not-cross"}],"nextCursor":null}
+"#
+        .as_slice(),
+    ] {
+        let mut reader = BufReader::new(input);
+        let mut writer = tokio::io::sink();
+
+        let error =
+            request_provider_account_list(&mut writer, &mut reader, "request-10", None, None)
+                .await
+                .unwrap_err();
+
+        assert_eq!(error, RichCodexBackendClientError::Unavailable);
+    }
+}
+
+#[tokio::test]
 async fn handshake_timeout_is_bounded() {
     let (_writer, reader) = tokio::io::duplex(16);
     let mut reader = BufReader::new(reader);
