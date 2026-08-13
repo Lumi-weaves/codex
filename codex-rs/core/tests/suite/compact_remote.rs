@@ -1185,10 +1185,33 @@ async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
             phase: "standalone_turn".to_string(),
             model: "gpt-5.5".to_string(),
             provider: "OpenAI".to_string(),
-            reference_context_installed: false,
-            world_state_baseline_installed: false,
+            reference_context_installed: true,
+            world_state_baseline_installed: true,
         }
     );
+    let replacement_history = checkpoint
+        .replacement_history
+        .expect("manual v2 replacement history");
+    assert!(
+        matches!(
+            replacement_history.first(),
+            Some(ResponseItem::Compaction {
+                encrypted_content,
+                ..
+            }) if encrypted_content == "V2_MANUAL_COMPACT_SUMMARY"
+        ),
+        "the old window should be represented by one leading checkpoint"
+    );
+    assert!(replacement_history.len() > 1);
+    assert!(
+        replacement_history[1..]
+            .iter()
+            .all(|item| matches!(item, ResponseItem::Message { .. })),
+        "only freshly rendered current context should follow the checkpoint"
+    );
+    let replacement_text = serde_json::to_string(&replacement_history)?;
+    assert!(!replacement_text.contains("manual continuity"));
+    assert!(!replacement_text.contains("BEFORE_COMPACT"));
     assert_eq!(checkpoint.window_number, Some(1));
     assert_eq!(checkpoint.previous_window_id, checkpoint.first_window_id);
     assert_ne!(checkpoint.window_id, checkpoint.previous_window_id);
@@ -1197,7 +1220,7 @@ async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<()> {
+async fn remote_compact_v2_installs_checkpoint_then_current_context_for_followups() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let harness = TestCodexHarness::with_builder(
@@ -1209,7 +1232,7 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     )
     .await?;
     let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
-    let user_notice = "<image_resize_notice>retained user image</image_resize_notice>";
+    let user_notice = "<image_resize_notice>old user image</image_resize_notice>";
     let tool_notice = "<image_resize_notice>discarded tool image</image_resize_notice>";
     let unlisted_notice = "<unlisted_notice>discarded developer notice</unlisted_notice>";
     let developer_message = |text| {
@@ -1224,7 +1247,7 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             "type": "message",
             "role": "user",
             "content": [
-                { "type": "input_text", "text": "retained image source" },
+                { "type": "input_text", "text": "old image source" },
                 { "type": "input_image", "image_url": image_url }
             ]
         }),
@@ -1408,19 +1431,8 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
 
     let follow_up_request = response_requests.last().expect("follow-up request missing");
     assert!(
-        follow_up_request
-            .inputs_of_type("agent_message")
-            .iter()
-            .any(|item| item["content"][1]["encrypted_content"].as_str()
-                == Some(delegated_task_ciphertext.as_str())),
-        "expected v2 follow-up request to retain the encrypted delegated task"
-    );
-    assert!(
-        follow_up_request
-            .inputs_of_type("agent_message")
-            .iter()
-            .all(|item| !item.to_string().contains("child completion")),
-        "expected v2 follow-up request to omit the child completion"
+        follow_up_request.inputs_of_type("agent_message").is_empty(),
+        "pre-boundary agent messages should be represented only by the checkpoint"
     );
     let follow_up_body = follow_up_request.body_json().to_string();
     assert!(
@@ -1431,28 +1443,31 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         follow_up_body.contains("ENCRYPTED_CONTEXT_COMPACTION_SUMMARY"),
         "expected follow-up request to include the compaction payload"
     );
+    let follow_up_input = follow_up_request.input();
+    assert_eq!(follow_up_input[0]["type"], "compaction");
+    let post_boundary_user_index = follow_up_input
+        .iter()
+        .position(|item| item.to_string().contains("after compact"))
+        .expect("post-boundary user input");
+    assert!(post_boundary_user_index > 1);
     assert!(
-        follow_up_body.contains("hello remote compact"),
-        "expected v2 follow-up request to preserve retained original user messages"
+        follow_up_input[1..post_boundary_user_index]
+            .iter()
+            .any(|item| item["role"] == "developer")
     );
-    assert!(
-        follow_up_request.input().windows(2).any(|items| {
-            items[0]["role"] == "user"
-                && items[0]["content"][0]["text"] == "retained image source"
-                && items[1]["role"] == "developer"
-                && items[1]["content"][0]["text"] == user_notice
-        }),
-        "expected v2 compaction to retain the user image and its adjacent resize notice"
-    );
-    assert!(
-        !follow_up_body.contains(unlisted_notice),
-        "expected v2 compaction to drop unlisted developer notices"
-    );
-    assert!(
-        !follow_up_body.contains(tool_notice),
-        "expected v2 compaction to drop the resize notice with its tool output"
-    );
-
+    for pre_boundary_text in [
+        "hello remote compact",
+        "old image source",
+        user_notice,
+        unlisted_notice,
+        tool_notice,
+        "child completion",
+    ] {
+        assert!(
+            !follow_up_body.contains(pre_boundary_text),
+            "pre-boundary text should not survive beside the checkpoint: {pre_boundary_text}"
+        );
+    }
     Ok(())
 }
 
@@ -4198,6 +4213,146 @@ async fn remote_pre_turn_compact_response_seeds_turn_state() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_pre_turn_compact_v2_installs_checkpoint_before_post_boundary_user() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+                config.model_auto_compact_token_limit = Some(200);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+    let rollout_path = harness
+        .test()
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("m1", "PRE_BOUNDARY_ASSISTANT"),
+                responses::ev_completed_with_tokens("r1", /*total_tokens*/ 500),
+            ]),
+            responses::sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "V2_PRE_TURN_CHECKPOINT",
+                    }
+                }),
+                responses::ev_completed("r-compact"),
+            ]),
+            responses::sse(vec![
+                responses::ev_assistant_message("m2", "POST_BOUNDARY_ASSISTANT"),
+                responses::ev_completed_with_tokens("r2", /*total_tokens*/ 80),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "PRE_BOUNDARY_USER".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "POST_BOUNDARY_USER".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    let compaction_id = wait_for_event_match(&codex, |event| match event {
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            item: TurnItem::ContextCompaction(item),
+            ..
+        }) => Some(item.id.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_turn_complete(&codex).await;
+
+    let requests = responses_mock.requests();
+    assert_eq!(requests.len(), 3);
+    let compact_body = requests[1].body_json().to_string();
+    assert!(compact_body.contains("\"type\":\"compaction_trigger\""));
+    assert!(compact_body.contains("PRE_BOUNDARY_USER"));
+    assert!(!compact_body.contains("POST_BOUNDARY_USER"));
+
+    let follow_up_input = requests[2].input();
+    assert_eq!(follow_up_input[0]["type"], "compaction");
+    let post_boundary_user_index = follow_up_input
+        .iter()
+        .position(|item| item.to_string().contains("POST_BOUNDARY_USER"))
+        .expect("post-boundary user input");
+    assert!(post_boundary_user_index > 1);
+    assert!(
+        follow_up_input[1..post_boundary_user_index]
+            .iter()
+            .any(|item| item["role"] == "developer")
+    );
+    let follow_up_body = requests[2].body_json().to_string();
+    assert!(!follow_up_body.contains("PRE_BOUNDARY_USER"));
+    assert!(!follow_up_body.contains("PRE_BOUNDARY_ASSISTANT"));
+
+    let checkpoint = latest_compacted_item(&rollout_path)?;
+    assert_eq!(
+        checkpoint.continuity,
+        Some(CompactionContinuity {
+            compaction_id,
+            trigger: "auto".to_string(),
+            reason: "context_limit".to_string(),
+            implementation: "responses_compaction_v2".to_string(),
+            phase: "pre_turn".to_string(),
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            reference_context_installed: true,
+            world_state_baseline_installed: true,
+        })
+    );
+    let replacement_history = checkpoint
+        .replacement_history
+        .expect("pre-turn v2 replacement history");
+    assert!(
+        matches!(
+            replacement_history.first(),
+            Some(ResponseItem::Compaction {
+                encrypted_content,
+                ..
+            }) if encrypted_content == "V2_PRE_TURN_CHECKPOINT"
+        ),
+        "the checkpoint should be the first item in the new window"
+    );
+    assert!(replacement_history.len() > 1);
+    let replacement_text = serde_json::to_string(&replacement_history)?;
+    assert!(!replacement_text.contains("PRE_BOUNDARY_USER"));
+    assert!(!replacement_text.contains("POST_BOUNDARY_USER"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_mid_turn_compact_v1_sends_turn_state_over_http() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -4404,6 +4559,30 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
     assert_eq!(checkpoint.window_number, Some(1));
     assert_eq!(checkpoint.previous_window_id, checkpoint.first_window_id);
     assert_ne!(checkpoint.window_id, checkpoint.previous_window_id);
+    let replacement_history = checkpoint
+        .replacement_history
+        .expect("mid-turn v2 replacement history");
+    assert!(
+        matches!(
+            replacement_history.first(),
+            Some(ResponseItem::Compaction {
+                encrypted_content,
+                ..
+            }) if encrypted_content == "V2_COMPACT_SUMMARY"
+        ),
+        "the checkpoint should be the first item in the new window"
+    );
+    assert!(replacement_history.len() > 1);
+    let replacement_text = serde_json::to_string(&replacement_history)?;
+    assert!(!replacement_text.contains("RUN_WITH_MID_TURN_COMPACT_V2"));
+    assert_eq!(requests[2].input()[0]["type"], "compaction");
+    assert!(
+        !requests[2]
+            .body_json()
+            .to_string()
+            .contains("RUN_WITH_MID_TURN_COMPACT_V2"),
+        "the already-compacted user input must not be replayed"
+    );
 
     Ok(())
 }

@@ -7,17 +7,11 @@ use crate::client_common::ResponseEvent;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
-use crate::compact::InitialContextInjection;
 use crate::compact::compaction_continuity;
 use crate::compact::compaction_status_from_result;
 use crate::compact::record_installed_compaction;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
-use crate::compact_remote::process_compacted_history;
-use crate::compact_remote::should_keep_compacted_history_item;
-use crate::compact_remote_history::HistoryItemGroup;
-use crate::compact_remote_history::history_item_groups;
-use crate::context_manager::estimate_item_token_count;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
@@ -39,15 +33,10 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::ContextCompactionItem;
 use codex_protocol::items::TurnItem;
-use codex_protocol::models::AgentMessageInputContent;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
-use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_utils_output_truncation::approx_token_count;
-use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -56,10 +45,6 @@ mod attempt;
 use attempt::RemoteCompactV2Attempt;
 use attempt::run_remote_compact_v2_attempt;
 
-// Mirror the current /responses/compact retained-message default while the
-// server-side path remains the reference implementation.
-const RETAINED_MESSAGE_TOKEN_BUDGET: usize = 64_000;
-const MAX_RETAINED_AGENT_MESSAGE_TOKENS: i64 = 10_000;
 // Compact attempts can run much longer than normal turns, so keep the per-transport
 // retry budget smaller than the general Responses stream retry budget.
 const MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES: u64 = 2;
@@ -68,8 +53,8 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     fallback_step_context: Option<Arc<StepContext>>,
+    projection_step_context: Arc<StepContext>,
     client_session: &mut ModelClientSession,
-    initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
@@ -83,8 +68,8 @@ pub(crate) async fn run_inline_remote_auto_compact_task(
         &sess,
         &step_context,
         fallback_step_context.as_ref(),
+        &projection_step_context,
         Some(client_session),
-        initial_context_injection,
         compaction_metadata,
     )
     .await
@@ -117,8 +102,8 @@ pub(crate) async fn run_remote_compact_task(
         &sess,
         &step_context,
         /*fallback_step_context*/ None,
+        &step_context,
         /*client_session*/ None,
-        InitialContextInjection::DoNotInject,
         compaction_metadata,
     )
     .await
@@ -128,8 +113,8 @@ async fn run_remote_compact_task_inner(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
+    projection_step_context: &Arc<StepContext>,
     client_session: Option<&mut ModelClientSession>,
-    initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
@@ -170,8 +155,8 @@ async fn run_remote_compact_task_inner(
         sess,
         step_context,
         fallback_step_context,
+        projection_step_context,
         client_session,
-        initial_context_injection,
         compaction_metadata,
         &mut analytics_details,
     )
@@ -208,8 +193,8 @@ async fn run_remote_compact_task_inner_impl(
     sess: &Arc<Session>,
     step_context: &Arc<StepContext>,
     fallback_step_context: Option<&Arc<StepContext>>,
+    projection_step_context: &Arc<StepContext>,
     mut client_session: Option<&mut ModelClientSession>,
-    initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<()> {
@@ -277,7 +262,6 @@ async fn run_remote_compact_task_inner_impl(
     };
     let RemoteCompactV2Attempt {
         trace_input_history,
-        prompt_input,
         compaction_output,
         token_usage,
         owned_client_session: _owned_client_session,
@@ -289,32 +273,34 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details.cached_input_tokens = Some(token_usage.cached_input_tokens);
         analytics_details.cache_write_input_tokens = Some(token_usage.cache_write_input_tokens);
     }
-    let (compacted_history, retained_images) =
-        build_v2_compacted_history(&prompt_input, compaction_output);
-    analytics_details.retained_image_count = Some(retained_images);
+    analytics_details.retained_image_count = Some(0);
+    let projection_turn_context = &projection_step_context.turn;
+    let world_state_baseline = Arc::new(
+        sess.build_world_state_for_step(projection_step_context)
+            .await?,
+    );
+    let mut new_history = vec![compaction_output];
+    new_history.extend(
+        sess.build_initial_context_with_world_state(
+            projection_turn_context.as_ref(),
+            world_state_baseline.as_ref(),
+        )
+        .await,
+    );
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (new_history, world_state_baseline) =
-        process_compacted_history(sess.as_ref(), compacted_history, &initial_context_injection)
-            .await;
-
-    let reference_context_item = match initial_context_injection {
-        InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { .. } => {
-            Some(compaction_turn_context.to_turn_context_item())
-        }
-    };
+    let reference_context_item = Some(projection_turn_context.to_turn_context_item());
     let continuity = compaction_continuity(
         compaction_id,
         compaction_metadata,
         compaction_turn_context.as_ref(),
-        reference_context_item.is_some(),
-        world_state_baseline.is_some(),
+        true,
+        true,
     );
     let installed = sess
         .replace_compacted_history(
             new_history,
             reference_context_item,
-            world_state_baseline,
+            Some(world_state_baseline),
             CompactedHistoryMetadata {
                 message: String::new(),
                 window_number: new_window_number,
@@ -328,7 +314,7 @@ async fn run_remote_compact_task_inner_impl(
         trace_input_history.as_deref(),
         &installed,
     );
-    sess.recompute_token_usage(compaction_turn_context).await;
+    sess.recompute_token_usage(projection_turn_context).await;
 
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
         .await;
@@ -451,170 +437,6 @@ async fn collect_compaction_output(
     })
 }
 
-fn build_v2_compacted_history(
-    prompt_input: &[ResponseItem],
-    compaction_output: ResponseItem,
-) -> (Vec<ResponseItem>, usize) {
-    let retained = history_item_groups(prompt_input)
-        .filter(|group| is_retained_for_remote_compaction_v2(group.source))
-        .filter(|group| should_keep_compacted_history_item(group.source))
-        .flat_map(HistoryItemGroup::into_items)
-        .cloned()
-        .collect::<Vec<_>>();
-    let mut retained =
-        truncate_retained_messages_for_remote_compaction(retained, RETAINED_MESSAGE_TOKEN_BUDGET);
-    let retained_image_count = retained
-        .iter()
-        .map(retained_input_image_count)
-        .sum::<usize>();
-    retained.push(compaction_output);
-    (retained, retained_image_count)
-}
-
-fn is_retained_for_remote_compaction_v2(item: &ResponseItem) -> bool {
-    if let ResponseItem::AgentMessage { content, .. } = item {
-        let is_completion = matches!(
-            content.first(),
-            Some(AgentMessageInputContent::InputText { text })
-                if text.starts_with("Message Type: FINAL_ANSWER\n")
-        );
-        return !is_completion
-            && estimate_item_token_count(item) <= MAX_RETAINED_AGENT_MESSAGE_TOKENS;
-    }
-
-    let ResponseItem::Message { role, .. } = item else {
-        return false;
-    };
-
-    matches!(role.as_str(), "user" | "developer" | "system")
-}
-
-fn retained_input_image_count(item: &ResponseItem) -> usize {
-    let ResponseItem::Message { content, .. } = item else {
-        return 0;
-    };
-
-    content
-        .iter()
-        .filter(|item| matches!(item, ContentItem::InputImage { .. }))
-        .count()
-}
-
-fn truncate_retained_messages_for_remote_compaction(
-    items: Vec<ResponseItem>,
-    max_tokens: usize,
-) -> Vec<ResponseItem> {
-    let mut remaining = max_tokens;
-    let mut truncated_reversed = Vec::with_capacity(items.len());
-    for group in history_item_groups(items)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-    {
-        if remaining == 0 {
-            continue;
-        }
-
-        let notice_tokens = group
-            .attached_notice
-            .as_ref()
-            .map_or(0, |notice| message_text_token_count(notice).max(1));
-        let token_count = message_text_token_count(&group.source)
-            .max(1)
-            .saturating_add(notice_tokens);
-        if token_count <= remaining {
-            if let Some(notice) = group.attached_notice {
-                truncated_reversed.push(notice);
-            }
-            truncated_reversed.push(group.source);
-            remaining = remaining.saturating_sub(token_count);
-        } else if remaining > notice_tokens
-            && let Some(truncated_item) = truncate_message_text_to_token_budget(
-                group.source,
-                /*max_tokens*/ remaining - notice_tokens,
-            )
-        {
-            if let Some(notice) = group.attached_notice {
-                truncated_reversed.push(notice);
-            }
-            truncated_reversed.push(truncated_item);
-            remaining = 0;
-        }
-    }
-    truncated_reversed.reverse();
-    truncated_reversed
-}
-
-fn message_text_token_count(item: &ResponseItem) -> usize {
-    let ResponseItem::Message { content, .. } = item else {
-        return usize::try_from(estimate_item_token_count(item)).unwrap_or(usize::MAX);
-    };
-
-    content
-        .iter()
-        .map(|item| match item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                approx_token_count(text)
-            }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
-        })
-        .sum()
-}
-
-fn truncate_message_text_to_token_budget(
-    item: ResponseItem,
-    max_tokens: usize,
-) -> Option<ResponseItem> {
-    let ResponseItem::Message {
-        id,
-        role,
-        content,
-        phase,
-        internal_chat_message_metadata_passthrough: metadata,
-    } = item
-    else {
-        return None;
-    };
-
-    let mut remaining = max_tokens;
-    let mut truncated_content = Vec::with_capacity(content.len());
-    for mut content_item in content {
-        match &mut content_item {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                if remaining == 0 {
-                    continue;
-                }
-
-                let token_count = approx_token_count(text);
-                if token_count <= remaining {
-                    remaining = remaining.saturating_sub(token_count);
-                } else {
-                    *text = truncate_text(text, TruncationPolicy::Tokens(remaining));
-                    remaining = 0;
-                }
-                if !text.is_empty() {
-                    truncated_content.push(content_item);
-                }
-            }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => {
-                truncated_content.push(content_item);
-            }
-        }
-    }
-
-    if truncated_content.is_empty() {
-        return None;
-    }
-
-    Some(ResponseItem::Message {
-        id,
-        role,
-        content: truncated_content,
-        phase,
-        internal_chat_message_metadata_passthrough: metadata,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,216 +470,6 @@ mod tests {
             rx_event,
             consumer_dropped: CancellationToken::new(),
         }
-    }
-
-    #[test]
-    fn build_v2_compacted_history_filters_to_installed_retention_shape() {
-        let input = vec![
-            message("developer", "dev", /*phase*/ None),
-            message("system", "sys", /*phase*/ None),
-            message("user", "user", /*phase*/ None),
-            message("assistant", "commentary", Some(MessagePhase::Commentary)),
-            message("assistant", "final", Some(MessagePhase::FinalAnswer)),
-            ResponseItem::FunctionCall {
-                id: None,
-                name: "shell_command".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-                call_id: "call_1".to_string(),
-                encrypted_function_args: None,
-                internal_chat_message_metadata_passthrough: None,
-            },
-            ResponseItem::Compaction {
-                id: None,
-                encrypted_content: "old".to_string(),
-                internal_chat_message_metadata_passthrough: None,
-            },
-        ];
-        let output = ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "new".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        };
-
-        let (history, _) = build_v2_compacted_history(&input, output.clone());
-
-        assert_eq!(
-            history,
-            vec![message("user", "user", /*phase*/ None), output]
-        );
-    }
-
-    #[test]
-    fn build_v2_compacted_history_discards_messages_before_truncating() {
-        let old = message("user", "old", /*phase*/ None);
-        let new = message("user", "new", /*phase*/ None);
-        let huge_developer_message = "d".repeat((RETAINED_MESSAGE_TOKEN_BUDGET + 1) * 4);
-        let huge_contextual_message = format!(
-            "<environment_context>\n{}\n</environment_context>",
-            "c".repeat((RETAINED_MESSAGE_TOKEN_BUDGET + 1) * 4)
-        );
-        let input = vec![
-            old.clone(),
-            message("developer", &huge_developer_message, /*phase*/ None),
-            message("user", &huge_contextual_message, /*phase*/ None),
-            new.clone(),
-        ];
-        let output = ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "new".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        };
-
-        let (history, _) = build_v2_compacted_history(&input, output.clone());
-
-        assert_eq!(history, vec![old, new, output]);
-    }
-
-    #[test]
-    fn build_v2_compacted_history_counts_retained_input_images() {
-        let input = vec![ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![
-                ContentItem::InputText {
-                    text: "user".to_string(),
-                },
-                ContentItem::InputImage {
-                    image_url: "data:image/png;base64,abc".to_string(),
-                    detail: None,
-                },
-                ContentItem::InputImage {
-                    image_url: "data:image/png;base64,def".to_string(),
-                    detail: None,
-                },
-            ],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }];
-        let output = ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "new".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        };
-
-        let (_, retained_image_count) = build_v2_compacted_history(&input, output);
-
-        assert_eq!(retained_image_count, 2);
-    }
-
-    #[test]
-    fn retained_history_truncation_keeps_newest_messages_first() {
-        let middle = message("user", "middle1234", /*phase*/ None);
-        let new = message("user", "new", /*phase*/ None);
-        let retained = vec![
-            message("user", "old-old", /*phase*/ None),
-            middle,
-            new.clone(),
-        ];
-
-        let truncated =
-            truncate_retained_messages_for_remote_compaction(retained, /*max_tokens*/ 3);
-
-        assert_eq!(
-            truncated,
-            vec![
-                message("user", "midd…1 tokens truncated…1234", /*phase*/ None),
-                new,
-            ]
-        );
-    }
-
-    #[test]
-    fn retained_history_truncation_preserves_images_and_truncates_later_text_parts() {
-        let item = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![
-                ContentItem::InputText {
-                    text: "abcdef".to_string(),
-                },
-                ContentItem::InputImage {
-                    image_url: "data:image/png;base64,abc".to_string(),
-                    detail: None,
-                },
-                ContentItem::OutputText {
-                    text: "uvwxyz".to_string(),
-                },
-            ],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        };
-
-        let truncated =
-            truncate_retained_messages_for_remote_compaction(vec![item], /*max_tokens*/ 3);
-
-        assert_eq!(
-            truncated,
-            vec![ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![
-                    ContentItem::InputText {
-                        text: "abcdef".to_string(),
-                    },
-                    ContentItem::InputImage {
-                        image_url: "data:image/png;base64,abc".to_string(),
-                        detail: None,
-                    },
-                    ContentItem::OutputText {
-                        text: "uv…1 tokens truncated…yz".to_string(),
-                    },
-                ],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,
-            }]
-        );
-    }
-
-    #[test]
-    fn retained_history_truncation_charges_image_only_messages() {
-        let image_only_message = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputImage {
-                image_url: "data:image/png;base64,abc".to_string(),
-                detail: None,
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        };
-        let newest = message("user", "new", /*phase*/ None);
-        let retained = vec![
-            message("user", "old", /*phase*/ None),
-            image_only_message.clone(),
-            newest.clone(),
-        ];
-
-        let truncated =
-            truncate_retained_messages_for_remote_compaction(retained, /*max_tokens*/ 2);
-
-        assert_eq!(truncated, vec![image_only_message, newest]);
-    }
-
-    #[test]
-    fn retained_history_truncation_drops_image_only_messages_after_budget_is_spent() {
-        let image_only_message = ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputImage {
-                image_url: "data:image/png;base64,abc".to_string(),
-                detail: None,
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        };
-        let newest = message("user", "new", /*phase*/ None);
-        let retained = vec![image_only_message, newest.clone()];
-
-        let truncated =
-            truncate_retained_messages_for_remote_compaction(retained, /*max_tokens*/ 1);
-
-        assert_eq!(truncated, vec![newest]);
     }
 
     #[tokio::test]

@@ -461,8 +461,11 @@ pub(crate) async fn run_turn(
                 if should_roll_over {
                     if let Err(err) = run_auto_compact(
                         &sess,
-                        Arc::clone(&step_context),
-                        /*fallback_step_context*/ None,
+                        AutoCompactStepContexts {
+                            compaction: Arc::clone(&step_context),
+                            fallback: None,
+                            projection: Arc::clone(&step_context),
+                        },
                         &mut client_session,
                         InitialContextInjection::BeforeLastUserMessage {
                             world_state: Arc::clone(&world_state),
@@ -1048,8 +1051,11 @@ async fn run_pre_sampling_compact(
             .await?;
         run_auto_compact(
             sess,
-            step_context,
-            /*fallback_step_context*/ None,
+            AutoCompactStepContexts {
+                compaction: Arc::clone(&step_context),
+                fallback: None,
+                projection: step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::ContextLimit,
@@ -1068,16 +1074,15 @@ fn comp_hash_changed(previous: Option<&str>, current: Option<&str>) -> bool {
         .is_some_and(|(previous, current)| previous != current)
 }
 
-/// Captures the current model's request-scoped state for retrying previous-model compaction.
+/// Reuses the current model's projected step for retrying previous-model compaction.
 ///
 /// Returns `None` when the active authentication does not use the Codex backend, the provider is
 /// not OpenAI, or the previous and current model are the same.
-async fn capture_current_model_fallback_step_context(
-    sess: &Arc<Session>,
+fn current_model_fallback_step_context(
     turn_context: &Arc<TurnContext>,
     previous_model: &str,
-    cancellation_token: &CancellationToken,
-) -> CodexResult<Option<Arc<StepContext>>> {
+    projection_step_context: &Arc<StepContext>,
+) -> Option<Arc<StepContext>> {
     let uses_codex_backend = turn_context
         .model_auth_manager
         .as_deref()
@@ -1086,11 +1091,9 @@ async fn capture_current_model_fallback_step_context(
         || !turn_context.provider.info().is_openai()
         || previous_model == turn_context.model_info.slug
     {
-        return Ok(None);
+        return None;
     }
-    sess.capture_step_context(Arc::clone(turn_context), cancellation_token)
-        .await
-        .map(Some)
+    Some(Arc::clone(projection_step_context))
 }
 
 /// Runs pre-sampling compaction against the previous model when its compaction compatibility
@@ -1128,17 +1131,21 @@ async fn maybe_run_previous_model_inline_compact(
         let step_context = sess
             .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
             .await?;
-        let fallback_step_context = capture_current_model_fallback_step_context(
-            sess,
+        let projection_step_context = sess
+            .capture_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        let fallback_step_context = current_model_fallback_step_context(
             turn_context,
             previous_model.as_str(),
-            cancellation_token,
-        )
-        .await?;
+            &projection_step_context,
+        );
         run_auto_compact(
             sess,
-            step_context,
-            fallback_step_context,
+            AutoCompactStepContexts {
+                compaction: step_context,
+                fallback: fallback_step_context,
+                projection: projection_step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::CompHashChanged,
@@ -1176,17 +1183,21 @@ async fn maybe_run_previous_model_inline_compact(
         let step_context = sess
             .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
             .await?;
-        let fallback_step_context = capture_current_model_fallback_step_context(
-            sess,
+        let projection_step_context = sess
+            .capture_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        let fallback_step_context = current_model_fallback_step_context(
             turn_context,
             previous_model.as_str(),
-            cancellation_token,
-        )
-        .await?;
+            &projection_step_context,
+        );
         run_auto_compact(
             sess,
-            step_context,
-            fallback_step_context,
+            AutoCompactStepContexts {
+                compaction: step_context,
+                fallback: fallback_step_context,
+                projection: projection_step_context,
+            },
             client_session,
             InitialContextInjection::DoNotInject,
             CompactionReason::ModelDownshift,
@@ -1197,6 +1208,12 @@ async fn maybe_run_previous_model_inline_compact(
     Ok(())
 }
 
+struct AutoCompactStepContexts {
+    compaction: Arc<StepContext>,
+    fallback: Option<Arc<StepContext>>,
+    projection: Arc<StepContext>,
+}
+
 #[instrument(
     level = "trace",
     skip_all,
@@ -1204,13 +1221,17 @@ async fn maybe_run_previous_model_inline_compact(
 )]
 async fn run_auto_compact(
     sess: &Arc<Session>,
-    step_context: Arc<StepContext>,
-    fallback_step_context: Option<Arc<StepContext>>,
+    step_contexts: AutoCompactStepContexts,
     client_session: &mut ModelClientSession,
     initial_context_injection: InitialContextInjection,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
+    let AutoCompactStepContexts {
+        compaction: step_context,
+        fallback: fallback_step_context,
+        projection: projection_step_context,
+    } = step_contexts;
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     if turn_context.config.features.enabled(Feature::TokenBudget) {
@@ -1241,8 +1262,8 @@ async fn run_auto_compact(
                 Arc::clone(sess),
                 step_context,
                 fallback_step_context,
+                projection_step_context,
                 client_session,
-                initial_context_injection,
                 reason,
                 phase,
             )

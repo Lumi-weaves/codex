@@ -20,7 +20,6 @@ use tracing::info;
 
 pub(super) struct RemoteCompactV2Attempt {
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
-    pub(super) prompt_input: Vec<ResponseItem>,
     pub(super) compaction_output: ResponseItem,
     pub(super) token_usage: Option<TokenUsage>,
     /// Keeps a session created for standalone compaction alive through lifecycle completion.
@@ -113,11 +112,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
         }),
     )
     .await;
-    let mut prompt_input = prompt.input;
-    prompt_input.pop();
     Ok(RemoteCompactV2Attempt {
         trace_input_history,
-        prompt_input,
         compaction_output,
         token_usage,
         owned_client_session,

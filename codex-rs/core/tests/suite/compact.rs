@@ -5466,7 +5466,7 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
     test.submit_turn("after remote v2 compaction").await?;
     test.codex.flush_rollout().await?;
 
-    // Assert the compact request, installed replacement history, and follow-up all keep the
+    // Assert the compact request, installed current-state projection, and follow-up all keep the
     // creation-time item despite the file-backed source now containing new text.
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
@@ -5483,8 +5483,8 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
     let replacement_history = replacement_history_from_rollout(&rollout_path)?;
     assert_eq!(
         instruction_fragments_in_items(&replacement_history),
-        Vec::<String>::new(),
-        "remote-v2 replacement history currently omits the global-instruction fragment"
+        vec![old_fragment.clone()],
+        "remote-v2 replacement history should persist the current instruction projection"
     );
     assert_eq!(
         test.codex.instruction_sources().await,
