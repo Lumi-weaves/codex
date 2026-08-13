@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { RICHCODEX_BACKEND_KERNEL, type RichCodexBackendKernel } from "./kernel-manifest";
+import { createModelDataPlane } from "./data-plane";
 import {
   createModelPlaneStore,
   ModelPlaneError,
@@ -13,7 +14,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 3 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 4 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -23,6 +24,7 @@ export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 3 as const;
  * without crossing into another product's state namespace.
  */
 export const RICHCODEX_BACKEND_STATE_ROOT_ENV = "RICHCODEX_BACKEND_STATE_ROOT" as const;
+export const RICHCODEX_BACKEND_DATA_PLANE_TOKEN_ENV = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN" as const;
 
 /** Maximum UTF-8 bytes in one newline-delimited input message. */
 export const RICHCODEX_BACKEND_MAX_MESSAGE_BYTES = 64 * 1024;
@@ -45,7 +47,9 @@ export type HeadlessBackendConfigurationCode =
   | "state_root_invalid"
   | "state_root_not_absolute"
   | "state_root_too_large"
-  | "instance_id_invalid";
+  | "instance_id_invalid"
+  | "data_plane_capability_missing"
+  | "data_plane_capability_invalid";
 
 /** A configuration failure whose message never includes caller-provided data. */
 export class HeadlessBackendConfigurationError extends Error {
@@ -67,6 +71,8 @@ export interface HeadlessBackendOptions {
   readonly createInstanceId?: () => string;
   /** Internal persistence seam for focused tests and future embeddings. */
   readonly modelPlaneStore?: ModelPlaneStore;
+  /** Private bearer shared only with the supervising app-server process. */
+  readonly dataPlaneCapability?: string;
 }
 
 export interface HeadlessBackendRunIo {
@@ -105,6 +111,7 @@ export type HeadlessReadyMessage = {
   readonly kernel: RichCodexBackendKernel;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
+  readonly dataPlanePort: number;
   readonly providers: readonly SafeProviderSummary[];
   readonly models: readonly SafeModelRoute[];
 };
@@ -307,7 +314,11 @@ function encodeMessage(message:
   return line;
 }
 
-function readyMessage(instanceId: string, modelPlaneStore: ModelPlaneStore): HeadlessReadyMessage {
+function readyMessage(
+  instanceId: string,
+  modelPlaneStore: ModelPlaneStore,
+  dataPlanePort: number,
+): HeadlessReadyMessage {
   const snapshot = modelPlaneStore.snapshot();
   return {
     type: "ready",
@@ -316,6 +327,7 @@ function readyMessage(instanceId: string, modelPlaneStore: ModelPlaneStore): Hea
     kernel: RICHCODEX_BACKEND_KERNEL,
     desiredStateRevision: snapshot.desiredStateRevision,
     catalogRevision: snapshot.catalogRevision,
+    dataPlanePort,
     providers: snapshot.providers,
     models: snapshot.modelRoutes.filter(route => !route.retired),
   };
@@ -611,6 +623,18 @@ function pageAccounts(
 export function createHeadlessBackend(options: HeadlessBackendOptions = {}): HeadlessBackend {
   const stateRoot = resolveBackendStateRoot(options);
   const modelPlaneStore = options.modelPlaneStore ?? createModelPlaneStore(stateRoot);
+  const dataPlaneCapability = options.dataPlaneCapability
+    ?? options.env?.[RICHCODEX_BACKEND_DATA_PLANE_TOKEN_ENV];
+  if (!dataPlaneCapability) {
+    throw new HeadlessBackendConfigurationError("data_plane_capability_missing");
+  }
+  if (
+    dataPlaneCapability.length < 32
+    || dataPlaneCapability.length > 512
+    || !/^[A-Za-z0-9._~-]+$/.test(dataPlaneCapability)
+  ) {
+    throw new HeadlessBackendConfigurationError("data_plane_capability_invalid");
+  }
   const instanceId = options.createInstanceId?.() ?? defaultInstanceId();
   if (!isBoundedOpaqueText(instanceId, RICHCODEX_BACKEND_MAX_MESSAGE_BYTES)) {
     throw new HeadlessBackendConfigurationError("instance_id_invalid");
@@ -620,142 +644,150 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
     stateRoot,
     instanceId,
     async run(io): Promise<HeadlessBackendRunResult> {
-      let readyWritten = false;
-      const write = async (
-        message: HeadlessReadyMessage
-          | HeadlessShutdownCompleteMessage
-          | HeadlessProtocolErrorMessage
-          | HeadlessProviderAccountListResultMessage
-          | HeadlessProviderAccountImportResultMessage
-          | HeadlessModelRouteReadResultMessage
-          | HeadlessModelRouteMutationResultMessage
-          | HeadlessOperationErrorMessage,
-      ): Promise<boolean> => {
+      const dataPlane = createModelDataPlane({
+        capability: dataPlaneCapability,
+        modelPlaneStore,
+      }).start();
+      try {
+        let readyWritten = false;
+        const write = async (
+          message: HeadlessReadyMessage
+            | HeadlessShutdownCompleteMessage
+            | HeadlessProtocolErrorMessage
+            | HeadlessProviderAccountListResultMessage
+            | HeadlessProviderAccountImportResultMessage
+            | HeadlessModelRouteReadResultMessage
+            | HeadlessModelRouteMutationResultMessage
+            | HeadlessOperationErrorMessage,
+        ): Promise<boolean> => {
+          try {
+            await io.stdout(encodeMessage(message));
+            return true;
+          } catch (error) {
+            try {
+              await io.stderr?.(defaultStderrMessage(error));
+            } catch {
+              // A diagnostics sink cannot change the protocol result.
+            }
+            return false;
+          }
+        };
+
+        if (!await write(readyMessage(instanceId, modelPlaneStore, dataPlane.port))) {
+          return { exitCode: 1, reason: "output_error" };
+        }
+        readyWritten = true;
+
         try {
-          await io.stdout(encodeMessage(message));
-          return true;
+          for await (const encoded of boundedLines(io.stdin)) {
+            if (!readyWritten) break;
+            if (encoded.oversized) {
+              if (!await write(protocolError("message_too_large"))) {
+                return { exitCode: 1, reason: "output_error" };
+              }
+              continue;
+            }
+
+            const text = decodeInputLine(encoded.bytes);
+            if (text === null) {
+              if (!await write(protocolError("invalid_encoding"))) {
+                return { exitCode: 1, reason: "output_error" };
+              }
+              continue;
+            }
+
+            const parsed = parseInboundMessage(text);
+            if (!parsed.ok) {
+              if (!await write(parsed.error)) {
+                return { exitCode: 1, reason: "output_error" };
+              }
+              continue;
+            }
+
+            if (parsed.message.type === "shutdown") {
+              if (!await write({ type: "shutdownComplete", requestId: parsed.message.requestId })) {
+                return { exitCode: 1, reason: "output_error" };
+              }
+              return { exitCode: 0, reason: "shutdown" };
+            }
+            if (parsed.message.type === "providerAccountList") {
+              const snapshot = modelPlaneStore.snapshot();
+              const page = pageAccounts(snapshot.accounts, parsed.message.cursor, parsed.message.limit);
+              const response = page === null
+                ? operationErrorForCode(parsed.message.requestId, "invalid_request")
+                : {
+                    type: "providerAccountListResult" as const,
+                    requestId: parsed.message.requestId,
+                    desiredStateRevision: snapshot.desiredStateRevision,
+                    catalogRevision: snapshot.catalogRevision,
+                    providers: snapshot.providers,
+                    data: page.data,
+                    nextCursor: page.nextCursor,
+                  };
+              if (!await write(response)) return { exitCode: 1, reason: "output_error" };
+              continue;
+            }
+            if (parsed.message.type === "modelRouteRead") {
+              const snapshot = modelPlaneStore.snapshot();
+              if (!await write({
+                type: "modelRouteReadResult",
+                requestId: parsed.message.requestId,
+                desiredStateRevision: snapshot.desiredStateRevision,
+                catalogRevision: snapshot.catalogRevision,
+                data: snapshot.modelRoutes,
+              })) return { exitCode: 1, reason: "output_error" };
+              continue;
+            }
+            try {
+              if (parsed.message.type === "providerAccountImport") {
+                const account = modelPlaneStore.importCodexAuthJson(
+                  parsed.message.authJsonPath,
+                  parsed.message.userLabel,
+                );
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountImportResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              const route = parsed.message.type === "modelRouteCreate"
+                ? modelPlaneStore.createModelRoute(parsed.message)
+                : modelPlaneStore.retireModelRoute(
+                    parsed.message.modelTag,
+                    parsed.message.expectedRevision,
+                  );
+              const snapshot = modelPlaneStore.snapshot();
+              if (!await write({
+                type: parsed.message.type === "modelRouteCreate"
+                  ? "modelRouteCreateResult"
+                  : "modelRouteRetireResult",
+                requestId: parsed.message.requestId,
+                desiredStateRevision: snapshot.desiredStateRevision,
+                catalogRevision: snapshot.catalogRevision,
+                route,
+              })) return { exitCode: 1, reason: "output_error" };
+            } catch (error) {
+              if (!await write(operationError(parsed.message.requestId, error))) {
+                return { exitCode: 1, reason: "output_error" };
+              }
+            }
+          }
         } catch (error) {
           try {
             await io.stderr?.(defaultStderrMessage(error));
           } catch {
-            // A diagnostics sink cannot change the protocol result.
+            // Diagnostics are best effort and must not expose stream details.
           }
-          return false;
+          return { exitCode: 1, reason: "input_error" };
         }
-      };
-
-      if (!await write(readyMessage(instanceId, modelPlaneStore))) {
-        return { exitCode: 1, reason: "output_error" };
+        return { exitCode: 0, reason: "eof" };
+      } finally {
+        await dataPlane.stop();
       }
-      readyWritten = true;
-
-      try {
-        for await (const encoded of boundedLines(io.stdin)) {
-          if (!readyWritten) break;
-          if (encoded.oversized) {
-            if (!await write(protocolError("message_too_large"))) {
-              return { exitCode: 1, reason: "output_error" };
-            }
-            continue;
-          }
-
-          const text = decodeInputLine(encoded.bytes);
-          if (text === null) {
-            if (!await write(protocolError("invalid_encoding"))) {
-              return { exitCode: 1, reason: "output_error" };
-            }
-            continue;
-          }
-
-          const parsed = parseInboundMessage(text);
-          if (!parsed.ok) {
-            if (!await write(parsed.error)) {
-              return { exitCode: 1, reason: "output_error" };
-            }
-            continue;
-          }
-
-          if (parsed.message.type === "shutdown") {
-            if (!await write({ type: "shutdownComplete", requestId: parsed.message.requestId })) {
-              return { exitCode: 1, reason: "output_error" };
-            }
-            return { exitCode: 0, reason: "shutdown" };
-          }
-          if (parsed.message.type === "providerAccountList") {
-            const snapshot = modelPlaneStore.snapshot();
-            const page = pageAccounts(snapshot.accounts, parsed.message.cursor, parsed.message.limit);
-            const response = page === null
-              ? operationErrorForCode(parsed.message.requestId, "invalid_request")
-              : {
-                  type: "providerAccountListResult" as const,
-                  requestId: parsed.message.requestId,
-                  desiredStateRevision: snapshot.desiredStateRevision,
-                  catalogRevision: snapshot.catalogRevision,
-                  providers: snapshot.providers,
-                  data: page.data,
-                  nextCursor: page.nextCursor,
-                };
-            if (!await write(response)) return { exitCode: 1, reason: "output_error" };
-            continue;
-          }
-          if (parsed.message.type === "modelRouteRead") {
-            const snapshot = modelPlaneStore.snapshot();
-            if (!await write({
-              type: "modelRouteReadResult",
-              requestId: parsed.message.requestId,
-              desiredStateRevision: snapshot.desiredStateRevision,
-              catalogRevision: snapshot.catalogRevision,
-              data: snapshot.modelRoutes,
-            })) return { exitCode: 1, reason: "output_error" };
-            continue;
-          }
-          try {
-            if (parsed.message.type === "providerAccountImport") {
-              const account = modelPlaneStore.importCodexAuthJson(
-                parsed.message.authJsonPath,
-                parsed.message.userLabel,
-              );
-              const snapshot = modelPlaneStore.snapshot();
-              if (!await write({
-                type: "providerAccountImportResult",
-                requestId: parsed.message.requestId,
-                desiredStateRevision: snapshot.desiredStateRevision,
-                catalogRevision: snapshot.catalogRevision,
-                account,
-              })) return { exitCode: 1, reason: "output_error" };
-              continue;
-            }
-            const route = parsed.message.type === "modelRouteCreate"
-              ? modelPlaneStore.createModelRoute(parsed.message)
-              : modelPlaneStore.retireModelRoute(
-                  parsed.message.modelTag,
-                  parsed.message.expectedRevision,
-                );
-            const snapshot = modelPlaneStore.snapshot();
-            if (!await write({
-              type: parsed.message.type === "modelRouteCreate"
-                ? "modelRouteCreateResult"
-                : "modelRouteRetireResult",
-              requestId: parsed.message.requestId,
-              desiredStateRevision: snapshot.desiredStateRevision,
-              catalogRevision: snapshot.catalogRevision,
-              route,
-            })) return { exitCode: 1, reason: "output_error" };
-          } catch (error) {
-            if (!await write(operationError(parsed.message.requestId, error))) {
-              return { exitCode: 1, reason: "output_error" };
-            }
-          }
-        }
-      } catch (error) {
-        try {
-          await io.stderr?.(defaultStderrMessage(error));
-        } catch {
-          // Diagnostics are best effort and must not expose stream details.
-        }
-        return { exitCode: 1, reason: "input_error" };
-      }
-      return { exitCode: 0, reason: "eof" };
     },
   };
 }

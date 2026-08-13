@@ -114,6 +114,10 @@ pub(crate) async fn run_codex_thread_interactive(
         auth_manager,
         model_auth_manager: Arc::clone(&parent_session.services.model_auth_manager),
         models_manager,
+        runtime_model_provider_routes: parent_session
+            .services
+            .runtime_model_provider_routes
+            .clone(),
         environment_manager: parent_session
             .services
             .turn_environments

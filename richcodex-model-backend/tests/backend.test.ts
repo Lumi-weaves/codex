@@ -19,6 +19,15 @@ import {
   RICHCODEX_BACKEND_STATE_ROOT_ENV,
 } from "../src/backend";
 import { RICHCODEX_BACKEND_KERNEL } from "../src/kernel-manifest";
+import { createModelDataPlane } from "../src/data-plane";
+import type {
+  ModelExecutionCandidate,
+  ModelPlaneStore,
+  ProviderAccountStatus,
+  StoredOAuthCredential,
+} from "../src/model-plane";
+
+const TEST_DATA_PLANE_CAPABILITY = "richcodex-test-capability-0123456789abcdef";
 
 function inputOf(text: string): AsyncIterable<Uint8Array> {
   return (async function* (): AsyncGenerator<Uint8Array> {
@@ -29,7 +38,11 @@ function inputOf(text: string): AsyncIterable<Uint8Array> {
 async function runBackend(input: string, stateRoot: string): Promise<{ lines: unknown[]; result: unknown; stderr: string[] }> {
   const lines: unknown[] = [];
   const stderr: string[] = [];
-  const backend = createHeadlessBackend({ stateRoot, env: {} });
+  const backend = createHeadlessBackend({
+    stateRoot,
+    env: {},
+    dataPlaneCapability: TEST_DATA_PLANE_CAPABILITY,
+  });
   const result = await backend.run({
     stdin: inputOf(input),
     stdout: line => { lines.push(JSON.parse(line)); },
@@ -68,6 +81,185 @@ function codexAuthJsonWithDistinctAccountMetadata(expiresAtMs: number): string {
     },
   });
 }
+
+function executionCandidate(
+  accountId: string,
+  targetId: string,
+  priority: number,
+  credential: StoredOAuthCredential,
+): ModelExecutionCandidate {
+  return {
+    modelTag: "my-fast-model",
+    semanticModel: "gpt-5.6-luna",
+    targetId,
+    providerId: "openai",
+    accountId,
+    upstreamModelId: "gpt-5.6-luna",
+    priority,
+    credential,
+  };
+}
+
+function executionStore(
+  candidates: readonly ModelExecutionCandidate[],
+  onStatus: (accountId: string, status: ProviderAccountStatus) => void = () => undefined,
+  onReplace: (
+    accountId: string,
+    expectedRefreshToken: string,
+    credential: StoredOAuthCredential,
+  ) => boolean = () => true,
+): ModelPlaneStore {
+  return {
+    snapshot: () => ({
+      desiredStateRevision: 0,
+      catalogRevision: 0,
+      providers: [],
+      accounts: [],
+      modelRoutes: [],
+    }),
+    importCodexAuthJson: () => { throw new Error("not used"); },
+    createModelRoute: () => { throw new Error("not used"); },
+    retireModelRoute: () => { throw new Error("not used"); },
+    resolveExecutionCandidates: modelTag => modelTag === "my-fast-model" ? candidates : [],
+    replaceOAuthCredential: onReplace,
+    markAccountStatus: onStatus,
+  };
+}
+
+describe("RichCodex private model data plane", () => {
+  test("requires its process capability and rewrites only the stable model tag", async () => {
+    const now = 1_000_000;
+    const credential: StoredOAuthCredential = {
+      kind: "oauth",
+      accessToken: "private-access-token",
+      refreshToken: "private-refresh-token",
+      chatgptAccountId: "workspace-account",
+      expiresAt: now + 3_600_000,
+    };
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const statuses: Array<[string, ProviderAccountStatus]> = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore(
+        [executionCandidate("account-1", "target-1", 0, credential)],
+        (accountId, status) => { statuses.push([accountId, status]); },
+      ),
+      now: () => now,
+      fetch: (async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response('data: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch,
+    });
+
+    const unauthorized = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+    expect(unauthorized.status).toBe(401);
+    expect(calls).toHaveLength(0);
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TEST_DATA_PLANE_CAPABILITY}`,
+        "content-type": "application/json",
+        "x-codex-turn-state": "turn-state",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [{ role: "user" }] }),
+    }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-richcodex-model-tag")).toBe("my-fast-model");
+    expect(response.headers.get("x-richcodex-account-id")).toBe("account-1");
+    expect(await response.text()).toContain("response.completed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+    expect(new Headers(calls[0]!.init?.headers).get("authorization"))
+      .toBe("Bearer private-access-token");
+    expect(new Headers(calls[0]!.init?.headers).get("chatgpt-account-id"))
+      .toBe("workspace-account");
+    expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
+      model: "gpt-5.6-luna",
+      input: [{ role: "user" }],
+    });
+    expect(statuses).toEqual([["account-1", "ready"]]);
+  });
+
+  test("refreshes expiring OAuth and falls through quota-limited targets", async () => {
+    const now = 2_000_000;
+    const first: StoredOAuthCredential = {
+      kind: "oauth",
+      accessToken: "expired-soon-access",
+      refreshToken: "first-refresh",
+      chatgptAccountId: "workspace-1",
+      expiresAt: now + 1,
+    };
+    const second: StoredOAuthCredential = {
+      kind: "oauth",
+      accessToken: "second-access",
+      refreshToken: "second-refresh",
+      chatgptAccountId: "workspace-2",
+      expiresAt: now + 3_600_000,
+    };
+    const replacements: StoredOAuthCredential[] = [];
+    const responseAccounts: string[] = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore(
+        [
+          executionCandidate("account-1", "target-1", 0, first),
+          executionCandidate("account-2", "target-2", 1, second),
+        ],
+        () => undefined,
+        (_accountId, _expectedRefreshToken, credential) => {
+          replacements.push(credential);
+          return true;
+        },
+      ),
+      now: () => now,
+      fetch: (async (input, init) => {
+        if (String(input).includes("/oauth/token")) {
+          return Response.json({
+            access_token: "refreshed-access",
+            refresh_token: "rotated-refresh",
+            expires_in: 3600,
+          });
+        }
+        const account = new Headers(init?.headers).get("chatgpt-account-id")!;
+        responseAccounts.push(account);
+        if (account === "workspace-1") {
+          return new Response("quota", { status: 429, headers: { "retry-after": "60" } });
+        }
+        return new Response('data: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch,
+    });
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${TEST_DATA_PLANE_CAPABILITY}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+    expect(response.status).toBe(200);
+    expect(response.headers.get("x-richcodex-account-id")).toBe("account-2");
+    expect(response.headers.get("x-richcodex-route-attempt")).toBe("2");
+    expect(responseAccounts).toEqual(["workspace-1", "workspace-2"]);
+    expect(replacements).toEqual([{
+      kind: "oauth",
+      accessToken: "refreshed-access",
+      refreshToken: "rotated-refresh",
+      chatgptAccountId: "workspace-1",
+      expiresAt: now + 3_600_000,
+    }]);
+  });
+});
 
 describe("RichCodex headless backend composition root", () => {
   test("emits a bounded ready shape and resolves only an explicit RichCodex root", () => {
@@ -108,7 +300,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 3,
+      protocolVersion: 4,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -454,6 +646,7 @@ describe("RichCodex headless backend composition root", () => {
     const stateRoot = join(root, "backend-state");
     const backend = createHeadlessBackend({
       stateRoot,
+      dataPlaneCapability: TEST_DATA_PLANE_CAPABILITY,
       env: {
         HOME: root,
         OPENCODEX_HOME: join(root, ".opencodex"),

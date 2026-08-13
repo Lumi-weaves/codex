@@ -12293,6 +12293,7 @@
     },
     "ProviderAccountStatus": {
       "enum": [
+        "ready",
         "verificationRequired",
         "reauthenticationRequired"
       ],

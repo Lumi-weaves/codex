@@ -6,7 +6,7 @@
   "archiveDigestRecipe": "git archive --format=tar <sourceCommit> | sha256sum",
   "license": "MIT",
   "selectionManifest": "richcodex-model-backend/kernel-selection.json",
-  "selectionDigest": "sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808",
+  "selectionDigest": "sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf",
   "selectionDigestRecipe": "sha256sum richcodex-model-backend/kernel-selection.json",
-  "compositionVersion": 2
+  "compositionVersion": 3
 }

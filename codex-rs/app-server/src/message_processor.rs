@@ -68,6 +68,7 @@ use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
 use codex_chatgpt::workspace_settings;
 use codex_code_mode::CodeModeSessionProvider;
+use codex_core::RuntimeModelProviderRoutes;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
@@ -230,6 +231,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
     pub(crate) richcodex_backend: Option<crate::richcodex_backend::RichCodexBackendClient>,
     pub(crate) richcodex_initial_model_routes: Vec<crate::richcodex_backend::ModelSummary>,
+    pub(crate) richcodex_runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
 }
 
 impl MessageProcessor {
@@ -257,6 +259,7 @@ impl MessageProcessor {
             plugin_startup_tasks,
             richcodex_backend,
             richcodex_initial_model_routes,
+            richcodex_runtime_model_provider_routes,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -326,6 +329,10 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
+            let manager = match richcodex_runtime_model_provider_routes.clone() {
+                Some(routes) => manager.with_runtime_model_provider_routes(routes),
+                None => manager,
+            };
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,
@@ -337,6 +344,7 @@ impl MessageProcessor {
             config.http_client_factory(),
             outgoing.clone(),
             &richcodex_initial_model_routes,
+            richcodex_runtime_model_provider_routes.clone(),
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_list_catalog);
         thread_manager

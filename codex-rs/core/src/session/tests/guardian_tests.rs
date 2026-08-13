@@ -770,6 +770,7 @@ async fn guardian_subagent_does_not_inherit_parent_exec_policy_rules() {
         model_auth_manager: Arc::clone(&auth_manager),
         auth_manager,
         models_manager,
+        runtime_model_provider_routes: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         skills_service,
         plugins_manager,

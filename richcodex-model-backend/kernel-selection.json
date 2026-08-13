@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "contract": "richcodex-slice-1a-openai-codex-auth-import-v1",
+  "contract": "richcodex-slice-3-openai-codex-responses-routing-v1",
   "upstream": {
     "repository": "https://github.com/lidge-jun/opencodex",
     "commit": "cbbfdd8773e68a5dc2391ddeb32f33a225373c1a",
@@ -20,7 +20,22 @@
     },
     {
       "path": "src/codex/account-store.ts",
-      "symbols": ["secure-persistence","atomic-write-and-owned-store-invariants"],
+      "symbols": ["secure-persistence","atomic-write-and-owned-store-invariants","refreshCodexAccountToken"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/adapters/openai-responses.ts",
+      "symbols": ["FORWARD_HEADERS","OAuth-passthrough-responses-endpoint"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/codex/quota.ts",
+      "symbols": ["parseUpstreamQuotaHeaders","missing-evidence-does-not-imply-reset"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/codex/routing.ts",
+      "symbols": ["explicit-priority-before-runtime-evidence","cooldown-and-fallback"],
       "disposition": "behavior-adapted"
     },
     {
@@ -29,5 +44,5 @@
       "disposition": "shape-adapted"
     }
   ],
-  "excludedSurfaces": ["native-main-auth","opencodex-config-root","web-management-api","ocx-cli","generic-oauth-store","service-and-updater"]
+  "excludedSurfaces": ["native-main-auth","opencodex-config-root","web-management-api","ocx-cli","generic-oauth-store","service-and-updater","opencodex-http-shell","opencodex-request-adapter-stack"]
 }

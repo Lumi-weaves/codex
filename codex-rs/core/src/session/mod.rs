@@ -448,6 +448,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) auth_manager: Arc<AuthManager>,
     pub(crate) model_auth_manager: Arc<AuthManager>,
     pub(crate) models_manager: SharedModelsManager,
+    pub(crate) runtime_model_provider_routes: Option<crate::RuntimeModelProviderRoutes>,
     pub(crate) environment_manager: Arc<EnvironmentManager>,
     pub(crate) skills_service: Arc<HostSkillsService>,
     pub(crate) plugins_manager: Arc<PluginsManager>,
@@ -546,6 +547,7 @@ impl Session {
             auth_manager,
             model_auth_manager,
             models_manager,
+            runtime_model_provider_routes,
             environment_manager,
             skills_service,
             plugins_manager,
@@ -746,12 +748,23 @@ impl Session {
         );
         let service_tier =
             get_service_tier(config.service_tier.clone(), fast_mode_enabled, &model_info);
+        let runtime_model_provider = runtime_model_provider_routes
+            .as_ref()
+            .and_then(|routes| routes.resolve(&model));
         let session_configuration = SessionConfiguration {
-            provider: create_model_provider(
-                config.model_provider.clone(),
-                Some(Arc::clone(&model_auth_manager)),
-            ),
-            provider_id: config.model_provider_id.clone(),
+            provider: runtime_model_provider
+                .as_ref()
+                .map(|(_, provider)| Arc::clone(provider))
+                .unwrap_or_else(|| {
+                    create_model_provider(
+                        config.model_provider.clone(),
+                        Some(Arc::clone(&model_auth_manager)),
+                    )
+                }),
+            provider_id: runtime_model_provider
+                .as_ref()
+                .map(|(provider_id, _)| provider_id.clone())
+                .unwrap_or_else(|| config.model_provider_id.clone()),
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
             service_tier,
@@ -798,6 +811,7 @@ impl Session {
             auth_manager.clone(),
             model_auth_manager,
             models_manager.clone(),
+            runtime_model_provider_routes,
             model_info,
             exec_policy,
             tx_event.clone(),
@@ -1686,26 +1700,50 @@ impl Session {
         else {
             return updates;
         };
-        let resolved = {
+        let runtime_resolved = self
+            .services
+            .runtime_model_provider_routes
+            .as_ref()
+            .and_then(|routes| routes.resolve(target_model));
+        let resolved = if runtime_resolved.is_some() {
+            runtime_resolved
+        } else {
             let state = self.state.lock().await;
             let current_provider_id = &state.session_configuration.provider_id;
-            state
+            let configured = state
                 .session_configuration
                 .original_config_do_not_use
                 .model_provider_for_model(target_model)
                 .and_then(|(provider_id, provider)| {
-                    (provider_id != current_provider_id)
-                        .then(|| (provider_id.to_string(), provider.clone()))
-                })
+                    (provider_id != current_provider_id).then(|| {
+                        (
+                            provider_id.to_string(),
+                            create_model_provider(
+                                provider.clone(),
+                                Some(Arc::clone(&self.services.model_auth_manager)),
+                            ),
+                        )
+                    })
+                });
+            configured.or_else(|| {
+                self.services
+                    .runtime_model_provider_routes
+                    .as_ref()
+                    .filter(|routes| routes.owns_provider_id(current_provider_id))
+                    .map(|_| {
+                        let config = &state.session_configuration.original_config_do_not_use;
+                        (
+                            config.model_provider_id.clone(),
+                            create_model_provider(
+                                config.model_provider.clone(),
+                                Some(Arc::clone(&self.services.model_auth_manager)),
+                            ),
+                        )
+                    })
+            })
         };
         if let Some((provider_id, provider)) = resolved {
-            updates.model_provider = Some((
-                provider_id,
-                create_model_provider(
-                    provider,
-                    Some(Arc::clone(&self.services.model_auth_manager)),
-                ),
-            ));
+            updates.model_provider = Some((provider_id, provider));
         }
         updates
     }

@@ -65,6 +65,7 @@ use codex_api::build_session_headers;
 use codex_api::create_text_param_for_request;
 use codex_api::response_create_client_metadata;
 use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientBuilder;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -1171,6 +1172,13 @@ impl ModelClient {
         endpoint: &str,
     ) -> Result<ReqwestTransport> {
         let request_url = api_provider.url_for_path(endpoint);
+        if self.state.provider.requires_direct_transport() {
+            let client = HttpClientBuilder::new()
+                .without_request_logging()
+                .build_direct()
+                .map_err(std::io::Error::from)?;
+            return Ok(ReqwestTransport::from_http_client(client));
+        }
         let client = create_client_for_route(
             &self.http_client_factory,
             &request_url,

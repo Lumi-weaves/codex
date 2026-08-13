@@ -271,6 +271,7 @@ async fn build_test_processor(
         plugin_startup_tasks: crate::PluginStartupTasks::Start,
         richcodex_backend: None,
         richcodex_initial_model_routes: Vec::new(),
+        richcodex_runtime_model_provider_routes: None,
     }));
     (processor, outgoing_rx)
 }

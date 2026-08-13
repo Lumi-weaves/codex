@@ -33,6 +33,7 @@ pub struct ProviderAccountImportParams {
 #[ts(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub enum ProviderAccountStatus {
+    Ready,
     VerificationRequired,
     ReauthenticationRequired,
 }

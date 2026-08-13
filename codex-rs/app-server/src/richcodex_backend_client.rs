@@ -882,7 +882,7 @@ fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()>
     }
     if !matches!(
         account.status.as_str(),
-        "verificationRequired" | "reauthenticationRequired"
+        "ready" | "verificationRequired" | "reauthenticationRequired"
     ) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

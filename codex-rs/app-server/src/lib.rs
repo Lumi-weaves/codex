@@ -11,6 +11,7 @@ use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
+use codex_model_provider::create_ephemeral_openai_bearer_model_provider;
 #[cfg(debug_assertions)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
@@ -58,6 +59,7 @@ use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
 use codex_config::TextRange as CoreTextRange;
 use codex_core::ExecPolicyError;
+use codex_core::RuntimeModelProviderRoutes;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::find_codex_home;
 use codex_exec_server::EnvironmentManager;
@@ -701,6 +703,14 @@ pub async fn run_main_with_transport_options(
     let richcodex_backend_client = richcodex_backend
         .as_ref()
         .map(richcodex_backend::RichCodexBackend::client);
+    let richcodex_runtime_model_provider_routes = richcodex_backend.as_ref().map(|backend| {
+        let (capability, port) = backend.data_plane();
+        RuntimeModelProviderRoutes::new(
+            "richcodex",
+            create_ephemeral_openai_bearer_model_provider(port, capability.to_owned()),
+            std::iter::empty(),
+        )
+    });
     let richcodex_initial_model_routes = richcodex_backend
         .as_ref()
         .map(|backend| backend.snapshot().models.clone())
@@ -936,6 +946,7 @@ pub async fn run_main_with_transport_options(
             plugin_startup_tasks: runtime_options.plugin_startup_tasks,
             richcodex_backend: richcodex_backend_client,
             richcodex_initial_model_routes,
+            richcodex_runtime_model_provider_routes,
         }));
         let mut thread_created_rx = processor.thread_created_receiver();
         let mut running_turn_count_rx = processor.subscribe_running_assistant_turn_count();

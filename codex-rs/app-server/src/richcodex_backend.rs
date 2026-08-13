@@ -16,6 +16,7 @@ use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use uuid::Uuid;
 
 #[path = "richcodex_backend_client.rs"]
 mod client;
@@ -40,7 +41,8 @@ use client::request_provider_account_import;
 use client::request_provider_account_list;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
-const BACKEND_PROTOCOL_VERSION: u32 = 3;
+const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
+const BACKEND_PROTOCOL_VERSION: u32 = 4;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -84,6 +86,7 @@ pub(crate) struct BackendSnapshot {
     pub instance_id: String,
     pub desired_state_revision: u64,
     pub catalog_revision: u64,
+    pub data_plane_port: u16,
     pub kernel: KernelProvenance,
     pub providers: Vec<ProviderSummary>,
     pub models: Vec<ModelSummary>,
@@ -127,6 +130,7 @@ enum BackendMessage {
         instance_id: String,
         desired_state_revision: u64,
         catalog_revision: u64,
+        data_plane_port: u16,
         kernel: KernelProvenance,
         providers: Vec<ProviderSummary>,
         models: Vec<ModelSummary>,
@@ -220,6 +224,7 @@ enum AppServerMessage<'a> {
 
 pub(crate) struct RichCodexBackend {
     snapshot: BackendSnapshot,
+    data_plane_capability: String,
     client: RichCodexBackendClient,
     actor: JoinHandle<io::Result<()>>,
 }
@@ -235,7 +240,8 @@ impl RichCodexBackend {
         };
 
         let state_root = codex_home.join("richcodex").join("model-backend");
-        let mut command = backend_command(&executable, &state_root);
+        let data_plane_capability = format!("{}.{}", Uuid::now_v7(), Uuid::now_v7());
+        let mut command = backend_command(&executable, &state_root, &data_plane_capability);
         let mut child = command.spawn().map_err(|err| {
             io::Error::new(
                 err.kind(),
@@ -267,6 +273,7 @@ impl RichCodexBackend {
 
         Ok(Some(Self {
             snapshot,
+            data_plane_capability,
             client,
             actor,
         }))
@@ -278,6 +285,10 @@ impl RichCodexBackend {
 
     pub(crate) fn client(&self) -> RichCodexBackendClient {
         self.client.clone()
+    }
+
+    pub(crate) fn data_plane(&self) -> (&str, u16) {
+        (&self.data_plane_capability, self.snapshot.data_plane_port)
     }
 
     pub(crate) async fn shutdown(self) -> io::Result<()> {
@@ -317,17 +328,30 @@ fn resolve_backend_executable(
     Ok(sibling.is_file().then_some(sibling))
 }
 
-fn backend_command(executable: &Path, state_root: &Path) -> Command {
+fn backend_command(executable: &Path, state_root: &Path, data_plane_capability: &str) -> Command {
     let mut command = Command::new(executable);
     command
         .arg("--state-root")
         .arg(state_root)
         .env_clear()
+        .env(BACKEND_DATA_PLANE_TOKEN_ENV, data_plane_capability)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     copy_safe_process_environment(&mut command, "PATH");
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    ] {
+        copy_safe_process_environment(&mut command, name);
+    }
     #[cfg(windows)]
     {
         copy_safe_process_environment(&mut command, "SYSTEMROOT");
@@ -352,6 +376,7 @@ where
         instance_id,
         desired_state_revision,
         catalog_revision,
+        data_plane_port,
         kernel,
         providers,
         models,
@@ -370,11 +395,18 @@ where
             ),
         ));
     }
+    if data_plane_port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid data-plane port",
+        ));
+    }
     validate_snapshot(&instance_id, &kernel, &providers, &models)?;
     Ok(BackendSnapshot {
         instance_id,
         desired_state_revision,
         catalog_revision,
+        data_plane_port,
         kernel,
         providers,
         models,

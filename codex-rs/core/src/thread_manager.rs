@@ -1,4 +1,5 @@
 use crate::CodexAppsToolsCache;
+use crate::RuntimeModelProviderRoutes;
 use crate::agent::AgentControl;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
@@ -349,6 +350,7 @@ pub(crate) struct ThreadManagerState {
     auth_manager: Arc<AuthManager>,
     model_auth_manager: Arc<AuthManager>,
     models_manager: SharedModelsManager,
+    runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
     environment_manager: Arc<EnvironmentManager>,
     starting_mcp_runtimes: std::sync::Mutex<Vec<std::sync::Weak<AtomicBool>>>,
     skills_service: Arc<HostSkillsService>,
@@ -514,6 +516,7 @@ impl ThreadManager {
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
+                runtime_model_provider_routes: None,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -559,6 +562,20 @@ impl ThreadManager {
             unreachable!("code-mode session provider must be set before thread manager is shared");
         };
         state.code_mode_session_provider = provider;
+        self
+    }
+
+    /// Installs process-owned model routes before this manager is shared.
+    pub fn with_runtime_model_provider_routes(
+        mut self,
+        routes: RuntimeModelProviderRoutes,
+    ) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!(
+                "runtime model provider routes must be set before thread manager is shared"
+            );
+        };
+        state.runtime_model_provider_routes = Some(routes);
         self
     }
 
@@ -662,6 +679,7 @@ impl ThreadManager {
                 thread_id_generator: default_thread_id_generator(),
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
                     .models_manager(codex_home, /*config_model_catalog*/ None),
+                runtime_model_provider_routes: None,
                 environment_manager,
                 starting_mcp_runtimes: std::sync::Mutex::new(Vec::new()),
                 skills_service,
@@ -1853,6 +1871,7 @@ impl ThreadManagerState {
             auth_manager,
             model_auth_manager: Arc::clone(&self.model_auth_manager),
             models_manager: Arc::clone(&self.models_manager),
+            runtime_model_provider_routes: self.runtime_model_provider_routes.clone(),
             environment_manager: Arc::clone(&self.environment_manager),
             skills_service: Arc::clone(&self.skills_service),
             plugins_manager: Arc::clone(&self.plugins_manager),

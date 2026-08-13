@@ -24,4 +24,5 @@ pub use provider::ProviderAccountState;
 pub use provider::ProviderCapabilities;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
+pub use provider::create_ephemeral_openai_bearer_model_provider;
 pub use provider::create_model_provider;

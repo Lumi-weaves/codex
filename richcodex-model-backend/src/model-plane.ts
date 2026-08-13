@@ -25,7 +25,7 @@ const MODEL_PLANE_SCHEMA_VERSION = 1 as const;
 const LEGACY_ACCOUNT_SCHEMA_VERSION = 1 as const;
 const SAFE_TEXT_CONTROL = /[\u0000-\u001f\u007f]/;
 
-export type ProviderAccountStatus = "verificationRequired" | "reauthenticationRequired";
+export type ProviderAccountStatus = "ready" | "verificationRequired" | "reauthenticationRequired";
 
 export interface SafeProviderAccount {
   readonly id: string;
@@ -42,7 +42,8 @@ export interface SafeProviderSummary {
   readonly status: "ready" | "needsAccount";
 }
 
-interface StoredCredential {
+export interface StoredOAuthCredential {
+  readonly kind: "oauth";
   readonly accessToken: string;
   readonly refreshToken: string;
   readonly chatgptAccountId: string;
@@ -50,7 +51,7 @@ interface StoredCredential {
 }
 
 interface StoredProviderAccount extends SafeProviderAccount {
-  readonly credential: StoredCredential;
+  readonly credential: StoredOAuthCredential;
 }
 
 interface StoredModelTarget {
@@ -159,6 +160,25 @@ export interface ModelPlaneStore {
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   createModelRoute(input: CreateModelRouteInput): SafeModelRoute;
   retireModelRoute(modelTag: string, expectedRevision: number): SafeModelRoute;
+  resolveExecutionCandidates(modelTag: string): readonly ModelExecutionCandidate[];
+  replaceOAuthCredential(
+    accountId: string,
+    expectedRefreshToken: string,
+    credential: StoredOAuthCredential,
+  ): boolean;
+  markAccountStatus(accountId: string, status: ProviderAccountStatus): void;
+}
+
+/** Private execution material returned only inside the bundled backend process. */
+export interface ModelExecutionCandidate {
+  readonly modelTag: string;
+  readonly semanticModel: string;
+  readonly targetId: string;
+  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly accountId: string;
+  readonly upstreamModelId: string;
+  readonly priority: number;
+  readonly credential: StoredOAuthCredential;
 }
 
 function emptyDocument(): ModelPlaneDocument {
@@ -188,7 +208,9 @@ function isSafeText(value: unknown, maxBytes: number): value is string {
 }
 
 function isSafeAccountStatus(value: unknown): value is ProviderAccountStatus {
-  return value === "verificationRequired" || value === "reauthenticationRequired";
+  return value === "ready"
+    || value === "verificationRequired"
+    || value === "reauthenticationRequired";
 }
 
 function parseStoredAccount(value: unknown): StoredProviderAccount | null {
@@ -201,6 +223,7 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     || !isSafeAccountStatus(value.status)
     || !Number.isSafeInteger(value.addedAt)
     || (value.addedAt as number) < 0
+    || credential.kind !== undefined && credential.kind !== "oauth"
     || !isSafeText(credential.accessToken, 64 * 1024)
     || !isSafeText(credential.refreshToken, 64 * 1024)
     || !isSafeText(credential.chatgptAccountId, 512)
@@ -215,6 +238,7 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     status: value.status as ProviderAccountStatus,
     addedAt: value.addedAt as number,
     credential: {
+      kind: "oauth",
       accessToken: credential.accessToken as string,
       refreshToken: credential.refreshToken as string,
       chatgptAccountId: credential.chatgptAccountId as string,
@@ -495,7 +519,7 @@ function expiryFromPayload(payload: Record<string, unknown> | null): number | nu
   return Number.isSafeInteger(milliseconds) ? milliseconds : null;
 }
 
-function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredCredential {
+function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredOAuthCredential {
   let value: unknown;
   try {
     value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
@@ -528,6 +552,7 @@ function parseCodexAuthJson(bytes: Uint8Array, now: number): StoredCredential {
   }
   if (expiresAt <= now) throw new ModelPlaneError("credential_expired");
   return {
+    kind: "oauth",
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token,
     chatgptAccountId,
@@ -542,7 +567,7 @@ function safeAccount(account: StoredProviderAccount, now: number): SafeProviderA
     userLabel: account.userLabel,
     status: account.credential.expiresAt <= now
       ? "reauthenticationRequired"
-      : "verificationRequired",
+      : account.status,
     addedAt: account.addedAt,
   };
 }
@@ -568,7 +593,9 @@ function safeModelRoute(
         upstreamModelId: target.upstreamModelId,
         priority: target.priority,
         status: account && account.credential.expiresAt > now
-          ? "unverified" as const
+          ? account.status === "reauthenticationRequired"
+            ? "reauthenticationRequired" as const
+            : "unverified" as const
           : "reauthenticationRequired" as const,
       };
     }),
@@ -755,6 +782,70 @@ export function createModelPlaneStore(
       persistDocument(stateRoot, path, next);
       document = next;
       return safeModelRoute(document, tag, nextEntry, now());
+    },
+    resolveExecutionCandidates(modelTag: string): readonly ModelExecutionCandidate[] {
+      const tag = document.modelTags.find(candidate => candidate.id === modelTag);
+      const display = document.displayEntries.find(candidate => candidate.modelTag === modelTag);
+      if (!tag || !display || display.retired) return [];
+      const accounts = new Map(document.accounts.map(account => [account.id, account]));
+      return tag.targets.flatMap(target => {
+        const account = accounts.get(target.accountId);
+        if (!account || account.status === "reauthenticationRequired") return [];
+        return [{
+          modelTag: tag.id,
+          semanticModel: tag.semanticModel,
+          targetId: target.id,
+          providerId: target.providerId,
+          accountId: target.accountId,
+          upstreamModelId: target.upstreamModelId,
+          priority: target.priority,
+          credential: { ...account.credential },
+        }];
+      }).sort((left, right) => left.priority - right.priority || left.targetId.localeCompare(right.targetId));
+    },
+    replaceOAuthCredential(
+      accountId: string,
+      expectedRefreshToken: string,
+      credential: StoredOAuthCredential,
+    ): boolean {
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account || account.credential.refreshToken !== expectedRefreshToken) return false;
+      if (
+        credential.kind !== "oauth"
+        || !isSafeText(credential.accessToken, 64 * 1024)
+        || !isSafeText(credential.refreshToken, 64 * 1024)
+        || !isSafeText(credential.chatgptAccountId, 512)
+        || !Number.isSafeInteger(credential.expiresAt)
+        || credential.expiresAt <= now()
+      ) {
+        throw new ModelPlaneError("store_unavailable");
+      }
+      const nextAccount: StoredProviderAccount = {
+        ...account,
+        status: "ready",
+        credential,
+      };
+      const next: ModelPlaneDocument = {
+        ...document,
+        accounts: document.accounts.map(candidate =>
+          candidate.id === accountId ? nextAccount : candidate
+        ),
+      };
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return true;
+    },
+    markAccountStatus(accountId: string, status: ProviderAccountStatus): void {
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account || account.status === status) return;
+      const next: ModelPlaneDocument = {
+        ...document,
+        accounts: document.accounts.map(candidate =>
+          candidate.id === accountId ? { ...candidate, status } : candidate
+        ),
+      };
+      persistDocument(stateRoot, path, next);
+      document = next;
     },
   };
 }

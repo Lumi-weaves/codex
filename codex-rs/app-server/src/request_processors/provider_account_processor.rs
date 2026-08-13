@@ -96,6 +96,7 @@ fn provider_account(account: ProviderAccountSummary) -> ProviderAccount {
         provider_id: account.provider_id,
         user_label: account.user_label,
         status: match account.status.as_str() {
+            "ready" => ProviderAccountStatus::Ready,
             "verificationRequired" => ProviderAccountStatus::VerificationRequired,
             "reauthenticationRequired" => ProviderAccountStatus::ReauthenticationRequired,
             _ => unreachable!("backend response status is validated by the client actor"),

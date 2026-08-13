@@ -10,6 +10,7 @@ use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::ModelListUpdatedNotification;
 use codex_app_server_protocol::ServerNotification;
+use codex_core::RuntimeModelProviderRoutes;
 use codex_http_client::HttpClientFactory;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
@@ -45,6 +46,7 @@ pub(crate) struct ModelListCatalog {
     outgoing: Arc<OutgoingMessageSender>,
     next_observation: AtomicU64,
     published: Mutex<PublishedModelList>,
+    runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
 }
 
 impl ModelListCatalog {
@@ -54,7 +56,7 @@ impl ModelListCatalog {
         http_client_factory: HttpClientFactory,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Self {
-        Self::new_with_runtime_routes(models_manager, http_client_factory, outgoing, &[])
+        Self::new_with_runtime_routes(models_manager, http_client_factory, outgoing, &[], None)
     }
 
     pub(crate) fn new_with_runtime_routes(
@@ -62,6 +64,7 @@ impl ModelListCatalog {
         http_client_factory: HttpClientFactory,
         outgoing: Arc<OutgoingMessageSender>,
         routes: &[ModelSummary],
+        runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
     ) -> Self {
         if !routes.is_empty() {
             match models_manager
@@ -71,6 +74,7 @@ impl ModelListCatalog {
             {
                 Ok(overlay) => {
                     models_manager.replace_runtime_catalog_overlay(Some(overlay));
+                    replace_active_runtime_tags(runtime_model_provider_routes.as_ref(), routes);
                 }
                 Err(ModelRouteProjectionError) => {
                     tracing::warn!(
@@ -95,6 +99,7 @@ impl ModelListCatalog {
                 revision: 1,
                 last_observation: 0,
             }),
+            runtime_model_provider_routes,
         }
     }
 
@@ -137,10 +142,11 @@ impl ModelListCatalog {
     ) -> Result<bool, ModelRouteProjectionError> {
         let candidates = self.models_manager.get_remote_models().await;
         let overlay = project_model_routes(&candidates, routes)?;
-        if !self
+        let changed = self
             .models_manager
-            .replace_runtime_catalog_overlay(Some(overlay))
-        {
+            .replace_runtime_catalog_overlay(Some(overlay));
+        replace_active_runtime_tags(self.runtime_model_provider_routes.as_ref(), routes);
+        if !changed {
             return Ok(false);
         }
         self.observe(RefreshStrategy::Offline).await;
@@ -179,6 +185,20 @@ impl ModelListCatalog {
             .send_server_notification(ServerNotification::ModelListUpdated(notification))
             .await;
         snapshot
+    }
+}
+
+fn replace_active_runtime_tags(
+    runtime_routes: Option<&RuntimeModelProviderRoutes>,
+    routes: &[ModelSummary],
+) {
+    if let Some(runtime_routes) = runtime_routes {
+        runtime_routes.replace_active_model_tags(
+            routes
+                .iter()
+                .filter(|route| !route.retired)
+                .map(|route| route.model_tag.clone()),
+        );
     }
 }
 
