@@ -15,6 +15,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::AgentResultTracePayload;
 use crate::CompactionCheckpointTracePayload;
+use crate::CompactionContinuityTracePayload;
 use crate::ExecutionStatus;
 use crate::RawTraceEventPayload;
 use crate::RolloutStatus;
@@ -150,6 +151,20 @@ fn disabled_thread_context_accepts_trace_calls_without_writing() -> anyhow::Resu
     compaction_trace.record_installed(&CompactionCheckpointTracePayload {
         input_history: &[],
         replacement_history: &[],
+        continuity: CompactionContinuityTracePayload {
+            trigger: "manual",
+            reason: "user_requested",
+            implementation: "responses_compaction_v2",
+            phase: "standalone_turn",
+            model: "gpt-test",
+            provider: "test-provider",
+            reference_context_installed: false,
+            world_state_baseline_installed: false,
+        },
+        window_number: Some(1),
+        first_window_id: Some("first-window"),
+        previous_window_id: Some("previous-window"),
+        window_id: Some("current-window"),
     });
 
     let built_dispatch_invocation = Cell::new(false);

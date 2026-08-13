@@ -209,6 +209,7 @@ fn builder_from_items_falls_back_to_filename() {
         .path()
         .join(format!("rollout-2026-01-27T12-34-56-{uuid}.jsonl"));
     let items = vec![RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: "noop".to_string(),
         replacement_history: None,
         window_number: None,

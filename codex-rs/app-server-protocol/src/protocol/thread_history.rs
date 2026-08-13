@@ -3926,6 +3926,7 @@ mod tests {
                 collaboration_mode_kind: Default::default(),
             })),
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: String::new(),
                 replacement_history: None,
                 window_number: None,

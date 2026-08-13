@@ -157,6 +157,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
     append_rollout_item_to_path(
         &path,
         &RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "compacted history".to_string(),
             replacement_history: Some(Vec::new()),
             window_number: Some(1),

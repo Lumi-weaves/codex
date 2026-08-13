@@ -1312,6 +1312,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
         .session
         .persist_rollout_items(&[
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: String::new(),
                 replacement_history: Some(vec![ResponseItem::Message {
                     id: None,
@@ -1750,6 +1751,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         .session
         .persist_rollout_items(&[
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: String::new(),
                 replacement_history: Some(replacement_history),
                 window_number: None,
@@ -1913,6 +1915,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 internal_chat_message_metadata_passthrough: None,
             }),
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: String::new(),
                 replacement_history: Some(replacement_history),
                 window_number: None,
@@ -2042,6 +2045,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
         let mut rollout_items = vec![
             RolloutItem::ResponseItem(parent_user_message),
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: "legacy compacted summary".to_string(),
                 replacement_history: None,
                 window_number: None,

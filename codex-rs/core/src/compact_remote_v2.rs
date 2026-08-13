@@ -8,7 +8,9 @@ use crate::compact::CompactedHistoryMetadata;
 use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
+use crate::compact::compaction_continuity;
 use crate::compact::compaction_status_from_result;
+use crate::compact::record_installed_compaction;
 use crate::compact_model_fallback::record_model_fallback;
 use crate::compact_model_fallback::should_retry_with_current_model;
 use crate::compact_remote::process_compacted_history;
@@ -44,8 +46,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TruncationPolicy;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_rollout_trace::CompactionCheckpointTracePayload;
-use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::StreamExt;
@@ -235,8 +235,8 @@ async fn run_remote_compact_task_inner_impl(
         analytics_details,
     )
     .await;
-    let (attempt, compaction_turn_context) = match attempt {
-        Ok(attempt) => (attempt, turn_context),
+    let (attempt, compaction_turn_context, selected_compaction_trace) = match attempt {
+        Ok(attempt) => (attempt, turn_context, compaction_trace.clone()),
         Err(error) => {
             let Some(fallback_step_context) = fallback_step_context else {
                 return Err(error);
@@ -270,7 +270,7 @@ async fn run_remote_compact_task_inner_impl(
                 fallback_result.as_ref().err(),
             );
             match fallback_result {
-                Ok(attempt) => (attempt, fallback_turn_context),
+                Ok(attempt) => (attempt, fallback_turn_context, fallback_compaction_trace),
                 Err(_) => return Err(error),
             }
         }
@@ -303,23 +303,31 @@ async fn run_remote_compact_task_inner_impl(
             Some(compaction_turn_context.to_turn_context_item())
         }
     };
-    if let Some(trace_input_history) = trace_input_history.as_deref() {
-        compaction_trace.record_installed(&CompactionCheckpointTracePayload {
-            input_history: trace_input_history,
-            replacement_history: &new_history,
-        });
-    }
-    sess.replace_compacted_history(
-        new_history,
-        reference_context_item,
-        world_state_baseline,
-        CompactedHistoryMetadata {
-            message: String::new(),
-            window_number: new_window_number,
-            window_ids: new_window_ids,
-        },
-    )
-    .await;
+    let continuity = compaction_continuity(
+        compaction_id,
+        compaction_metadata,
+        compaction_turn_context.as_ref(),
+        reference_context_item.is_some(),
+        world_state_baseline.is_some(),
+    );
+    let installed = sess
+        .replace_compacted_history(
+            new_history,
+            reference_context_item,
+            world_state_baseline,
+            CompactedHistoryMetadata {
+                message: String::new(),
+                window_number: new_window_number,
+                window_ids: new_window_ids,
+                continuity: Some(continuity),
+            },
+        )
+        .await;
+    record_installed_compaction(
+        &selected_compaction_trace,
+        trace_input_history.as_deref(),
+        &installed,
+    );
     sess.recompute_token_usage(compaction_turn_context).await;
 
     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
@@ -339,6 +347,7 @@ async fn run_remote_compaction_request_v2(
     client_session: &mut ModelClientSession,
     prompt: &Prompt,
     responses_metadata: &CodexResponsesMetadata,
+    compaction_trace: &codex_rollout_trace::CompactionTraceContext,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let max_retries = turn_context
         .provider
@@ -348,8 +357,7 @@ async fn run_remote_compaction_request_v2(
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
         let result = match client_session
-            .stream(
-                crate::PromptInvocationKind::RemoteCompaction,
+            .stream_compaction(
                 prompt,
                 &turn_context.model_info,
                 &turn_context.session_telemetry,
@@ -357,7 +365,7 @@ async fn run_remote_compaction_request_v2(
                 turn_context.reasoning_summary,
                 turn_context.config.service_tier.clone(),
                 responses_metadata,
-                &InferenceTraceContext::disabled(),
+                compaction_trace,
             )
             .await
         {

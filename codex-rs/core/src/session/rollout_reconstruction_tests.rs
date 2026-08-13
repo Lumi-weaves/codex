@@ -964,6 +964,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
             },
         )),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,
@@ -1024,6 +1025,7 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
     let rollout_items = vec![
         RolloutItem::TurnContext(previous_context_item),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,
@@ -1093,6 +1095,7 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
             git: None,
         }),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: Some(2),
@@ -1128,6 +1131,7 @@ async fn reconstruct_history_replays_world_state_from_latest_compaction_window()
                 "environment": {"status": "old"}
             }))),
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 window_number: Some(1),
@@ -1175,6 +1179,7 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
             git: None,
         }),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "legacy summary".to_string(),
             replacement_history: None,
             window_number: None,
@@ -1202,6 +1207,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         RolloutItem::ResponseItem(user_message("before compact")),
         RolloutItem::ResponseItem(assistant_message("assistant reply")),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "legacy summary".to_string(),
             replacement_history: None,
             window_number: None,
@@ -1237,6 +1243,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
     let rollout_items = vec![
         RolloutItem::ResponseItem(user_message("before compact")),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "legacy summary".to_string(),
             replacement_history: None,
             window_number: None,
@@ -1338,6 +1345,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
         )),
         // Compaction clears baseline until a later TurnContextItem re-establishes it.
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,
@@ -1500,6 +1508,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
             },
         )),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,
@@ -1748,6 +1757,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
             },
         )),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,
@@ -1919,6 +1929,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
             },
         )),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: String::new(),
             replacement_history: Some(Vec::new()),
             window_number: None,

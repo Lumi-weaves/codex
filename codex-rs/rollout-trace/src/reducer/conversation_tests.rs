@@ -1027,7 +1027,21 @@ fn compaction_boundary_repeats_prefix_and_reuses_replacement_items() -> anyhow::
         RawPayloadKind::CompactionCheckpoint,
         &json!({
             "input_history": [developer, user],
-            "replacement_history": [user, summary, compaction_summary]
+            "replacement_history": [user, summary, compaction_summary],
+            "continuity": {
+                "trigger": "manual",
+                "reason": "user_requested",
+                "implementation": "responses_compaction_v2",
+                "phase": "standalone_turn",
+                "model": "gpt-test",
+                "provider": "test-provider",
+                "reference_context_installed": false,
+                "world_state_baseline_installed": false
+            },
+            "window_number": 1,
+            "first_window_id": "first-window",
+            "previous_window_id": "previous-window",
+            "window_id": "current-window"
         }),
     )?;
     writer.append_with_context(
@@ -1053,6 +1067,32 @@ fn compaction_boundary_repeats_prefix_and_reuses_replacement_items() -> anyhow::
     let compaction = &rollout.compactions["compaction-1"];
 
     assert_eq!(compaction.input_item_ids, first.request_item_ids);
+    assert_eq!(
+        (
+            compaction.continuation_inference_call_id.as_deref(),
+            compaction.trigger.as_deref(),
+            compaction.reason.as_deref(),
+            compaction.implementation.as_deref(),
+            compaction.phase.as_deref(),
+            compaction.window_number,
+            compaction.previous_window_id.as_deref(),
+            compaction.window_id.as_deref(),
+            compaction.reference_context_installed,
+            compaction.world_state_baseline_installed,
+        ),
+        (
+            Some("inference-2"),
+            Some("manual"),
+            Some("user_requested"),
+            Some("responses_compaction_v2"),
+            Some("standalone_turn"),
+            Some(1),
+            Some("previous-window"),
+            Some("current-window"),
+            Some(false),
+            Some(false),
+        )
+    );
     assert_eq!(second.request_item_ids.len(), 4);
     assert_eq!(
         &second.request_item_ids[1..],
@@ -1101,6 +1141,109 @@ fn compaction_boundary_repeats_prefix_and_reuses_replacement_items() -> anyhow::
             value: "encrypted-summary".to_string(),
         }],
     );
+
+    Ok(())
+}
+
+#[test]
+fn websocket_continuation_uses_installed_compaction_checkpoint() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let writer = create_started_writer(&temp)?;
+    start_turn(&writer, "turn-1")?;
+
+    let user = message("user", "compact this");
+    let compact_request = writer.write_json_payload(
+        RawPayloadKind::CompactionRequest,
+        &json!({
+            "model": "gpt-test",
+            "input": [user, {"type": "compaction"}],
+            "tools": [{"type": "function", "name": "exec"}]
+        }),
+    )?;
+    writer.append_with_context(
+        trace_context("turn-1"),
+        RawTraceEventPayload::CompactionRequestStarted {
+            compaction_id: "compaction-1".to_string(),
+            compaction_request_id: "compaction-request-1".to_string(),
+            thread_id: "thread-root".to_string(),
+            codex_turn_id: "turn-1".to_string(),
+            model: "gpt-test".to_string(),
+            provider_name: "test-provider".to_string(),
+            request_payload: compact_request,
+        },
+    )?;
+    let compact_output = json!({
+        "type": "compaction",
+        "encrypted_content": "encrypted-summary",
+    });
+    let compact_response = writer.write_json_payload(
+        RawPayloadKind::CompactionResponse,
+        &json!({
+            "response_id": "compact-response-1",
+            "output_items": [compact_output]
+        }),
+    )?;
+    writer.append_with_context(
+        trace_context("turn-1"),
+        RawTraceEventPayload::CompactionRequestCompleted {
+            compaction_id: "compaction-1".to_string(),
+            compaction_request_id: "compaction-request-1".to_string(),
+            response_payload: compact_response,
+        },
+    )?;
+    let checkpoint = writer.write_json_payload(
+        RawPayloadKind::CompactionCheckpoint,
+        &json!({
+            "input_history": [user],
+            "replacement_history": [user, compact_output],
+            "continuity": {
+                "trigger": "auto",
+                "reason": "context_limit",
+                "implementation": "responses_compaction_v2",
+                "phase": "mid_turn",
+                "model": "gpt-test",
+                "provider": "test-provider",
+                "reference_context_installed": true,
+                "world_state_baseline_installed": true
+            },
+            "window_number": 1,
+            "first_window_id": "first-window",
+            "previous_window_id": "previous-window",
+            "window_id": "current-window"
+        }),
+    )?;
+    writer.append_with_context(
+        trace_context("turn-1"),
+        RawTraceEventPayload::CompactionInstalled {
+            compaction_id: "compaction-1".to_string(),
+            checkpoint_payload: checkpoint,
+        },
+    )?;
+
+    start_turn(&writer, "turn-2")?;
+    let continuation = writer.write_json_payload(
+        RawPayloadKind::InferenceRequest,
+        &json!({
+            "previous_response_id": "compact-response-1",
+            "input": [message("user", "continue")]
+        }),
+    )?;
+    append_inference_start(&writer, "inference-2", "turn-2", continuation)?;
+
+    let rollout = replay_bundle(temp.path())?;
+    let compaction = &rollout.compactions["compaction-1"];
+    let request = &rollout.compaction_requests["compaction-request-1"];
+    let continuation = &rollout.inference_calls["inference-2"];
+    assert_eq!(request.response_id.as_deref(), Some("compact-response-1"));
+    assert_eq!(
+        compaction.continuation_inference_call_id.as_deref(),
+        Some("inference-2")
+    );
+    assert_eq!(
+        &continuation.request_item_ids[..compaction.replacement_item_ids.len()],
+        compaction.replacement_item_ids.as_slice()
+    );
+    assert_eq!(continuation.request_item_ids.len(), 3);
 
     Ok(())
 }

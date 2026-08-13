@@ -59,6 +59,7 @@ fn response_item_replacement_history_preserves_shape() -> Result<()> {
 #[test]
 fn compacted_item_serializes_window_number_and_id() -> Result<()> {
     let item = CompactedItem {
+        continuity: None,
         message: "summary".to_string(),
         replacement_history: None,
         window_number: Some(3),
@@ -81,6 +82,35 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
 }
 
 #[test]
+fn compacted_item_serializes_durable_continuity_index() -> Result<()> {
+    let continuity = CompactionContinuity {
+        compaction_id: "compaction-1".to_string(),
+        trigger: "manual".to_string(),
+        reason: "user_requested".to_string(),
+        implementation: "responses_compaction_v2".to_string(),
+        phase: "standalone_turn".to_string(),
+        model: "gpt-test".to_string(),
+        provider: "test-provider".to_string(),
+        reference_context_installed: false,
+        world_state_baseline_installed: false,
+    };
+    let item = CompactedItem {
+        continuity: Some(continuity.clone()),
+        message: String::new(),
+        replacement_history: None,
+        window_number: Some(1),
+        first_window_id: Some("first-window".to_string()),
+        previous_window_id: Some("previous-window".to_string()),
+        window_id: Some("current-window".to_string()),
+    };
+
+    let serialized = serde_json::to_value(&item)?;
+    assert_eq!(serialized["continuity"], serde_json::to_value(continuity)?);
+    assert_eq!(serde_json::from_value::<CompactedItem>(serialized)?, item);
+    Ok(())
+}
+
+#[test]
 fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
     let item = serde_json::from_value::<CompactedItem>(json!({
         "message": "summary",
@@ -90,6 +120,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
     assert_eq!(
         item,
         CompactedItem {
+            continuity: None,
             message: "summary".to_string(),
             replacement_history: None,
             window_number: Some(3),

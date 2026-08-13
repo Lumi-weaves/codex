@@ -1,5 +1,6 @@
 use core_test_support::test_codex::local_selections;
 use std::fs;
+use std::path::Path;
 
 use anyhow::Result;
 use base64::Engine;
@@ -8,6 +9,8 @@ use codex_core::StartThreadOptions;
 use codex_core::X_CODEX_ROUTING_HINT_HEADER;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_features::Feature;
+use codex_history::CompactedItem;
+use codex_history::CompactionContinuity;
 use codex_history::InitialHistory;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
@@ -349,6 +352,18 @@ async fn wait_for_turn_complete(codex: &codex_core::CodexThread) {
         REMOTE_COMPACT_TURN_COMPLETE_TIMEOUT,
     )
     .await;
+}
+
+fn latest_compacted_item(rollout_path: &Path) -> Result<CompactedItem> {
+    fs::read_to_string(rollout_path)?
+        .lines()
+        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
+        .filter_map(|line| match line.item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .next_back()
+        .ok_or_else(|| anyhow::anyhow!("rollout did not contain a compacted checkpoint"))
 }
 
 fn amazon_bedrock_test_codex() -> TestCodexBuilder {
@@ -1089,6 +1104,94 @@ async fn remote_manual_compact_chatgpt_auth_reuses_service_tier_and_prompt_cache
         "After five varied ChatGPT-auth turns, remote manual compaction reuses service_tier and prompt_cache_key while omitting responses-only fields.",
     )
     .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_v2_manual_compaction_persists_continuity_join() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                let _ = config.features.enable(Feature::RemoteCompactionV2);
+            }),
+    )
+    .await?;
+    let codex = harness.test().codex.clone();
+    let rollout_path = harness
+        .test()
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let responses_mock = responses::mount_sse_sequence(
+        harness.server(),
+        vec![
+            responses::sse(vec![
+                responses::ev_assistant_message("m1", "BEFORE_COMPACT"),
+                responses::ev_completed("r1"),
+            ]),
+            responses::sse(vec![
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "V2_MANUAL_COMPACT_SUMMARY",
+                    }
+                }),
+                responses::ev_completed("r-compact"),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "manual continuity".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_turn_complete(&codex).await;
+    codex.submit(Op::Compact).await?;
+    let compaction_id = wait_for_event_match(&codex, |event| match event {
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            item: TurnItem::ContextCompaction(item),
+            ..
+        }) => Some(item.id.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_turn_complete(&codex).await;
+
+    assert_eq!(responses_mock.requests().len(), 2);
+    let checkpoint = latest_compacted_item(&rollout_path)?;
+    let continuity = checkpoint.continuity.expect("compaction continuity");
+    assert_eq!(
+        continuity,
+        CompactionContinuity {
+            compaction_id,
+            trigger: "manual".to_string(),
+            reason: "user_requested".to_string(),
+            implementation: "responses_compaction_v2".to_string(),
+            phase: "standalone_turn".to_string(),
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            reference_context_installed: false,
+            world_state_baseline_installed: false,
+        }
+    );
+    assert_eq!(checkpoint.window_number, Some(1));
+    assert_eq!(checkpoint.previous_window_id, checkpoint.first_window_id);
+    assert_ne!(checkpoint.window_id, checkpoint.previous_window_id);
 
     Ok(())
 }
@@ -4191,6 +4294,12 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
     )
     .await?;
     let codex = harness.test().codex.clone();
+    let rollout_path = harness
+        .test()
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
     let responses_mock = responses::mount_response_sequence(
         harness.server(),
         vec![
@@ -4236,6 +4345,14 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
             thread_settings: Default::default(),
         })
         .await?;
+    let compaction_id = wait_for_event_match(&codex, |event| match event {
+        EventMsg::ItemCompleted(ItemCompletedEvent {
+            item: TurnItem::ContextCompaction(item),
+            ..
+        }) => Some(item.id.clone()),
+        _ => None,
+    })
+    .await;
     wait_for_turn_complete(&codex).await;
 
     let requests = responses_mock.requests();
@@ -4268,6 +4385,25 @@ async fn remote_mid_turn_compact_v2_sends_turn_state_over_http() -> Result<()> {
         requests[3].header(TURN_STATE_HEADER).as_deref(),
         Some("sampling-state")
     );
+    let checkpoint = latest_compacted_item(&rollout_path)?;
+    let continuity = checkpoint.continuity.expect("compaction continuity");
+    assert_eq!(
+        continuity,
+        CompactionContinuity {
+            compaction_id,
+            trigger: "auto".to_string(),
+            reason: "context_limit".to_string(),
+            implementation: "responses_compaction_v2".to_string(),
+            phase: "mid_turn".to_string(),
+            model: "gpt-5.5".to_string(),
+            provider: "OpenAI".to_string(),
+            reference_context_installed: true,
+            world_state_baseline_installed: true,
+        }
+    );
+    assert_eq!(checkpoint.window_number, Some(1));
+    assert_eq!(checkpoint.previous_window_id, checkpoint.first_window_id);
+    assert_ne!(checkpoint.window_id, checkpoint.previous_window_id);
 
     Ok(())
 }

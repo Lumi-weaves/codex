@@ -545,6 +545,7 @@ mod tests {
         let thread_id = ThreadId::new();
         let mut sync = resume_sync(thread_id, Vec::new());
         let item = RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "compacted".to_string(),
             replacement_history: None,
             window_number: None,
