@@ -138,6 +138,10 @@ impl ModelsManager for CatalogOverlayModelsManager {
             true
         })
     }
+
+    fn replace_model_catalog(&self, catalog: ModelsResponse) -> ModelsManagerFuture<'_, bool> {
+        self.inner.replace_model_catalog(catalog)
+    }
 }
 
 pub fn with_catalog_overlay(

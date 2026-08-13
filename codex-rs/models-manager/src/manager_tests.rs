@@ -641,6 +641,20 @@ async fn static_manager_preserves_supported_requested_model_when_fallback_is_all
 }
 
 #[tokio::test]
+async fn static_manager_replaces_its_authoritative_catalog_in_place() {
+    let manager = static_manager_for_tests(ModelsResponse {
+        models: vec![remote_model("old-model", "Old", /*priority*/ 0)],
+    });
+    let replacement = ModelsResponse {
+        models: vec![remote_model("new-model", "New", /*priority*/ 0)],
+    };
+
+    assert!(manager.replace_model_catalog(replacement.clone()).await);
+    assert_eq!(manager.get_remote_models().await, replacement.models);
+    assert!(!manager.replace_model_catalog(replacement.clone()).await);
+}
+
+#[tokio::test]
 async fn static_manager_falls_back_from_unsupported_requested_model_when_allowed() {
     let manager = static_manager_for_tests(ModelsResponse {
         models: vec![

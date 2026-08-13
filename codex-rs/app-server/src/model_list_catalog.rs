@@ -89,6 +89,18 @@ impl ModelListCatalog {
         true
     }
 
+    pub(crate) async fn replace_config_catalog(
+        &self,
+        catalog: Option<ModelsResponse>,
+        overlay: Option<ModelsResponse>,
+    ) {
+        if let Some(catalog) = catalog {
+            self.models_manager.replace_model_catalog(catalog).await;
+        }
+        self.models_manager.replace_catalog_overlay(overlay).await;
+        self.observe(RefreshStrategy::Offline).await;
+    }
+
     async fn observe(&self, strategy: RefreshStrategy) -> ModelListSnapshot {
         let observation = self.next_observation.fetch_add(1, Ordering::Relaxed);
         let models = self

@@ -1,4 +1,5 @@
 use super::*;
+use crate::config_manager::ConfigManager;
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
 use crate::error_code::overloaded;
@@ -33,6 +34,7 @@ const REVISION_CONFLICT_ERROR_CODE: i64 = -32072;
 
 #[derive(Clone)]
 pub(crate) struct ModelWorkbenchRequestProcessor {
+    config_manager: ConfigManager,
     model_list_catalog: Arc<ModelListCatalog>,
 }
 
@@ -82,8 +84,14 @@ struct RetireBody<'a> {
 }
 
 impl ModelWorkbenchRequestProcessor {
-    pub(crate) fn new(model_list_catalog: Arc<ModelListCatalog>) -> Self {
-        Self { model_list_catalog }
+    pub(crate) fn new(
+        config_manager: ConfigManager,
+        model_list_catalog: Arc<ModelListCatalog>,
+    ) -> Self {
+        Self {
+            config_manager,
+            model_list_catalog,
+        }
     }
 
     pub(crate) async fn read(
@@ -129,9 +137,7 @@ impl ModelWorkbenchRequestProcessor {
         let response =
             request_workbench(Method::PUT, ENTRIES_PATH, body, params.expected_revision).await?;
         let response = mutation_response(response).await?;
-        self.model_list_catalog
-            .refresh(RefreshStrategy::Offline)
-            .await;
+        self.refresh_model_list_catalog().await;
         Ok(Some(
             ModelWorkbenchUpsertResponse {
                 revision: response.revision,
@@ -155,9 +161,7 @@ impl ModelWorkbenchRequestProcessor {
         let response =
             request_workbench(Method::POST, RETIRE_PATH, body, params.expected_revision).await?;
         let response = mutation_response(response).await?;
-        self.model_list_catalog
-            .refresh(RefreshStrategy::Offline)
-            .await;
+        self.refresh_model_list_catalog().await;
         Ok(Some(
             ModelWorkbenchRetireResponse {
                 revision: response.revision,
@@ -167,6 +171,27 @@ impl ModelWorkbenchRequestProcessor {
             }
             .into(),
         ))
+    }
+
+    async fn refresh_model_list_catalog(&self) {
+        // OpenCodex can rewrite either configured catalog file. Refreshing only models_cache.json
+        // would leave a static catalog or overlay in memory and let it override the mutation.
+        let config = match self.config_manager.load_latest_config(None).await {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    "failed to reload model catalog configuration after Model Workbench mutation"
+                );
+                self.model_list_catalog
+                    .refresh(RefreshStrategy::Offline)
+                    .await;
+                return;
+            }
+        };
+        self.model_list_catalog
+            .replace_config_catalog(config.model_catalog, config.model_catalog_overlay)
+            .await;
     }
 }
 

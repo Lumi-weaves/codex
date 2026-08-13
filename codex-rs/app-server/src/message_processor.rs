@@ -389,7 +389,8 @@ impl MessageProcessor {
             workspace_settings_cache: Arc::clone(&workspace_settings_cache),
             model_list_catalog: Arc::clone(&model_list_catalog),
         });
-        let model_workbench_processor = ModelWorkbenchRequestProcessor::new(model_list_catalog);
+        let model_workbench_processor =
+            ModelWorkbenchRequestProcessor::new(config_manager.clone(), model_list_catalog);
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
             Arc::clone(&config),

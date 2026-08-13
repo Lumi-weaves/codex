@@ -226,6 +226,14 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     ) -> ModelsManagerFuture<'_, bool> {
         Box::pin(async { false })
     }
+
+    /// Atomically replace an authoritative process-scoped catalog when this manager supports it.
+    ///
+    /// Static managers use this to follow an externally published `model_catalog_json` without
+    /// rebuilding every service that shares the manager. Dynamic provider managers return `false`.
+    fn replace_model_catalog(&self, _catalog: ModelsResponse) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async { false })
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -246,7 +254,7 @@ pub struct OpenAiModelsManager {
 /// Static model manager backed by an authoritative in-process catalog.
 #[derive(Debug)]
 pub struct StaticModelsManager {
-    remote_models: Vec<ModelInfo>,
+    remote_models: RwLock<Vec<ModelInfo>>,
     auth_manager: Option<Arc<AuthManager>>,
 }
 
@@ -308,7 +316,7 @@ impl StaticModelsManager {
     /// Construct a static model manager from an authoritative catalog.
     pub fn new(auth_manager: Option<Arc<AuthManager>>, model_catalog: ModelsResponse) -> Self {
         Self {
-            remote_models: model_catalog.models,
+            remote_models: RwLock::new(model_catalog.models),
             auth_manager,
         }
     }
@@ -586,11 +594,11 @@ impl ModelsManager for StaticModelsManager {
     }
 
     fn get_remote_models(&self) -> ModelsManagerFuture<'_, Vec<ModelInfo>> {
-        Box::pin(async { self.remote_models.clone() })
+        Box::pin(async { self.remote_models.read().await.clone() })
     }
 
     fn try_get_remote_models(&self) -> Result<Vec<ModelInfo>, TryLockError> {
-        Ok(self.remote_models.clone())
+        Ok(self.remote_models.try_read()?.clone())
     }
 
     fn auth_manager(&self) -> Option<&AuthManager> {
@@ -607,6 +615,17 @@ impl ModelsManager for StaticModelsManager {
         _http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()> {
         Box::pin(async {})
+    }
+
+    fn replace_model_catalog(&self, catalog: ModelsResponse) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async move {
+            let mut current = self.remote_models.write().await;
+            if *current == catalog.models {
+                return false;
+            }
+            *current = catalog.models;
+            true
+        })
     }
 }
 
