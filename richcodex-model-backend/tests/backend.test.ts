@@ -365,6 +365,169 @@ describe("RichCodex private model data plane", () => {
       ["working-api", "ready"],
     ]);
   });
+
+  test("prefers the soonest trustworthy quota reset and expires evidence back to declared order", async () => {
+    let now = 1_000_000;
+    const calls: string[] = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([
+        executionCandidate("declared-first", "target-first", 0, {
+          kind: "apiKey",
+          apiKey: "sk-declared-first",
+        }),
+        executionCandidate("sooner-reset", "target-sooner", 0, {
+          kind: "apiKey",
+          apiKey: "sk-sooner-reset",
+        }),
+      ]),
+      now: () => now,
+      fetch: (async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization")!;
+        calls.push(authorization);
+        if (calls.length === 1) {
+          return new Response("quota", {
+            status: 429,
+            headers: {
+              "retry-after": "60",
+              "x-codex-primary-used-percent": "90",
+              "x-codex-primary-reset-at": "4000",
+            },
+          });
+        }
+        return new Response('data: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "x-codex-primary-used-percent": "50",
+            "x-codex-primary-reset-at": "3000",
+          },
+        });
+      }) as typeof fetch,
+    });
+    const request = (): Promise<Response> => plane.handle(new Request(
+      "http://127.0.0.1/v1/responses",
+      {
+        method: "POST",
+        headers: {
+          "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "my-fast-model", input: [] }),
+      },
+    ));
+
+    expect((await request()).status).toBe(200);
+    now += 61_000;
+    expect((await request()).headers.get("x-richcodex-account-id")).toBe("sooner-reset");
+    now += 16 * 60_000;
+    expect((await request()).headers.get("x-richcodex-account-id")).toBe("declared-first");
+    expect(calls).toEqual([
+      "Bearer sk-declared-first",
+      "Bearer sk-sooner-reset",
+      "Bearer sk-sooner-reset",
+      "Bearer sk-declared-first",
+    ]);
+  });
+
+  test("keeps declared order when quota evidence is incomplete", async () => {
+    let now = 1_000_000;
+    const calls: string[] = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([
+        executionCandidate("first-account", "first-target", 0, {
+          kind: "apiKey",
+          apiKey: "sk-first",
+        }),
+        executionCandidate("second-account", "second-target", 0, {
+          kind: "apiKey",
+          apiKey: "sk-second",
+        }),
+      ]),
+      now: () => now,
+      fetch: (async (_input, init) => {
+        const authorization = new Headers(init?.headers).get("authorization")!;
+        calls.push(authorization);
+        return calls.length === 1
+          ? new Response("quota", {
+              status: 429,
+              headers: {
+                "retry-after": "60",
+                "x-codex-primary-used-percent": "90",
+                "x-codex-primary-reset-at": "3000",
+              },
+            })
+          : new Response('data: {"type":"response.completed"}\n\n', {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            });
+      }) as typeof fetch,
+    });
+    const request = (): Promise<Response> => plane.handle(new Request(
+      "http://127.0.0.1/v1/responses",
+      {
+        method: "POST",
+        headers: {
+          "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ model: "my-fast-model", input: [] }),
+      },
+    ));
+
+    expect((await request()).status).toBe(200);
+    now += 61_000;
+    expect((await request()).headers.get("x-richcodex-account-id")).toBe("first-account");
+    expect(calls).toEqual([
+      "Bearer sk-first",
+      "Bearer sk-second",
+      "Bearer sk-first",
+    ]);
+  });
+
+  test("never treats OAuth access-token expiry as routing preference", async () => {
+    const now = 1_000_000;
+    const calls: string[] = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([
+        executionCandidate("declared-first", "target-first", 0, {
+          kind: "oauth",
+          accessToken: "later-expiry",
+          refreshToken: "refresh-later",
+          chatgptAccountId: "workspace-later",
+          expiresAt: now + 2 * 60 * 60_000,
+        }),
+        executionCandidate("earlier-expiry", "target-earlier", 0, {
+          kind: "oauth",
+          accessToken: "earlier-expiry",
+          refreshToken: "refresh-earlier",
+          chatgptAccountId: "workspace-earlier",
+          expiresAt: now + 10 * 60_000,
+        }),
+      ]),
+      now: () => now,
+      fetch: (async (_input, init) => {
+        calls.push(new Headers(init?.headers).get("authorization")!);
+        return new Response('data: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch,
+    });
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+    expect(response.headers.get("x-richcodex-account-id")).toBe("declared-first");
+    expect(calls).toEqual(["Bearer later-expiry"]);
+  });
 });
 
 describe("RichCodex headless backend composition root", () => {
