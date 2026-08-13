@@ -1295,15 +1295,17 @@ impl Session {
                 time_provider,
                 model_client: ModelClientRouter::new(
                     session_configuration.provider_id.clone(),
-                    ModelClient::new(
-                    Some(model_auth_manager),
+                    // Preserve provider-owned runtime state (for example a
+                    // process-private data-plane capability). Reconstructing
+                    // from `provider.info()` would intentionally lose it.
+                    ModelClient::new_with_provider(
+                    Arc::clone(&session_configuration.provider),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
                     } else {
                         AgentIdentityAuthPolicy::JwtOnly
                     },
                     thread_id,
-                    session_configuration.provider.info().clone(),
                     session_configuration.session_source.clone(),
                     session_configuration.originator.clone(),
                     config.model_verbosity,

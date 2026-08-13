@@ -13,6 +13,7 @@ use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
+use codex_model_provider::create_private_openai_loopback_model_provider;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
@@ -45,6 +46,64 @@ use tempfile::tempdir;
 use wiremock::MockServer;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+#[tokio::test]
+async fn runtime_provider_state_survives_initial_model_client_construction() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    config.model = Some("managed-model".to_string());
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let private_provider = create_private_openai_loopback_model_provider(
+        48767,
+        "private-loopback-capability".to_string(),
+    );
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    )
+    .with_runtime_model_provider_routes(RuntimeModelProviderRoutes::new(
+        "richcodex",
+        Arc::clone(&private_provider),
+        ["managed-model".to_string()],
+    ));
+
+    let started = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("start managed-model thread");
+    let client_provider = started
+        .thread
+        .session
+        .services
+        .model_client
+        .current()
+        .provider_for_tests();
+
+    assert!(Arc::ptr_eq(&client_provider, &private_provider));
+    assert!(client_provider.requires_direct_transport());
+    let headers = client_provider
+        .api_auth()
+        .await
+        .expect("private data-plane auth should resolve")
+        .to_auth_headers();
+    assert_eq!(
+        headers
+            .get("x-richcodex-data-plane-token")
+            .and_then(|value| value.to_str().ok()),
+        Some("private-loopback-capability")
+    );
+
+    started
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown managed-model thread");
+}
 
 /// Controls without a custom allocation policy still produce distinct thread identifiers.
 #[test]

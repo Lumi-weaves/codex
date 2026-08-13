@@ -574,6 +574,11 @@ impl ModelClient {
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn provider_for_tests(&self) -> SharedModelProvider {
+        Arc::clone(&self.state.provider)
+    }
+
     fn prompt_cache_key(&self, responses_metadata: &CodexResponsesMetadata) -> String {
         self.prompt_cache_key_override
             .clone()
