@@ -9,6 +9,9 @@ use codex_history::RolloutLine;
 use codex_login::CodexAuth;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
+use codex_protocol::agent::AgentDefinitionRef;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
@@ -435,6 +438,82 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
             test.session_configured.model.clone(),
             next_model.to_string()
         ]
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_codex_agent_model_change_preserves_program_without_model_reinjection()
+-> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let resp_mock = mount_sse_sequence(
+        &server,
+        vec![sse_completed("resp-1"), sse_completed("resp-2")],
+    )
+    .await;
+    let test = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| {
+            config.agent = Some(AgentSelection {
+                agent: AgentDefinitionRef {
+                    id: "codex".to_string(),
+                    revision: 1,
+                },
+                origin: AgentSelectionOrigin::Cli,
+            });
+        })
+        .build(&server)
+        .await?;
+    let agent_instructions = bundled_models_response()?
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("pinned Agent prompt source")
+        .get_model_instructions(test.config.personality);
+
+    test.codex
+        .start_or_steer_turn(read_only_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            }],
+            "gpt-5.4".to_string(),
+        ))
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            model: Some("gpt-5.6-sol".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    test.codex
+        .start_or_steer_turn(read_only_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "switch models".into(),
+                text_elements: Vec::new(),
+            }],
+            "gpt-5.6-sol".to_string(),
+        ))
+        .await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = resp_mock.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].body_json()["instructions"], agent_instructions);
+    assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .iter()
+            .all(|text| !text.contains("<model_switch>"))
     );
 
     Ok(())

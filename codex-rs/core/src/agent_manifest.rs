@@ -315,7 +315,7 @@ fn codex_agent_definition() -> AgentDefinition {
         revision: CODEX_AGENT_REVISION,
         display_name: "Codex".to_string(),
         owner: "RichCodex Agent catalog".to_string(),
-        provenance: "explicit declaration over the legacy default Codex behavior template; declaration-only in schema version 1".to_string(),
+        provenance: "explicit Agent-owned program over a pinned legacy Codex behavior template during the strangler migration".to_string(),
         prompt_resource_refs: vec![PromptContributionKind::CodexAgentBaseInstructions],
         capability_refs: vec![AgentCapabilityRef {
             id: crate::multi_agent_v2_capability::MULTI_AGENT_V2_CAPABILITY_ID.to_string(),
@@ -342,6 +342,8 @@ fn codex_agent_definition() -> AgentDefinition {
             modules: vec![
                 "codex-rs/core/src/agent_manifest.rs".to_string(),
                 "codex-rs/core/src/agent_selection.rs".to_string(),
+                "codex-rs/core/src/agent_program.rs".to_string(),
+                "codex-rs/core/src/prompt_agent_program_receipt.rs".to_string(),
                 "codex-rs/protocol/src/agent.rs".to_string(),
                 "codex-rs/core/src/prompt_resource_definitions.rs".to_string(),
                 "codex-rs/models-manager/models.json".to_string(),
@@ -349,6 +351,9 @@ fn codex_agent_definition() -> AgentDefinition {
             symbols: vec![
                 "codex_agent_definition".to_string(),
                 "resolve_agent_selector".to_string(),
+                "resolve_agent_program".to_string(),
+                "CODEX_AGENT_BASE_TEMPLATE_SHA256".to_string(),
+                "AgentProgramReceipt".to_string(),
                 "AgentDefinitionRef".to_string(),
                 "CodexAgentBaseInstructions".to_string(),
                 "gpt-5.6-sol".to_string(),
@@ -356,11 +361,13 @@ fn codex_agent_definition() -> AgentDefinition {
             keywords: vec![
                 "Agent Definition".to_string(),
                 "legacy model catalog template".to_string(),
+                "pinned resource digest".to_string(),
                 "model-neutral behavior".to_string(),
             ],
             tests: vec![
                 "codex-rs/core/src/agent_manifest_tests.rs".to_string(),
                 "codex-rs/core/src/agent_selection_tests.rs".to_string(),
+                "codex-rs/core/tests/suite/prompt_debug_tests.rs".to_string(),
             ],
         },
     }

@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use super::session::Session;
 use super::step_context::StepContext;
+use crate::agent_program::applies_to_session_source;
+use crate::agent_program::is_codex_agent;
+use crate::agent_program::resolve_agent_base_instructions;
+use crate::agent_program::resolve_agent_personality_message;
 use crate::connectors;
 use crate::context::ApprovalPromptContext;
 use crate::context::TokenBudgetContext;
@@ -43,6 +47,12 @@ impl Session {
         let model_instructions = turn_context
             .model_info
             .get_model_instructions(turn_context.personality);
+        let explicit_codex_agent = turn_context
+            .config
+            .agent
+            .as_ref()
+            .is_some_and(|selection| is_codex_agent(&selection.agent))
+            && applies_to_session_source(&turn_context.session_source);
         let (previous_model, previous_context, base_instructions) = {
             let state = self.state.lock().await;
             let base_instructions = state.session_configuration.base_instructions.clone();
@@ -56,7 +66,8 @@ impl Session {
                             .as_ref()
                             .and_then(|provenance| match provenance {
                                 BaseInstructionsProvenance::Model { model } => Some(model),
-                                BaseInstructionsProvenance::Custom => None,
+                                BaseInstructionsProvenance::Agent { .. }
+                                | BaseInstructionsProvenance::Custom => None,
                             })
                             .filter(|_| base_instructions != model_instructions)
                             .cloned()
@@ -65,8 +76,18 @@ impl Session {
                 base_instructions,
             )
         };
-        let personality_is_baked = turn_context.model_info.supports_personality()
-            && base_instructions == model_instructions;
+        let personality_is_baked = if let Some(selection) = turn_context
+            .config
+            .agent
+            .as_ref()
+            .filter(|_| explicit_codex_agent)
+        {
+            base_instructions
+                == resolve_agent_base_instructions(selection, turn_context.personality)?
+        } else {
+            turn_context.model_info.supports_personality()
+                && base_instructions == model_instructions
+        };
         let environment_subagents = if turn_context.config.include_environment_context {
             self.services
                 .agent_control
@@ -79,24 +100,51 @@ impl Session {
         world_state.add_section(ModelInstructionsState::new(
             &turn_context.model_info.slug,
             previous_model.as_deref(),
-            model_instructions,
+            if explicit_codex_agent {
+                String::new()
+            } else {
+                model_instructions.clone()
+            },
         ));
         if self.features.enabled(Feature::Personality) {
-            let personality_instructions = turn_context.personality.and_then(|personality| {
+            let personality_instructions = match (
                 turn_context
+                    .config
+                    .agent
+                    .as_ref()
+                    .filter(|_| explicit_codex_agent),
+                turn_context.personality,
+            ) {
+                (Some(selection), Some(personality)) => {
+                    resolve_agent_personality_message(selection, personality)?
+                }
+                (None, Some(personality)) => turn_context
                     .model_info
                     .model_messages
                     .as_ref()
                     .and_then(|messages| messages.get_personality_message(Some(personality)))
-                    .filter(|message| !message.is_empty())
-            });
+                    .filter(|message| !message.is_empty()),
+                (_, None) => None,
+            };
+            let personality_owner = turn_context
+                .config
+                .agent
+                .as_ref()
+                .filter(|_| explicit_codex_agent)
+                .map(|selection| {
+                    format!("agent:{}@{}", selection.agent.id, selection.agent.revision)
+                });
             world_state.add_section(PersonalityState::new(
-                &turn_context.model_info.slug,
+                personality_owner
+                    .as_deref()
+                    .unwrap_or(&turn_context.model_info.slug),
                 turn_context.personality,
-                previous_context
-                    .as_ref()
-                    .map(|previous| previous.model.as_str())
-                    .or(previous_model.as_deref()),
+                personality_owner.as_deref().or_else(|| {
+                    previous_context
+                        .as_ref()
+                        .map(|previous| previous.model.as_str())
+                        .or(previous_model.as_deref())
+                }),
                 previous_context
                     .as_ref()
                     .and_then(|previous| previous.personality),

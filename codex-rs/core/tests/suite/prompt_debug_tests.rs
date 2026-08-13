@@ -19,24 +19,6 @@ use tempfile::TempDir;
 
 const TEST_INSTRUCTIONS: &str = "Global test instructions";
 
-fn strip_runtime_request_identity(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            object.retain(|key, _| {
-                !matches!(
-                    key.as_str(),
-                    "client_metadata" | "create_time" | "id" | "prompt_cache_key"
-                )
-            });
-            object.values_mut().for_each(strip_runtime_request_identity);
-        }
-        serde_json::Value::Array(values) => {
-            values.iter_mut().for_each(strip_runtime_request_identity);
-        }
-        _ => {}
-    }
-}
-
 #[tokio::test]
 async fn build_prompt_input_includes_context_and_user_message() -> Result<()> {
     let codex_home = TempDir::new()?;
@@ -143,8 +125,9 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
         .await?;
 
         let metadata_json = serde_json::to_value(receipt.render(PromptReceiptView::MetadataOnly))?;
-        assert_eq!(metadata_json["schemaVersion"], 6);
+        assert_eq!(metadata_json["schemaVersion"], 7);
         assert!(metadata_json.get("agentSelection").is_none());
+        assert!(metadata_json.get("agentProgram").is_none());
         assert_eq!(
             metadata_json["compilerRevision"],
             "responses_request_lowering_v1"
@@ -195,6 +178,19 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
                 .map(str::len),
             Some(64)
         );
+        assert_eq!(metadata_json["execution"]["requestedModelTag"], model);
+        assert_eq!(
+            metadata_json["execution"]["actualExecutionTarget"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            metadata_json["execution"]["actualExecutionTargetStatus"],
+            "available_only_after_dispatch"
+        );
+        assert_eq!(
+            metadata_json["execution"]["finalLogicalRequestSha256"],
+            metadata_json["summary"]["canonicalRequestSha256"]
+        );
         assert!(
             metadata_json["summary"]["estimatedModelVisibleTokens"]
                 .as_u64()
@@ -241,10 +237,10 @@ async fn build_prompt_request_receipt_includes_effective_request() -> Result<()>
 }
 
 #[tokio::test]
-async fn prompt_receipt_exposes_agent_identity_without_changing_request() -> Result<()> {
+async fn prompt_receipt_proves_model_neutral_agent_program_and_lowering() -> Result<()> {
     let codex_home = TempDir::new()?;
     let cwd = TempDir::new()?;
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(ConfigOverrides {
             agent: Some("codex@1".to_string()),
@@ -254,12 +250,15 @@ async fn prompt_receipt_exposes_agent_identity_without_changing_request() -> Res
         })
         .build()
         .await?;
+    config.base_instructions = Some("legacy custom instructions".to_string());
+    config.personality = Some(codex_protocol::config_types::Personality::None);
     let provider: Arc<dyn UserInstructionsProvider> = Arc::new(
         CodexHomeUserInstructionsProvider::new(config.codex_home.clone()),
     );
     let extensions = Arc::new(ExtensionRegistryBuilder::new().build());
     let mut legacy_config = config.clone();
     legacy_config.agent = None;
+    legacy_config.model = Some("gpt-5.4".to_string());
     let legacy = build_prompt_request_receipt(
         legacy_config,
         Vec::new(),
@@ -268,17 +267,66 @@ async fn prompt_receipt_exposes_agent_identity_without_changing_request() -> Res
         Arc::clone(&provider),
     )
     .await?;
-    let selected =
-        build_prompt_request_receipt(config, Vec::new(), None, extensions, provider).await?;
-    let selected_metadata = serde_json::to_value(selected.render(PromptReceiptView::MetadataOnly))?;
+    let mut responses_config = config.clone();
+    responses_config.model = Some("gpt-5.4".to_string());
+    let responses = build_prompt_request_receipt(
+        responses_config,
+        Vec::new(),
+        None,
+        Arc::clone(&extensions),
+        Arc::clone(&provider),
+    )
+    .await?;
+    let mut lite_config = config.clone();
+    lite_config.model = Some("gpt-5.6-sol".to_string());
+    let lite = build_prompt_request_receipt(
+        lite_config,
+        Vec::new(),
+        None,
+        Arc::clone(&extensions),
+        Arc::clone(&provider),
+    )
+    .await?;
+    let responses_metadata =
+        serde_json::to_value(responses.render(PromptReceiptView::MetadataOnly))?;
+    let lite_metadata = serde_json::to_value(lite.render(PromptReceiptView::MetadataOnly))?;
 
-    assert_eq!(selected_metadata["agentSelection"]["agent"]["id"], "codex");
-    assert_eq!(selected_metadata["agentSelection"]["agent"]["revision"], 1);
-    assert_eq!(selected_metadata["agentSelection"]["origin"], "cli");
-    let mut selected_request = serde_json::to_value(selected.request())?;
-    let mut legacy_request = serde_json::to_value(legacy.request())?;
-    strip_runtime_request_identity(&mut selected_request);
-    strip_runtime_request_identity(&mut legacy_request);
-    assert_eq!(selected_request, legacy_request);
+    assert_eq!(
+        responses_metadata["agentProgram"]["sha256"],
+        lite_metadata["agentProgram"]["sha256"]
+    );
+    for (metadata, placement) in [
+        (&responses_metadata, "responses_instructions"),
+        (&lite_metadata, "responses_lite_developer_input"),
+    ] {
+        let resource = &metadata["agentProgram"]["resources"][0];
+        assert_eq!(
+            (
+                resource["id"].as_str(),
+                resource["loweredPlacement"].as_str(),
+                resource["effectiveCopyCount"].as_u64(),
+            ),
+            (
+                Some("codex_agent_base_instructions"),
+                Some(placement),
+                Some(1)
+            )
+        );
+    }
+    assert_ne!(
+        responses_metadata["execution"]["finalLogicalRequestSha256"],
+        lite_metadata["execution"]["finalLogicalRequestSha256"]
+    );
+    let agent_text = &responses.request().instructions;
+    assert!(!agent_text.contains("# Personality"));
+    assert!(lite.request().input.iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && matches!(content.as_slice(), [ContentItem::InputText { text }] if text == agent_text)
+        )
+    }));
+    assert_eq!(legacy.request().instructions, "legacy custom instructions");
     Ok(())
 }

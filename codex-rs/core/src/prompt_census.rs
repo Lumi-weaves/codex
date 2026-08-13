@@ -211,6 +211,7 @@ pub struct PromptContributionDefinition {
 
 const TURN_CONTRIBUTIONS: &[PromptContributionKind] = &[
     PromptContributionKind::BaseInstructions,
+    PromptContributionKind::CodexAgentBaseInstructions,
     PromptContributionKind::WorldStateDeveloperContext,
     PromptContributionKind::CockpitOperatingContract,
     PromptContributionKind::WorldStateContextualUserContext,
@@ -236,6 +237,7 @@ const SPECIALIZED_TURN_CONTRIBUTIONS: &[PromptContributionKind] = &[
 
 const PREWARM_CONTRIBUTIONS: &[PromptContributionKind] = &[
     PromptContributionKind::BaseInstructions,
+    PromptContributionKind::CodexAgentBaseInstructions,
     PromptContributionKind::ToolSpecifications,
     PromptContributionKind::ProviderLowering,
     PromptContributionKind::ProviderProcessing,
@@ -243,6 +245,7 @@ const PREWARM_CONTRIBUTIONS: &[PromptContributionKind] = &[
 
 const COMPACTION_CONTRIBUTIONS: &[PromptContributionKind] = &[
     PromptContributionKind::BaseInstructions,
+    PromptContributionKind::CodexAgentBaseInstructions,
     PromptContributionKind::ConversationHistory,
     PromptContributionKind::InvocationInput,
     PromptContributionKind::ToolSpecifications,
@@ -311,7 +314,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             owner: "core::session::turn",
             request_routes: &["responses_http", "responses_websocket"],
             runtime_discriminator: "ordinary session turn; root and non-special subagent sessions",
-            base_instructions_source: "config override, then inherited rollout base, then rendered model template",
+            base_instructions_source: "selected Agent resource; otherwise config override, inherited rollout base, then rendered model template",
             input_assembly: "ordered initial world state, conversation history, current user input, and tool results",
             tool_source: "turn ToolRouter model-visible specifications",
             output_control_source: "turn final_output_json_schema and strictness policy",
@@ -324,7 +327,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             owner: "core::session_startup_prewarm",
             request_routes: &["responses_websocket"],
             runtime_discriminator: "startup prewarm feature and WebSocket transport eligibility",
-            base_instructions_source: "resolved session base instructions",
+            base_instructions_source: "resolved Agent or legacy session base instructions",
             input_assembly: "empty input; the warmup establishes reusable request state",
             tool_source: "startup turn ToolRouter model-visible specifications",
             output_control_source: "none",
@@ -363,7 +366,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             owner: "core::compact",
             request_routes: &["responses_http", "responses_websocket"],
             runtime_discriminator: "local compaction task stream call",
-            base_instructions_source: "current session base instructions",
+            base_instructions_source: "current Agent or legacy session base instructions",
             input_assembly: "trimmed conversation history followed by the versioned summarization request",
             tool_source: "none",
             output_control_source: "none",
@@ -376,7 +379,7 @@ fn invocation_definition(id: PromptInvocationKind) -> PromptInvocationDefinition
             owner: "core::compact_remote",
             request_routes: &["responses_compact", "responses_v2_compaction_trigger"],
             runtime_discriminator: "remote compaction attempt selected by feature and provider capability",
-            base_instructions_source: "current session base instructions",
+            base_instructions_source: "current Agent or legacy session base instructions",
             input_assembly: "trimmed conversation history; v2 appends a compaction trigger item",
             tool_source: "current turn ToolRouter model-visible specifications",
             output_control_source: "none",
