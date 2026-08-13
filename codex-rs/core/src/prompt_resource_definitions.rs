@@ -76,6 +76,27 @@ fn navigation_for(id: PromptContributionKind) -> StaticSourceNavigation {
             keywords: &["base instructions", "model catalog", "prompt receipt"],
             tests: MANIFEST_TESTS,
         },
+        PromptContributionKind::CodexAgentBaseInstructions => StaticSourceNavigation {
+            modules: &[
+                "codex-rs/models-manager/models.json",
+                "codex-rs/core/src/agent_manifest.rs",
+                "codex-rs/core/src/prompt_resource_definitions.rs",
+            ],
+            symbols: &[
+                "gpt-5.6-sol",
+                "codex_agent_definition",
+                "CodexAgentBaseInstructions",
+            ],
+            keywords: &[
+                "legacy model catalog template",
+                "default Codex Agent",
+                "behavioral base instructions",
+            ],
+            tests: &[
+                "codex-rs/core/src/agent_manifest_tests.rs",
+                "codex-rs/core/src/prompt_resources_tests.rs",
+            ],
+        },
         PromptContributionKind::WorldStateDeveloperContext => StaticSourceNavigation {
             modules: &[
                 "codex-rs/core/src/session/world_state.rs",
@@ -205,7 +226,8 @@ fn navigation_for(id: PromptContributionKind) -> StaticSourceNavigation {
 
 pub(crate) fn resource_definition(id: PromptContributionKind) -> StaticPromptResource {
     let (kind, classification) = match id {
-        PromptContributionKind::BaseInstructions => (
+        PromptContributionKind::BaseInstructions
+        | PromptContributionKind::CodexAgentBaseInstructions => (
             PromptResourceKind::BaseInstructions,
             PromptResourceClassification::Static,
         ),
@@ -274,6 +296,17 @@ pub(crate) fn resource_definition(id: PromptContributionKind) -> StaticPromptRes
             "full forks may preserve it; fresh role layers may replace it",
             "may contain private operator instructions",
             CensusCompleteness::Incomplete,
+        ),
+        PromptContributionKind::CodexAgentBaseInstructions => (
+            "Agent Definition codex@1",
+            "Agent-owned base-instructions resource; declaration-only until explicit Agent compilation is enabled",
+            "references the gpt-5.6-sol legacy model-catalog template during the strangler migration",
+            "statically enumerable in prompt-resources and agents; not selected on a request path in this slice",
+            "no independent uniform bound; participates in the model context window once compiled",
+            "versioned Agent resource; model identity must not select it",
+            "pinned by Agent Definition revision; resume and fork rules begin with explicit Agent selection",
+            "may contain private operator instructions when replaced or extended",
+            CensusCompleteness::Static,
         ),
         PromptContributionKind::WorldStateDeveloperContext => (
             "session::world_state and registered context contributors",
