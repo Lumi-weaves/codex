@@ -6,10 +6,21 @@ use codex_app_server_protocol::HooksListEntry;
 use codex_app_server_protocol::HooksListResponse;
 use codex_app_server_protocol::MarketplaceLoadErrorInfo;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
+use codex_app_server_protocol::ModelRoute;
+use codex_app_server_protocol::ModelRouteTarget;
+use codex_app_server_protocol::ModelRouteTargetStatus;
 use codex_app_server_protocol::PluginAvailability;
 use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
+use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountCredentialKind;
+use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountLoginStatus;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemovalTarget;
+use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
 use pretty_assertions::assert_eq;
@@ -3173,6 +3184,502 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     assert!(
         !popup.contains("test-hidden-model"),
         "expected hidden model to be excluded from picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_shows_display_name_and_stable_tag() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("research-max")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.id = "research-max".to_string();
+    preset.model = "research-max".to_string();
+    preset.display_name = "Research Max".to_string();
+    preset.description = "Routed by RichCodex".to_string();
+    preset.show_in_picker = true;
+
+    chat.open_model_popup_with_presets(vec![preset]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_picker_display_name_and_tag", popup);
+}
+
+#[tokio::test]
+async fn model_picker_i_opens_route_name_and_tag_prompts() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('i')));
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_route_display_name_prompt", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (display_name, selected_model) = match rx.try_recv() {
+        Ok(AppEvent::OpenModelRouteTagPrompt {
+            display_name,
+            selected_model,
+        }) => (display_name, selected_model),
+        other => panic!("expected OpenModelRouteTagPrompt, got {other:?}"),
+    };
+    chat.open_model_route_tag_prompt(display_name, selected_model);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_route_stable_tag_prompt", popup);
+}
+
+#[tokio::test]
+async fn model_picker_d_opens_non_cascading_retire_confirmation() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('d')));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("model_route_retire_confirmation", popup);
+}
+
+#[tokio::test]
+async fn model_picker_e_opens_ordered_target_editor_without_rendering_account_handles() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('e')));
+    let model_tag = match rx.try_recv() {
+        Ok(AppEvent::BeginModelRouteTargetManage { model_tag }) => model_tag,
+        other => panic!("expected BeginModelRouteTargetManage, got {other:?}"),
+    };
+    assert_eq!(model_tag, "gpt-5.4");
+
+    chat.show_model_route_target_editor(model_route_target_editor_fixture());
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("opaque-primary"));
+    assert!(!popup.contains("opaque-secondary"));
+    assert_chatwidget_snapshot!("model_route_target_editor", popup);
+}
+
+#[tokio::test]
+async fn model_route_target_editor_reorders_the_complete_target_set() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let editor = model_route_target_editor_fixture();
+    chat.show_model_route_target_editor(editor);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (editor, target_index) = match rx.try_recv() {
+        Ok(AppEvent::OpenModelRouteTargetActions {
+            editor,
+            target_index,
+        }) => (editor, target_index),
+        other => panic!("expected OpenModelRouteTargetActions, got {other:?}"),
+    };
+    assert_eq!(target_index, 0);
+
+    chat.show_model_route_target_actions(editor, target_index);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let targets = match rx.try_recv() {
+        Ok(AppEvent::SubmitModelRouteTargets { targets, .. }) => targets,
+        other => panic!("expected SubmitModelRouteTargets, got {other:?}"),
+    };
+    assert_eq!(
+        targets
+            .iter()
+            .map(|target| target.id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("target-secondary"), Some("target-primary")]
+    );
+}
+
+#[tokio::test]
+async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut preset = get_available_model(&chat, "gpt-5.4");
+    preset.show_in_picker = true;
+    chat.model_catalog.replace_models(vec![preset.clone()]);
+    chat.open_all_models_popup(vec![preset]);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('p')));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::BeginProviderAccountManage)
+    ));
+
+    chat.show_provider_accounts(ProviderAccountListResponse {
+        data: vec![ProviderAccount {
+            id: "opaque-provider-id-must-not-render".to_string(),
+            provider_id: "openai".to_string(),
+            user_label: "Secondary Codex".to_string(),
+            credential_kind: ProviderAccountCredentialKind::OAuth,
+            status: ProviderAccountStatus::Ready,
+            added_at: 1,
+        }],
+        providers: vec![codex_app_server_protocol::ProviderAccountProvider {
+            id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            account_count: 1,
+            status: codex_app_server_protocol::ProviderAccountProviderStatus::Ready,
+        }],
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+        next_cursor: None,
+    });
+    let provider_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(provider_popup.contains("Provider accounts"));
+    assert!(provider_popup.contains("Sign in with OpenAI"));
+    assert!(provider_popup.contains("Add OpenAI API key"));
+    assert!(provider_popup.contains("Add compatible API provider"));
+    assert!(provider_popup.contains("Secondary Codex"));
+    assert!(!provider_popup.contains("opaque-provider-id-must-not-render"));
+    assert_chatwidget_snapshot!("provider_accounts", provider_popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let config = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeyLabelPrompt { config }) => config,
+        other => panic!("expected OpenProviderApiKeyLabelPrompt, got {other:?}"),
+    };
+    assert_eq!(config.provider_id, "openai");
+    chat.open_provider_api_key_label_prompt(config);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (config, user_label) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeySecretPrompt { config, user_label }) => (config, user_label),
+        other => panic!("expected OpenProviderApiKeySecretPrompt, got {other:?}"),
+    };
+    assert_eq!(user_label, "OpenAI API");
+
+    chat.open_provider_api_key_secret_prompt(config, user_label);
+    let secret = "sk-provider-secret-canary";
+    chat.handle_paste(secret.to_string());
+    let secret_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!secret_popup.contains(secret));
+    assert!(secret_popup.contains(&"*".repeat(secret.len())));
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let event = rx.try_recv().expect("provider API-key submit event");
+    let debug = format!("{event:?}");
+    assert!(!debug.contains(secret));
+    assert!(debug.contains("[REDACTED]"));
+    match event {
+        AppEvent::SubmitProviderApiKey {
+            config,
+            user_label,
+            api_key,
+        } => {
+            assert_eq!(config.provider_id, "openai");
+            assert_eq!(config.api_base_url, "https://api.openai.com/v1");
+            assert_eq!(user_label, "OpenAI API");
+            assert_eq!(api_key.into_inner(), secret);
+        }
+        other => panic!("expected SubmitProviderApiKey, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn provider_plane_collects_a_compatible_provider_without_exposing_its_key() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.open_compatible_provider_id_prompt();
+    chat.handle_paste("alibaba".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let provider_id = match rx.try_recv() {
+        Ok(AppEvent::OpenCompatibleProviderDisplayNamePrompt { provider_id }) => provider_id,
+        other => panic!("expected provider display-name prompt, got {other:?}"),
+    };
+    assert_eq!(provider_id, "alibaba");
+
+    chat.open_compatible_provider_display_name_prompt(provider_id);
+    chat.handle_paste("Alibaba Model Studio".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (provider_id, provider_display_name) = match rx.try_recv() {
+        Ok(AppEvent::OpenCompatibleProviderBaseUrlPrompt {
+            provider_id,
+            provider_display_name,
+        }) => (provider_id, provider_display_name),
+        other => panic!("expected provider base-URL prompt, got {other:?}"),
+    };
+    assert_eq!(provider_id, "alibaba");
+    assert_eq!(provider_display_name, "Alibaba Model Studio");
+
+    chat.open_compatible_provider_base_url_prompt(provider_id, provider_display_name);
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("compatible_provider_base_url", popup);
+}
+
+#[tokio::test]
+async fn provider_plane_reauthenticates_an_api_key_without_changing_its_handle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = codex_app_server_protocol::ProviderAccount {
+        id: "opaque-alibaba-account".to_string(),
+        provider_id: "alibaba".to_string(),
+        user_label: "Alibaba Primary".to_string(),
+        credential_kind: codex_app_server_protocol::ProviderAccountCredentialKind::ApiKey,
+        status: codex_app_server_protocol::ProviderAccountStatus::ReauthenticationRequired,
+        added_at: 1,
+    };
+    chat.open_provider_account_actions(account.clone(), "7".to_string());
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("provider_account_actions", popup);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (selected, expected_revision) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderApiKeyReplacementPrompt {
+            account,
+            expected_revision,
+        }) => (account, expected_revision),
+        other => panic!("expected API-key replacement prompt, got {other:?}"),
+    };
+    assert_eq!(selected.id, account.id);
+    assert_eq!(expected_revision, "7");
+
+    chat.open_provider_api_key_replacement_prompt(selected, expected_revision);
+    let secret = "sk-replacement-secret-canary";
+    chat.handle_paste(secret.to_string());
+    let secret_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!secret_popup.contains(secret));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    match rx.try_recv() {
+        Ok(AppEvent::SubmitProviderApiKeyReplacement {
+            account_id,
+            expected_revision,
+            api_key,
+        }) => {
+            assert_eq!(account_id, "opaque-alibaba-account");
+            assert_eq!(expected_revision, "7");
+            assert_eq!(api_key.into_inner(), secret);
+        }
+        other => panic!("expected replacement submission, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn provider_plane_previews_account_removal_without_implicit_target_rewrites() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = ProviderAccount {
+        id: "opaque-alibaba-account".to_string(),
+        provider_id: "alibaba".to_string(),
+        user_label: "Alibaba Primary".to_string(),
+        credential_kind: ProviderAccountCredentialKind::ApiKey,
+        status: ProviderAccountStatus::Ready,
+        added_at: 1,
+    };
+    chat.show_provider_account_removal_preview(Ok(ProviderAccountRemovalPreviewResponse {
+        account: account.clone(),
+        affected_targets: vec![ProviderAccountRemovalTarget {
+            model_tag: "reviewer".to_string(),
+            display_name: "Independent Reviewer".to_string(),
+            retired: false,
+            target_id: "opaque-target".to_string(),
+            upstream_model_id: "qwen3-coder".to_string(),
+            priority: 0,
+        }],
+        can_remove: false,
+        desired_state_revision: "7".to_string(),
+        catalog_revision: "11".to_string(),
+    }));
+    let blocked = drain_insert_history(&mut rx);
+    let rendered = lines_to_single_string(&blocked[0]);
+    assert!(rendered.contains("Independent Reviewer → qwen3-coder"));
+    assert!(!rendered.contains("opaque-target"));
+
+    chat.show_provider_account_removal_preview(Ok(ProviderAccountRemovalPreviewResponse {
+        account,
+        affected_targets: Vec::new(),
+        can_remove: true,
+        desired_state_revision: "8".to_string(),
+        catalog_revision: "12".to_string(),
+    }));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitProviderAccountRemoval {
+            account_id,
+            expected_revision,
+        }) if account_id == "opaque-alibaba-account" && expected_revision == "8"
+    ));
+}
+
+#[tokio::test]
+async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.open_provider_oauth_label_prompt();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitProviderOAuthLogin { user_label, account_id })
+            if user_label == "OpenAI Codex" && account_id.is_none()
+    ));
+
+    chat.show_provider_oauth_login(Ok(ProviderAccountLogin {
+        login_id: "opaque-login-handle-must-not-render".to_string(),
+        status: ProviderAccountLoginStatus::AwaitingUser,
+        verification_url: Some("https://auth.openai.com/codex/device".to_string()),
+        user_code: Some("ABCD-EFGH".to_string()),
+        expires_at: 2_000,
+        failure: None,
+        account: None,
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+    }));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains("https://auth.openai.com/codex/device"));
+    assert!(popup.contains("ABCD-EFGH"));
+    assert!(!popup.contains("opaque-login-handle-must-not-render"));
+    assert_chatwidget_snapshot!("provider_oauth_device_login", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CancelProviderOAuthLogin { login_id })
+            if login_id == "opaque-login-handle-must-not-render"
+    ));
+}
+
+#[tokio::test]
+async fn model_route_shortcuts_are_scoped_to_the_all_models_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut auto = get_available_model(&chat, "gpt-5.4");
+    auto.id = "codex-auto-fast".to_string();
+    auto.model = "codex-auto-fast".to_string();
+    auto.display_name = "Fast".to_string();
+    auto.show_in_picker = true;
+    let mut specific = get_available_model(&chat, "gpt-5.4");
+    specific.show_in_picker = true;
+    chat.open_model_popup_with_presets(vec![auto, specific]);
+    while rx.try_recv().is_ok() {}
+    let before = render_bottom_popup(&chat, /*width*/ 80);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('d')));
+
+    let after = render_bottom_popup(&chat, /*width*/ 80);
+    assert_eq!(after, before);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn model_route_account_picker_exposes_only_safe_account_labels() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let preset = get_available_model(&chat, "gpt-5.4");
+    let draft = crate::app_event::ModelRouteDraft {
+        display_name: "My Fast Model".to_string(),
+        model_tag: "my-fast-model".to_string(),
+        selected_model: preset,
+    };
+    let choices = crate::app_event::ModelRouteAccountChoices {
+        expected_revision: "7".to_string(),
+        semantic_model: "gpt-5.4".to_string(),
+        upstream_model_id: "gpt-5.4".to_string(),
+        accounts: vec![
+            ProviderAccount {
+                id: "opaque-primary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Primary Codex".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
+                status: ProviderAccountStatus::VerificationRequired,
+                added_at: 1,
+            },
+            ProviderAccount {
+                id: "opaque-expired".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Needs Login".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
+                status: ProviderAccountStatus::ReauthenticationRequired,
+                added_at: 2,
+            },
+        ],
+    };
+
+    chat.show_model_route_account_choices(draft, choices);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(!popup.contains("opaque-primary"));
+    assert!(!popup.contains("opaque-expired"));
+    assert_chatwidget_snapshot!("model_route_account_picker", popup);
+}
+
+fn model_route_target_editor_fixture() -> crate::app_event::ModelRouteTargetEditorState {
+    crate::app_event::ModelRouteTargetEditorState {
+        expected_revision: "revision-7".to_string(),
+        route: ModelRoute {
+            model_tag: "gpt-5.4".to_string(),
+            display_name: "GPT-5.4 Routed".to_string(),
+            retired: false,
+            semantic_model: "gpt-5.4".to_string(),
+            targets: vec![
+                ModelRouteTarget {
+                    id: "target-primary".to_string(),
+                    provider_id: "openai".to_string(),
+                    account_id: "opaque-primary".to_string(),
+                    upstream_model_id: "gpt-5.4".to_string(),
+                    priority: 1,
+                    status: ModelRouteTargetStatus::Unverified,
+                },
+                ModelRouteTarget {
+                    id: "target-secondary".to_string(),
+                    provider_id: "openai".to_string(),
+                    account_id: "opaque-secondary".to_string(),
+                    upstream_model_id: "gpt-5.4-fast".to_string(),
+                    priority: 2,
+                    status: ModelRouteTargetStatus::ReauthenticationRequired,
+                },
+            ],
+        },
+        accounts: vec![
+            ProviderAccount {
+                id: "opaque-primary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Primary Codex".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
+                status: ProviderAccountStatus::Ready,
+                added_at: 1,
+            },
+            ProviderAccount {
+                id: "opaque-secondary".to_string(),
+                provider_id: "openai".to_string(),
+                user_label: "Secondary API".to_string(),
+                credential_kind: ProviderAccountCredentialKind::ApiKey,
+                status: ProviderAccountStatus::Ready,
+                added_at: 2,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn open_model_picker_refreshes_when_catalog_changes() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("old-tag")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let mut old = get_available_model(&chat, "gpt-5.4");
+    old.id = "old-tag".to_string();
+    old.model = "old-tag".to_string();
+    old.display_name = "Old Model".to_string();
+    old.show_in_picker = true;
+    chat.open_model_popup_with_presets(vec![old]);
+
+    let mut new = get_available_model(&chat, "gpt-5.4");
+    new.id = "new-tag".to_string();
+    new.model = "new-tag".to_string();
+    new.display_name = "New Model".to_string();
+    new.show_in_picker = true;
+    chat.refresh_model_picker_if_open(vec![new]);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(popup.contains("New Model"), "refreshed picker:\n{popup}");
+    assert!(popup.contains("tag: new-tag"), "refreshed picker:\n{popup}");
+    assert!(!popup.contains("Old Model"), "refreshed picker:\n{popup}");
+    assert!(
+        !popup.contains("(current)"),
+        "a vanished current tag must not silently select a replacement:\n{popup}"
     );
 }
 

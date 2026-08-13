@@ -942,6 +942,84 @@ client_request_definitions! {
         serialization: None,
         response: v2::ModelProviderCapabilitiesReadResponse,
     },
+    #[experimental("providerAccount/list")]
+    ProviderAccountList => "providerAccount/list" {
+        params: v2::ProviderAccountListParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ProviderAccountListResponse,
+    },
+    #[experimental("providerAccount/import")]
+    ProviderAccountImport => "providerAccount/import" {
+        params: v2::ProviderAccountImportParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountImportResponse,
+    },
+    #[experimental("providerAccount/apiKey/add")]
+    ProviderAccountAddApiKey => "providerAccount/apiKey/add" {
+        params: v2::ProviderAccountAddApiKeyParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountAddApiKeyResponse,
+    },
+    #[experimental("providerAccount/apiKey/replace")]
+    ProviderAccountReplaceApiKey => "providerAccount/apiKey/replace" {
+        params: v2::ProviderAccountReplaceApiKeyParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountReplaceApiKeyResponse,
+    },
+    #[experimental("providerAccount/removalPreview")]
+    ProviderAccountRemovalPreview => "providerAccount/removalPreview" {
+        params: v2::ProviderAccountRemovalPreviewParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ProviderAccountRemovalPreviewResponse,
+    },
+    #[experimental("providerAccount/remove")]
+    ProviderAccountRemove => "providerAccount/remove" {
+        params: v2::ProviderAccountRemoveParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountRemoveResponse,
+    },
+    #[experimental("providerAccount/login/start")]
+    ProviderAccountLoginStart => "providerAccount/login/start" {
+        params: v2::ProviderAccountLoginStartParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginStartResponse,
+    },
+    #[experimental("providerAccount/login/status")]
+    ProviderAccountLoginStatus => "providerAccount/login/status" {
+        params: v2::ProviderAccountLoginStatusParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginStatusResponse,
+    },
+    #[experimental("providerAccount/login/cancel")]
+    ProviderAccountLoginCancel => "providerAccount/login/cancel" {
+        params: v2::ProviderAccountLoginCancelParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountLoginCancelResponse,
+    },
+    #[experimental("modelRoute/read")]
+    ModelRouteRead => "modelRoute/read" {
+        params: v2::ModelRouteReadParams,
+        serialization: global_shared_read("richcodex-model-plane"),
+        response: v2::ModelRouteReadResponse,
+    },
+    #[experimental("modelRoute/create")]
+    ModelRouteCreate => "modelRoute/create" {
+        params: v2::ModelRouteCreateParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteCreateResponse,
+    },
+    #[experimental("modelRoute/targets/set")]
+    ModelRouteSetTargets => "modelRoute/targets/set" {
+        params: v2::ModelRouteSetTargetsParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteSetTargetsResponse,
+    },
+    #[experimental("modelRoute/retire")]
+    ModelRouteRetire => "modelRoute/retire" {
+        params: v2::ModelRouteRetireParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteRetireResponse,
+    },
     ExperimentalFeatureList => "experimentalFeature/list" {
         params: v2::ExperimentalFeatureListParams,
         serialization: global("config"),
@@ -1770,6 +1848,8 @@ server_notification_definitions! {
     /// Deprecated: Use `ContextCompaction` item type instead.
     ContextCompacted => "thread/compacted" (v2::ContextCompactedNotification),
     ModelRerouted => "model/rerouted" (v2::ModelReroutedNotification),
+    #[experimental("model/executionReceipt")]
+    RichCodexExecutionReceipt => "model/executionReceipt" (v2::RichCodexExecutionReceiptNotification),
     ModelVerification => "model/verification" (v2::ModelVerificationNotification),
     #[experimental("turn/moderationMetadata")]
     TurnModerationMetadata => "turn/moderationMetadata" (v2::TurnModerationMetadataNotification),
@@ -4049,6 +4129,175 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("mock/experimentalMethod"));
+    }
+
+    #[test]
+    fn provider_account_methods_are_experimental_and_serialized() {
+        let list = ClientRequest::ProviderAccountList {
+            request_id: request_id(),
+            params: v2::ProviderAccountListParams {
+                cursor: None,
+                limit: Some(20),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&list),
+            Some("providerAccount/list")
+        );
+        assert_eq!(
+            list.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "richcodex-model-plane"
+            ))
+        );
+
+        let import = ClientRequest::ProviderAccountImport {
+            request_id: request_id(),
+            params: v2::ProviderAccountImportParams {
+                auth_json_path: absolute_path("selected/auth.json"),
+                user_label: "Secondary".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&import),
+            Some("providerAccount/import")
+        );
+        assert_eq!(
+            import.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(import).unwrap(),
+            json!({
+                "id": 1,
+                "method": "providerAccount/import",
+                "params": {
+                    "authJsonPath": absolute_path_string("selected/auth.json"),
+                    "userLabel": "Secondary"
+                }
+            })
+        );
+
+        let api_key = "sk-api-key-debug-canary";
+        let add_api_key = ClientRequest::ProviderAccountAddApiKey {
+            request_id: request_id(),
+            params: v2::ProviderAccountAddApiKeyParams {
+                provider_id: "openai".to_string(),
+                provider_display_name: "OpenAI".to_string(),
+                api_base_url: "https://api.openai.com/v1".to_string(),
+                api_key: api_key.to_string(),
+                user_label: "OpenAI API".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&add_api_key),
+            Some("providerAccount/apiKey/add")
+        );
+        assert_eq!(
+            add_api_key.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        let debug = format!("{add_api_key:?}");
+        assert!(!debug.contains(api_key));
+        assert!(debug.contains("[REDACTED]"));
+        assert_eq!(
+            serde_json::to_value(add_api_key).unwrap(),
+            json!({
+                "id": 1,
+                "method": "providerAccount/apiKey/add",
+                "params": {
+                    "providerId": "openai",
+                    "providerDisplayName": "OpenAI",
+                    "apiBaseUrl": "https://api.openai.com/v1",
+                    "apiKey": api_key,
+                    "userLabel": "OpenAI API"
+                }
+            })
+        );
+
+        let create = ClientRequest::ModelRouteCreate {
+            request_id: request_id(),
+            params: v2::ModelRouteCreateParams {
+                expected_revision: "7".to_string(),
+                model_tag: "gpt-primary".to_string(),
+                display_name: "GPT Primary".to_string(),
+                semantic_model: "openai/gpt-primary".to_string(),
+                provider_id: "openai".to_string(),
+                account_id: "account-local".to_string(),
+                upstream_model_id: "gpt-primary-2026-08-13".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&create),
+            Some("modelRoute/create")
+        );
+        assert_eq!(
+            create.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(create).unwrap(),
+            json!({
+                "id": 1,
+                "method": "modelRoute/create",
+                "params": {
+                    "expectedRevision": "7",
+                    "modelTag": "gpt-primary",
+                    "displayName": "GPT Primary",
+                    "semanticModel": "openai/gpt-primary",
+                    "providerId": "openai",
+                    "accountId": "account-local",
+                    "upstreamModelId": "gpt-primary-2026-08-13"
+                }
+            })
+        );
+
+        let set_targets = ClientRequest::ModelRouteSetTargets {
+            request_id: request_id(),
+            params: v2::ModelRouteSetTargetsParams {
+                expected_revision: "8".to_string(),
+                model_tag: "gpt-primary".to_string(),
+                targets: vec![v2::ModelRouteTargetInput {
+                    id: Some("target-local".to_string()),
+                    provider_id: "openai".to_string(),
+                    account_id: "account-local".to_string(),
+                    upstream_model_id: "gpt-primary".to_string(),
+                }],
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&set_targets),
+            Some("modelRoute/targets/set")
+        );
+        assert_eq!(
+            set_targets.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(set_targets).unwrap(),
+            json!({
+                "id": 1,
+                "method": "modelRoute/targets/set",
+                "params": {
+                    "expectedRevision": "8",
+                    "modelTag": "gpt-primary",
+                    "targets": [{
+                        "id": "target-local",
+                        "providerId": "openai",
+                        "accountId": "account-local",
+                        "upstreamModelId": "gpt-primary"
+                    }]
+                }
+            })
+        );
     }
 
     #[test]

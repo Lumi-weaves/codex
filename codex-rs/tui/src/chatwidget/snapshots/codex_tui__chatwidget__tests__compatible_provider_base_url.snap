@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3413
+expression: popup
+---
+▌ Add compatible provider — API base URL
+▌ Alibaba Model Studio · ID: alibaba
+▌
+▌ https://example.com/v1
+
+Press enter to confirm or esc to go back

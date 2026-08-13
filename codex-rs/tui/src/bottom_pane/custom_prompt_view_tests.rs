@@ -1,5 +1,7 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use std::sync::mpsc::Receiver;
 
 #[test]
@@ -72,6 +74,35 @@ fn delayed_enter_after_typing_submits() {
 
     assert_eq!(submitted_rx.try_recv(), Ok("foo".to_string()));
     assert!(view.is_complete());
+}
+
+#[test]
+fn secret_prompt_masks_the_terminal_but_submits_the_original_value() {
+    let secret = "sk-secret-canary";
+    let (submitted, submitted_rx) = std::sync::mpsc::channel();
+    let mut view = CustomPromptView::new_secret(
+        "API key".to_string(),
+        "Paste an API key".to_string(),
+        None,
+        Box::new(move |text| {
+            submitted.send(text).expect("send submitted secret");
+        }),
+    );
+    assert!(view.handle_paste(secret.to_string()));
+
+    let area = Rect::new(0, 0, 80, 6);
+    let mut buffer = Buffer::empty(area);
+    view.render(area, &mut buffer);
+    let rendered = buffer
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect::<String>();
+    assert!(!rendered.contains(secret));
+    assert!(rendered.contains(&"*".repeat(secret.len())));
+
+    view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), Instant::now());
+    assert_eq!(submitted_rx.try_recv(), Ok(secret.to_string()));
 }
 
 fn custom_prompt_view() -> (CustomPromptView, Receiver<String>) {

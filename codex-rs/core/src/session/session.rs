@@ -601,6 +601,7 @@ impl Session {
         auth_manager: Arc<AuthManager>,
         model_auth_manager: Arc<AuthManager>,
         models_manager: SharedModelsManager,
+        runtime_model_provider_routes: Option<crate::RuntimeModelProviderRoutes>,
         model_info: ModelInfo,
         exec_policy: Arc<ExecPolicyManager>,
         tx_event: Sender<Event>,
@@ -1268,6 +1269,7 @@ impl Session {
                 .with_legacy_custom_ca_fallback(),
                 session_telemetry,
                 models_manager: Arc::clone(&models_manager),
+                runtime_model_provider_routes,
                 tool_approvals: Mutex::new(ApprovalStore::default()),
                 guardian_rejection_circuit_breaker: Mutex::new(Default::default()),
                 runtime_handle: tokio::runtime::Handle::current(),
@@ -1294,15 +1296,17 @@ impl Session {
                 time_provider,
                 model_client: ModelClientRouter::new(
                     session_configuration.provider_id.clone(),
-                    ModelClient::new(
-                    Some(model_auth_manager),
+                    // Preserve provider-owned runtime state (for example a
+                    // process-private data-plane capability). Reconstructing
+                    // from `provider.info()` would intentionally lose it.
+                    ModelClient::new_with_provider(
+                    Arc::clone(&session_configuration.provider),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
                     } else {
                         AgentIdentityAuthPolicy::JwtOnly
                     },
                     thread_id,
-                    session_configuration.provider.info().clone(),
                     session_configuration.session_source.clone(),
                     session_configuration.originator.clone(),
                     config.model_verbosity,

@@ -25,3 +25,4 @@ pub use provider::ProviderCapabilities;
 pub use provider::RemoteCompactionSupport;
 pub use provider::SharedModelProvider;
 pub use provider::create_model_provider;
+pub use provider::create_private_openai_loopback_model_provider;

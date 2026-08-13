@@ -157,3 +157,47 @@ async fn overlay_can_be_added_replaced_and_removed_without_rebuilding_the_manage
     assert!(manager.replace_catalog_overlay(None).await);
     assert_eq!(manager.get_remote_models().await, bundled.models);
 }
+
+#[tokio::test]
+async fn runtime_overlay_is_independent_and_takes_precedence_over_configured_overlay() {
+    let bundled = bundled_models_response().expect("bundled model catalog should parse");
+    let mut configured = bundled.models[0].clone();
+    configured.slug = "shared-tag".to_string();
+    configured.display_name = "Configured".to_string();
+    let mut runtime = configured.clone();
+    runtime.display_name = "Runtime".to_string();
+    let manager = with_catalog_overlay(
+        Arc::new(StaticModelsManager::new(None, bundled)),
+        Some(ModelsResponse {
+            models: vec![configured.clone()],
+        }),
+    );
+
+    assert!(
+        manager.replace_runtime_catalog_overlay(Some(ModelsResponse {
+            models: vec![runtime.clone()],
+        }))
+    );
+    assert_eq!(
+        manager
+            .get_remote_models()
+            .await
+            .into_iter()
+            .find(|model| model.slug == "shared-tag"),
+        Some(runtime.clone())
+    );
+    assert!(
+        !manager.replace_runtime_catalog_overlay(Some(ModelsResponse {
+            models: vec![runtime],
+        }))
+    );
+    assert!(manager.replace_runtime_catalog_overlay(None));
+    assert_eq!(
+        manager
+            .get_remote_models()
+            .await
+            .into_iter()
+            .find(|model| model.slug == "shared-tag"),
+        Some(configured)
+    );
+}

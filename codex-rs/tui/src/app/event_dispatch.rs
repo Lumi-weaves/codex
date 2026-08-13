@@ -1317,6 +1317,184 @@ impl App {
             AppEvent::OpenAllModelsPopup { models } => {
                 self.chat_widget.open_all_models_popup(models);
             }
+            AppEvent::BeginProviderAccountManage => {
+                self.begin_provider_account_manage(app_server);
+            }
+            AppEvent::ProviderAccountsLoaded { result } => match result {
+                Ok(response) => self.chat_widget.show_provider_accounts(response),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not load provider accounts: {error}")),
+            },
+            AppEvent::OpenProviderAccountActions {
+                account,
+                expected_revision,
+            } => {
+                self.chat_widget
+                    .open_provider_account_actions(account, expected_revision);
+            }
+            AppEvent::OpenProviderApiKeyReplacementPrompt {
+                account,
+                expected_revision,
+            } => {
+                self.chat_widget
+                    .open_provider_api_key_replacement_prompt(account, expected_revision);
+            }
+            AppEvent::SubmitProviderApiKeyReplacement {
+                account_id,
+                expected_revision,
+                api_key,
+            } => {
+                self.replace_provider_api_key(app_server, account_id, expected_revision, api_key);
+            }
+            AppEvent::ProviderApiKeyReplacementCompleted { result } => {
+                self.chat_widget.finish_provider_api_key_replacement(result);
+            }
+            AppEvent::PreviewProviderAccountRemoval { account_id } => {
+                self.preview_provider_account_removal(app_server, account_id);
+            }
+            AppEvent::ProviderAccountRemovalPreviewCompleted { result } => {
+                self.chat_widget
+                    .show_provider_account_removal_preview(result);
+            }
+            AppEvent::SubmitProviderAccountRemoval {
+                account_id,
+                expected_revision,
+            } => {
+                self.remove_provider_account(app_server, account_id, expected_revision);
+            }
+            AppEvent::ProviderAccountRemovalCompleted { result } => {
+                self.chat_widget.finish_provider_account_removal(result);
+            }
+            AppEvent::OpenCompatibleProviderIdPrompt => {
+                self.chat_widget.open_compatible_provider_id_prompt();
+            }
+            AppEvent::OpenCompatibleProviderDisplayNamePrompt { provider_id } => {
+                self.chat_widget
+                    .open_compatible_provider_display_name_prompt(provider_id);
+            }
+            AppEvent::OpenCompatibleProviderBaseUrlPrompt {
+                provider_id,
+                provider_display_name,
+            } => {
+                self.chat_widget
+                    .open_compatible_provider_base_url_prompt(provider_id, provider_display_name);
+            }
+            AppEvent::OpenProviderApiKeyLabelPrompt { config } => {
+                self.chat_widget.open_provider_api_key_label_prompt(config);
+            }
+            AppEvent::OpenProviderApiKeySecretPrompt { config, user_label } => {
+                self.chat_widget
+                    .open_provider_api_key_secret_prompt(config, user_label);
+            }
+            AppEvent::SubmitProviderApiKey {
+                config,
+                user_label,
+                api_key,
+            } => {
+                self.submit_provider_api_key(app_server, config, user_label, api_key);
+            }
+            AppEvent::ProviderApiKeyAddCompleted { result } => {
+                self.chat_widget.finish_provider_api_key_add(result);
+            }
+            AppEvent::OpenProviderOAuthLabelPrompt => {
+                self.chat_widget.open_provider_oauth_label_prompt();
+            }
+            AppEvent::SubmitProviderOAuthLogin {
+                user_label,
+                account_id,
+            } => {
+                self.submit_provider_oauth_login(app_server, user_label, account_id);
+            }
+            AppEvent::ProviderOAuthLoginStarted { result } => {
+                self.chat_widget.show_provider_oauth_login(result);
+            }
+            AppEvent::ProviderOAuthLoginFinished { result } => {
+                self.chat_widget.finish_provider_oauth_login(result);
+            }
+            AppEvent::CancelProviderOAuthLogin { login_id } => {
+                self.cancel_provider_oauth_login(app_server, login_id);
+            }
+            AppEvent::ProviderOAuthLoginCancelCompleted { result } => {
+                if let Err(error) = result {
+                    self.chat_widget
+                        .add_error_message(format!("Could not cancel provider login: {error}"));
+                }
+            }
+            AppEvent::OpenModelRouteTagPrompt {
+                display_name,
+                selected_model,
+            } => {
+                self.chat_widget
+                    .open_model_route_tag_prompt(display_name, selected_model);
+            }
+            AppEvent::BeginModelRouteCreate { draft } => {
+                self.begin_model_route_create(app_server, draft);
+            }
+            AppEvent::ModelRouteAccountChoicesLoaded { draft, result } => match result {
+                Ok(choices) => self
+                    .chat_widget
+                    .show_model_route_account_choices(draft, choices),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not prepare model route: {error}")),
+            },
+            AppEvent::SubmitModelRouteCreate {
+                draft,
+                choices,
+                account,
+            } => {
+                self.submit_model_route_create(app_server, draft, choices, account);
+            }
+            AppEvent::ModelRouteCreateCompleted { result } => {
+                self.chat_widget.finish_model_route_create(result);
+            }
+            AppEvent::BeginModelRouteRetire { model_tag } => {
+                self.begin_model_route_retire(app_server, model_tag);
+            }
+            AppEvent::ModelRouteRetireCompleted { result } => {
+                self.chat_widget.finish_model_route_retire(result);
+            }
+            AppEvent::BeginModelRouteTargetManage { model_tag } => {
+                self.begin_model_route_target_manage(app_server, model_tag);
+            }
+            AppEvent::ModelRouteTargetEditorLoaded { result } => match result {
+                Ok(editor) => self.chat_widget.show_model_route_target_editor(editor),
+                Err(error) => self
+                    .chat_widget
+                    .add_error_message(format!("Could not load model targets: {error}")),
+            },
+            AppEvent::OpenModelRouteTargetActions {
+                editor,
+                target_index,
+            } => {
+                self.chat_widget
+                    .show_model_route_target_actions(editor, target_index);
+            }
+            AppEvent::OpenModelRouteTargetAccountChoices {
+                editor,
+                replace_index,
+            } => {
+                self.chat_widget
+                    .show_model_route_target_account_choices(editor, replace_index);
+            }
+            AppEvent::OpenModelRouteTargetUpstreamPrompt {
+                editor,
+                replace_index,
+                account,
+            } => {
+                self.chat_widget.open_model_route_target_upstream_prompt(
+                    editor,
+                    replace_index,
+                    account,
+                );
+            }
+            AppEvent::SubmitModelRouteTargets { editor, targets } => {
+                self.submit_model_route_targets(app_server, editor, targets);
+            }
+            AppEvent::ModelRouteTargetsCompleted { result } => {
+                self.chat_widget.finish_model_route_targets(result);
+            }
             AppEvent::OpenFullAccessConfirmation {
                 preset,
                 return_to_permissions,

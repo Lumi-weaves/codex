@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3401
+expression: popup
+---
+  Sign in with OpenAI
+  Open https://auth.openai.com/codex/device and enter code ABCD-EFGH; RichCodex is waiting in the background
+
+› 1. Cancel login  Stop this device authorization attempt
+
+  Press enter to confirm or esc to go back

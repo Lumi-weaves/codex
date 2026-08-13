@@ -1,5 +1,6 @@
 """Profile-driven exports of locally runnable Codex prototypes."""
 
+import hashlib
 import json
 import re
 import shutil
@@ -32,6 +33,17 @@ DEFAULT_PROFILE = (
 )
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "codex-rs" / "target" / "prototypes"
 PACKAGE_BUILDER = REPO_ROOT / "scripts" / "build_codex_package.py"
+MODEL_BACKEND_ROOT = REPO_ROOT / "richcodex-model-backend"
+MODEL_BACKEND_BUN = (
+    MODEL_BACKEND_ROOT
+    / "node_modules"
+    / ".bin"
+    / ("bun.exe" if sys.platform == "win32" else "bun")
+)
+MODEL_BACKEND_KERNEL_LOCK = (
+    REPO_ROOT / "codex-rs" / "app-server" / "richcodex-kernel.lock.json"
+)
+MODEL_BACKEND_KERNEL_SELECTION = MODEL_BACKEND_ROOT / "kernel-selection.json"
 
 
 @dataclass(frozen=True)
@@ -134,6 +146,30 @@ def prototype_entrypoint(profile: PrototypeProfile, package_dir: Path) -> Path:
     return package_dir / "bin" / variant.entrypoint_name(spec)
 
 
+def model_backend_entrypoint(profile: PrototypeProfile, package_dir: Path) -> Path:
+    spec = TARGET_SPECS[profile.resolved_target()]
+    return package_dir / "bin" / f"richcodex-model-backend{spec.exe_suffix}"
+
+
+def model_backend_builder_command(
+    profile: PrototypeProfile, package_dir: Path
+) -> list[str]:
+    resolved_target = profile.resolved_target()
+    if resolved_target != native_target():
+        raise RuntimeError(
+            "RichCodex model backend prototype export currently supports only "
+            "the native host target"
+        )
+    return [
+        str(MODEL_BACKEND_BUN),
+        "build",
+        "--compile",
+        "src/index.ts",
+        "--outfile",
+        str(model_backend_entrypoint(profile, package_dir)),
+    ]
+
+
 def export_profile(
     profile: PrototypeProfile,
     output_root: Path,
@@ -149,6 +185,11 @@ def export_profile(
 
     try:
         run(builder_command(profile, staging), cwd=REPO_ROOT, check=True)
+        run(
+            model_backend_builder_command(profile, staging),
+            cwd=MODEL_BACKEND_ROOT,
+            check=True,
+        )
         add_prototype_metadata(staging, profile)
         replace_directory(staging, destination)
     except BaseException:
@@ -171,7 +212,33 @@ def add_prototype_metadata(package_dir: Path, profile: PrototypeProfile) -> None
         "profile": profile.name,
         **source_provenance(),
     }
+    metadata["richcodexModelBackend"] = {
+        "entrypoint": model_backend_entrypoint(profile, package_dir).relative_to(
+            package_dir
+        ).as_posix(),
+        "kernel": model_backend_kernel_provenance(),
+    }
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+
+def model_backend_kernel_provenance() -> dict[str, object]:
+    payload = json.loads(MODEL_BACKEND_KERNEL_LOCK.read_text(encoding="utf-8"))
+    expected_selection = payload["selectionDigest"]
+    actual_selection = (
+        "sha256:"
+        + hashlib.sha256(MODEL_BACKEND_KERNEL_SELECTION.read_bytes()).hexdigest()
+    )
+    if payload["selectionManifest"] != "richcodex-model-backend/kernel-selection.json":
+        raise RuntimeError("RichCodex kernel selection manifest path is invalid")
+    if actual_selection != expected_selection:
+        raise RuntimeError("RichCodex kernel selection digest does not match its lock")
+    return {
+        "sourceRepository": payload["sourceRepository"],
+        "sourceCommit": payload["sourceCommit"],
+        "contentDigest": payload["archiveDigest"],
+        "selectionDigest": expected_selection,
+        "compositionVersion": payload["compositionVersion"],
+    }
 
 
 def source_provenance() -> dict[str, object]:

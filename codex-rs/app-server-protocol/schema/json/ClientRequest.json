@@ -2147,6 +2147,32 @@
     "ModelProviderCapabilitiesReadParams": {
       "type": "object"
     },
+    "ModelRouteTargetInput": {
+      "properties": {
+        "accountId": {
+          "type": "string"
+        },
+        "id": {
+          "description": "Preserve an existing target by its opaque RichCodex handle. Omit this field to allocate a new target.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "upstreamModelId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "providerId",
+        "upstreamModelId"
+      ],
+      "type": "object"
+    },
     "MultiAgentMode": {
       "description": "Controls the effective multi-agent delegation instructions for a turn. `custom` means the configured mode hint defines the policy instead of a built-in policy.",
       "oneOf": [

@@ -23,12 +23,24 @@ use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::ModelRoute;
+use codex_app_server_protocol::ModelRouteCreateResponse;
+use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ModelRouteSetTargetsResponse;
+use codex_app_server_protocol::ModelRouteTargetInput;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
+use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
+use codex_app_server_protocol::ProviderAccountListResponse;
+use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
+use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
@@ -189,6 +201,54 @@ pub(crate) enum KeymapCaptureMode {
 pub(crate) enum TranscriptExportDestination {
     Clipboard,
     File(PathBuf),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteDraft {
+    pub(crate) display_name: String,
+    pub(crate) model_tag: String,
+    pub(crate) selected_model: ModelPreset,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteAccountChoices {
+    pub(crate) expected_revision: String,
+    pub(crate) semantic_model: String,
+    pub(crate) upstream_model_id: String,
+    pub(crate) accounts: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRouteTargetEditorState {
+    pub(crate) expected_revision: String,
+    pub(crate) route: ModelRoute,
+    pub(crate) accounts: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderApiKeyConfig {
+    pub(crate) provider_id: String,
+    pub(crate) provider_display_name: String,
+    pub(crate) api_base_url: String,
+}
+
+/// Secret-bearing provider input with deliberately redacted event diagnostics.
+pub(crate) struct ProviderApiKey(String);
+
+impl ProviderApiKey {
+    pub(crate) fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Debug for ProviderApiKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -871,6 +931,196 @@ pub(crate) enum AppEvent {
     /// Open the full model picker (non-auto models).
     OpenAllModelsPopup {
         models: Vec<ModelPreset>,
+    },
+
+    /// Load the provider plane from the model picker's explicit `p` control.
+    BeginProviderAccountManage,
+
+    /// Present the current safe provider-account projection.
+    ProviderAccountsLoaded {
+        result: Result<ProviderAccountListResponse, String>,
+    },
+
+    OpenProviderAccountActions {
+        account: ProviderAccount,
+        expected_revision: String,
+    },
+
+    OpenProviderApiKeyReplacementPrompt {
+        account: ProviderAccount,
+        expected_revision: String,
+    },
+
+    SubmitProviderApiKeyReplacement {
+        account_id: String,
+        expected_revision: String,
+        api_key: ProviderApiKey,
+    },
+
+    ProviderApiKeyReplacementCompleted {
+        result: Result<ProviderAccountReplaceApiKeyResponse, String>,
+    },
+
+    PreviewProviderAccountRemoval {
+        account_id: String,
+    },
+
+    ProviderAccountRemovalPreviewCompleted {
+        result: Result<ProviderAccountRemovalPreviewResponse, String>,
+    },
+
+    SubmitProviderAccountRemoval {
+        account_id: String,
+        expected_revision: String,
+    },
+
+    ProviderAccountRemovalCompleted {
+        result: Result<ProviderAccountRemoveResponse, String>,
+    },
+
+    /// Start the compatible-provider wizard by collecting a stable provider ID.
+    OpenCompatibleProviderIdPrompt,
+
+    /// Continue the compatible-provider wizard with its user-facing name.
+    OpenCompatibleProviderDisplayNamePrompt {
+        provider_id: String,
+    },
+
+    /// Continue the compatible-provider wizard with its Responses API base URL.
+    OpenCompatibleProviderBaseUrlPrompt {
+        provider_id: String,
+        provider_display_name: String,
+    },
+
+    /// Continue an API-key account wizard by collecting a safe account label.
+    OpenProviderApiKeyLabelPrompt {
+        config: ProviderApiKeyConfig,
+    },
+
+    /// Continue the API-key account wizard after accepting its display label.
+    OpenProviderApiKeySecretPrompt {
+        config: ProviderApiKeyConfig,
+        user_label: String,
+    },
+
+    /// Submit one write-only API key to the bundled provider plane.
+    SubmitProviderApiKey {
+        config: ProviderApiKeyConfig,
+        user_label: String,
+        api_key: ProviderApiKey,
+    },
+
+    /// Report the safe account projection returned after API-key persistence.
+    ProviderApiKeyAddCompleted {
+        result: Result<ProviderAccountAddApiKeyResponse, String>,
+    },
+
+    /// Start an additional backend-owned OpenAI device login.
+    OpenProviderOAuthLabelPrompt,
+
+    /// Submit the user-owned label for a new OpenAI OAuth account.
+    SubmitProviderOAuthLogin {
+        user_label: String,
+        account_id: Option<String>,
+    },
+
+    /// Present the safe verification URL and device code returned by the backend.
+    ProviderOAuthLoginStarted {
+        result: Result<ProviderAccountLogin, String>,
+    },
+
+    /// Finish one provider login after background status polling reaches a terminal state.
+    ProviderOAuthLoginFinished {
+        result: Result<ProviderAccountLogin, String>,
+    },
+
+    /// Cancel an in-flight provider login by its opaque local handle.
+    CancelProviderOAuthLogin {
+        login_id: String,
+    },
+
+    /// Report only cancellation request failures; terminal state arrives through polling.
+    ProviderOAuthLoginCancelCompleted {
+        result: Result<(), String>,
+    },
+
+    /// Load one managed route plus safe provider accounts for target editing.
+    BeginModelRouteTargetManage {
+        model_tag: String,
+    },
+
+    /// Present an ordered target editor after the model plane has been read.
+    ModelRouteTargetEditorLoaded {
+        result: Result<ModelRouteTargetEditorState, String>,
+    },
+
+    /// Present actions for one existing target.
+    OpenModelRouteTargetActions {
+        editor: ModelRouteTargetEditorState,
+        target_index: usize,
+    },
+
+    /// Choose an account for a new target or for replacing one existing binding.
+    OpenModelRouteTargetAccountChoices {
+        editor: ModelRouteTargetEditorState,
+        replace_index: Option<usize>,
+    },
+
+    /// Collect the upstream model ID for the selected account binding.
+    OpenModelRouteTargetUpstreamPrompt {
+        editor: ModelRouteTargetEditorState,
+        replace_index: Option<usize>,
+        account: ProviderAccount,
+    },
+
+    /// Atomically replace a route's complete ordered target list.
+    SubmitModelRouteTargets {
+        editor: ModelRouteTargetEditorState,
+        targets: Vec<ModelRouteTargetInput>,
+    },
+
+    /// Report target mutation completion after catalog publication.
+    ModelRouteTargetsCompleted {
+        result: Result<ModelRouteSetTargetsResponse, String>,
+    },
+
+    /// Continue the RichCodex route wizard after the display name is accepted.
+    OpenModelRouteTagPrompt {
+        display_name: String,
+        selected_model: ModelPreset,
+    },
+
+    /// Load the current route revision and provider accounts without blocking terminal input.
+    BeginModelRouteCreate {
+        draft: ModelRouteDraft,
+    },
+
+    /// Present the account picker after the route plane has been read.
+    ModelRouteAccountChoicesLoaded {
+        draft: ModelRouteDraft,
+        result: Result<ModelRouteAccountChoices, String>,
+    },
+
+    /// Create one account-bound target behind a new stable model tag.
+    SubmitModelRouteCreate {
+        draft: ModelRouteDraft,
+        choices: ModelRouteAccountChoices,
+        account: ProviderAccount,
+    },
+
+    /// Report completion only after app-server has published the resulting catalog.
+    ModelRouteCreateCompleted {
+        result: Result<ModelRouteCreateResponse, String>,
+    },
+
+    /// Resolve and retire one managed model tag at the latest route revision.
+    BeginModelRouteRetire {
+        model_tag: String,
+    },
+
+    /// Report completion only after app-server has published the retired tombstone.
+    ModelRouteRetireCompleted {
+        result: Result<ModelRouteRetireResponse, String>,
     },
 
     /// Open the confirmation prompt before enabling full access mode.

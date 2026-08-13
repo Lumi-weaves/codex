@@ -1308,6 +1308,9 @@ pub enum EventMsg {
     /// Model routing changed from the requested model to a different model.
     ModelReroute(ModelRerouteEvent),
 
+    /// Secret-free route resolution receipt emitted by the bundled RichCodex backend.
+    RichCodexExecutionReceipt(RichCodexExecutionReceiptEvent),
+
     /// Backend recommends additional account verification for this turn.
     ModelVerification(ModelVerificationEvent),
 
@@ -1960,6 +1963,16 @@ pub struct ModelRerouteEvent {
     pub from_model: String,
     pub to_model: String,
     pub reason: ModelRerouteReason,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct RichCodexExecutionReceiptEvent {
+    pub model_tag: String,
+    pub resolved_model: String,
+    pub provider_id: String,
+    pub account_id: String,
+    pub target_id: String,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]

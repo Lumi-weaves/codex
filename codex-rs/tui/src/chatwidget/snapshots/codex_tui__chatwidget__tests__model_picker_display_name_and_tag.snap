@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3195
+expression: popup
+---
+  Select Model and Effort
+  Display names map to stable model tags; routing stays behind the tag.
+
+› 1. Research Max (current)  tag: research-max · Routed by RichCodex
+
+  Enter select  ·  i add route  ·  d retire route  ·  Esc close

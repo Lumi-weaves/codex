@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "contract": "richcodex-slice-3-openai-codex-responses-routing-v1",
+  "upstream": {
+    "repository": "https://github.com/lidge-jun/opencodex",
+    "commit": "cbbfdd8773e68a5dc2391ddeb32f33a225373c1a",
+    "archiveDigest": "sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78",
+    "license": "MIT"
+  },
+  "selectedSources": [
+    {
+      "path": "src/codex/auth-collision.ts",
+      "symbols": ["CodexTokens","readCodexTokensResult"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/oauth/chatgpt.ts",
+      "symbols": ["decodeJwtPayload","extractAccountId"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/codex/account-store.ts",
+      "symbols": ["secure-persistence","atomic-write-and-owned-store-invariants","refreshCodexAccountToken"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/adapters/openai-responses.ts",
+      "symbols": ["FORWARD_HEADERS","OAuth-passthrough-responses-endpoint"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/codex/quota.ts",
+      "symbols": ["parseUpstreamQuotaHeaders","missing-evidence-does-not-imply-reset"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/codex/routing.ts",
+      "symbols": ["explicit-priority-before-runtime-evidence","cooldown-and-fallback"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/types.ts",
+      "symbols": ["CodexAccountCredentials","CodexAccountCredentialRecord"],
+      "disposition": "shape-adapted"
+    }
+  ],
+  "excludedSurfaces": ["native-main-auth","opencodex-config-root","web-management-api","ocx-cli","generic-oauth-store","service-and-updater","opencodex-http-shell","opencodex-request-adapter-stack"]
+}

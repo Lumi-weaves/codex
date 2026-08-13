@@ -5367,6 +5367,26 @@
           "properties": {
             "method": {
               "enum": [
+                "model/executionReceipt"
+              ],
+              "title": "Model/executionReceiptNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/RichCodexExecutionReceiptNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Model/executionReceiptNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "model/verification"
               ],
               "title": "Model/verificationNotificationMethod",
@@ -13979,6 +13999,103 @@
         "title": "ModelReroutedNotification",
         "type": "object"
       },
+      "ModelRoute": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "modelTag": {
+            "type": "string"
+          },
+          "retired": {
+            "type": "boolean"
+          },
+          "semanticModel": {
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/definitions/v2/ModelRouteTarget"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "displayName",
+          "modelTag",
+          "retired",
+          "semanticModel",
+          "targets"
+        ],
+        "type": "object"
+      },
+      "ModelRouteTarget": {
+        "properties": {
+          "accountId": {
+            "description": "Opaque RichCodex account handle; never an upstream provider identity.",
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ModelRouteTargetStatus"
+          },
+          "upstreamModelId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "id",
+          "priority",
+          "providerId",
+          "status",
+          "upstreamModelId"
+        ],
+        "type": "object"
+      },
+      "ModelRouteTargetInput": {
+        "properties": {
+          "accountId": {
+            "type": "string"
+          },
+          "id": {
+            "description": "Preserve an existing target by its opaque RichCodex handle. Omit this field to allocate a new target.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "upstreamModelId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "providerId",
+          "upstreamModelId"
+        ],
+        "type": "object"
+      },
+      "ModelRouteTargetStatus": {
+        "enum": [
+          "unverified",
+          "reauthenticationRequired"
+        ],
+        "type": "string"
+      },
       "ModelSafetyBufferingUpdatedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -15941,6 +16058,206 @@
         ],
         "type": "object"
       },
+      "ProviderAccount": {
+        "properties": {
+          "addedAt": {
+            "description": "Unix timestamp in seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "credentialKind": {
+            "$ref": "#/definitions/v2/ProviderAccountCredentialKind"
+          },
+          "id": {
+            "description": "Opaque local identifier. This is not the upstream provider account id.",
+            "type": "string"
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ProviderAccountStatus"
+          },
+          "userLabel": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addedAt",
+          "credentialKind",
+          "id",
+          "providerId",
+          "status",
+          "userLabel"
+        ],
+        "type": "object"
+      },
+      "ProviderAccountCredentialKind": {
+        "enum": [
+          "oauth",
+          "apiKey"
+        ],
+        "type": "string"
+      },
+      "ProviderAccountLogin": {
+        "description": "Safe projection of a backend-owned login lifecycle.",
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ProviderAccount"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "catalogRevision": {
+            "type": "string"
+          },
+          "desiredStateRevision": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "description": "Unix timestamp in seconds when the device code expires.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ProviderAccountLoginFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "loginId": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ProviderAccountLoginStatus"
+          },
+          "userCode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verificationUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "catalogRevision",
+          "desiredStateRevision",
+          "expiresAt",
+          "loginId",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ProviderAccountLoginFailure": {
+        "enum": [
+          "expired",
+          "unavailable",
+          "invalidCredential",
+          "accountAlreadyExists",
+          "accountLimitReached",
+          "accountNotFound",
+          "credentialKindMismatch",
+          "accountIdentityMismatch",
+          "storeUnavailable"
+        ],
+        "type": "string"
+      },
+      "ProviderAccountLoginStatus": {
+        "enum": [
+          "awaitingUser",
+          "exchanging",
+          "completed",
+          "failed",
+          "cancelled"
+        ],
+        "type": "string"
+      },
+      "ProviderAccountProvider": {
+        "properties": {
+          "accountCount": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "displayName": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ProviderAccountProviderStatus"
+          }
+        },
+        "required": [
+          "accountCount",
+          "displayName",
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ProviderAccountProviderStatus": {
+        "enum": [
+          "ready",
+          "needsAccount"
+        ],
+        "type": "string"
+      },
+      "ProviderAccountRemovalTarget": {
+        "properties": {
+          "displayName": {
+            "type": "string"
+          },
+          "modelTag": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "retired": {
+            "type": "boolean"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "upstreamModelId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "displayName",
+          "modelTag",
+          "priority",
+          "retired",
+          "targetId",
+          "upstreamModelId"
+        ],
+        "type": "object"
+      },
+      "ProviderAccountStatus": {
+        "enum": [
+          "ready",
+          "verificationRequired",
+          "reauthenticationRequired"
+        ],
+        "type": "string"
+      },
       "RateLimitReachedType": {
         "enum": [
           "rate_limit_reached",
@@ -17648,6 +17965,50 @@
             "type": "object"
           }
         ]
+      },
+      "RichCodexExecutionReceiptNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "accountId": {
+            "description": "Opaque RichCodex-owned account handle, never an upstream account identity.",
+            "type": "string"
+          },
+          "attempt": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "modelTag": {
+            "type": "string"
+          },
+          "providerId": {
+            "type": "string"
+          },
+          "resolvedModel": {
+            "type": "string"
+          },
+          "targetId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          },
+          "turnId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "accountId",
+          "attempt",
+          "modelTag",
+          "providerId",
+          "resolvedModel",
+          "targetId",
+          "threadId",
+          "turnId"
+        ],
+        "title": "RichCodexExecutionReceiptNotification",
+        "type": "object"
       },
       "SandboxMode": {
         "enum": [

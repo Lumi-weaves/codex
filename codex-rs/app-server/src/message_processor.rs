@@ -33,8 +33,10 @@ use crate::request_processors::GitRequestProcessor;
 use crate::request_processors::InitializeRequestProcessor;
 use crate::request_processors::MarketplaceRequestProcessor;
 use crate::request_processors::McpRequestProcessor;
+use crate::request_processors::ModelRouteRequestProcessor;
 use crate::request_processors::PluginRequestProcessor;
 use crate::request_processors::ProcessExecRequestProcessor;
+use crate::request_processors::ProviderAccountRequestProcessor;
 use crate::request_processors::RemoteControlRequestProcessor;
 use crate::request_processors::SearchRequestProcessor;
 use crate::request_processors::ThreadGoalRequestProcessor;
@@ -66,6 +68,7 @@ use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
 use codex_chatgpt::workspace_settings;
 use codex_code_mode::CodeModeSessionProvider;
+use codex_core::RuntimeModelProviderRoutes;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
@@ -110,6 +113,8 @@ pub(crate) struct MessageProcessor {
     catalog_processor: CatalogRequestProcessor,
     command_exec_processor: CommandExecRequestProcessor,
     process_exec_processor: ProcessExecRequestProcessor,
+    provider_account_processor: ProviderAccountRequestProcessor,
+    model_route_processor: ModelRouteRequestProcessor,
     config_processor: ConfigRequestProcessor,
     environment_processor: EnvironmentRequestProcessor,
     external_agent_config_processor: ExternalAgentConfigRequestProcessor,
@@ -224,6 +229,9 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) rpc_transport: AppServerRpcTransport,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
+    pub(crate) richcodex_backend: Option<crate::richcodex_backend::RichCodexBackendClient>,
+    pub(crate) richcodex_initial_model_routes: Vec<crate::richcodex_backend::ModelSummary>,
+    pub(crate) richcodex_runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
 }
 
 impl MessageProcessor {
@@ -249,6 +257,9 @@ impl MessageProcessor {
             rpc_transport,
             remote_control_handle,
             plugin_startup_tasks,
+            richcodex_backend,
+            richcodex_initial_model_routes,
+            richcodex_runtime_model_provider_routes,
         } = args;
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
@@ -318,16 +329,22 @@ impl MessageProcessor {
                     thread_state_manager.clone(),
                 )),
             );
+            let manager = match richcodex_runtime_model_provider_routes.clone() {
+                Some(routes) => manager.with_runtime_model_provider_routes(routes),
+                None => manager,
+            };
             match code_mode_session_provider {
                 Some(provider) => manager.with_code_mode_session_provider(provider),
                 None => manager,
             }
         });
         let models_manager = thread_manager.get_models_manager();
-        let model_list_catalog = Arc::new(ModelListCatalog::new(
+        let model_list_catalog = Arc::new(ModelListCatalog::new_with_runtime_routes(
             models_manager,
             config.http_client_factory(),
             outgoing.clone(),
+            &richcodex_initial_model_routes,
+            richcodex_runtime_model_provider_routes,
         ));
         let models_refresh_worker = crate::models_refresh_worker::spawn(&model_list_catalog);
         thread_manager
@@ -385,7 +402,7 @@ impl MessageProcessor {
             config: Arc::clone(&config),
             config_manager: config_manager.clone(),
             workspace_settings_cache: Arc::clone(&workspace_settings_cache),
-            model_list_catalog,
+            model_list_catalog: model_list_catalog.clone(),
         });
         let command_exec_processor = CommandExecRequestProcessor::new(
             arg0_paths.clone(),
@@ -435,6 +452,10 @@ impl MessageProcessor {
             on_effective_plugins_changed,
         );
         let remote_control_processor = RemoteControlRequestProcessor::new(remote_control_handle);
+        let provider_account_processor =
+            ProviderAccountRequestProcessor::new(richcodex_backend.clone());
+        let model_route_processor =
+            ModelRouteRequestProcessor::new(richcodex_backend, model_list_catalog);
         let search_processor = SearchRequestProcessor::new(outgoing.clone());
         let thread_goal_processor = ThreadGoalRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -520,6 +541,8 @@ impl MessageProcessor {
             catalog_processor,
             command_exec_processor,
             process_exec_processor,
+            provider_account_processor,
+            model_route_processor,
             config_processor,
             environment_processor,
             external_agent_config_processor,
@@ -1298,6 +1321,49 @@ impl MessageProcessor {
             }
             ClientRequest::ModelList { params, .. } => {
                 self.catalog_processor.model_list(params).await
+            }
+            ClientRequest::ProviderAccountList { params, .. } => {
+                self.provider_account_processor.list(params).await
+            }
+            ClientRequest::ProviderAccountImport { params, .. } => {
+                self.provider_account_processor.import(params).await
+            }
+            ClientRequest::ProviderAccountAddApiKey { params, .. } => {
+                self.provider_account_processor.add_api_key(params).await
+            }
+            ClientRequest::ProviderAccountReplaceApiKey { params, .. } => {
+                self.provider_account_processor
+                    .replace_api_key(params)
+                    .await
+            }
+            ClientRequest::ProviderAccountRemovalPreview { params, .. } => {
+                self.provider_account_processor
+                    .removal_preview(params)
+                    .await
+            }
+            ClientRequest::ProviderAccountRemove { params, .. } => {
+                self.provider_account_processor.remove(params).await
+            }
+            ClientRequest::ProviderAccountLoginStart { params, .. } => {
+                self.provider_account_processor.login_start(params).await
+            }
+            ClientRequest::ProviderAccountLoginStatus { params, .. } => {
+                self.provider_account_processor.login_status(params).await
+            }
+            ClientRequest::ProviderAccountLoginCancel { params, .. } => {
+                self.provider_account_processor.login_cancel(params).await
+            }
+            ClientRequest::ModelRouteRead { params, .. } => {
+                self.model_route_processor.read(params).await
+            }
+            ClientRequest::ModelRouteCreate { params, .. } => {
+                self.model_route_processor.create(params).await
+            }
+            ClientRequest::ModelRouteSetTargets { params, .. } => {
+                self.model_route_processor.set_targets(params).await
+            }
+            ClientRequest::ModelRouteRetire { params, .. } => {
+                self.model_route_processor.retire(params).await
             }
             ClientRequest::ExperimentalFeatureList { params, .. } => {
                 self.catalog_processor

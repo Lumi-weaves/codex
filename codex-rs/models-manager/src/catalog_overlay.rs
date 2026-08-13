@@ -6,6 +6,7 @@ use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -14,20 +15,28 @@ use tokio::sync::TryLockError;
 #[derive(Debug)]
 struct CatalogOverlayModelsManager {
     inner: SharedModelsManager,
-    overlay: RwLock<Arc<Vec<ModelInfo>>>,
+    configured_overlay: RwLock<Arc<Vec<ModelInfo>>>,
+    runtime_overlay: RwLock<Arc<Vec<ModelInfo>>>,
 }
 
 impl CatalogOverlayModelsManager {
-    fn overlay(&self) -> Arc<Vec<ModelInfo>> {
-        self.overlay
+    fn configured_overlay(&self) -> Arc<Vec<ModelInfo>> {
+        self.configured_overlay
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn runtime_overlay(&self) -> Arc<Vec<ModelInfo>> {
+        self.runtime_overlay
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
 
     fn merge(&self, models: Vec<ModelInfo>) -> Vec<ModelInfo> {
-        let overlay = self.overlay();
-        merge_catalog(models, overlay.as_ref())
+        let models = merge_catalog(models, self.configured_overlay().as_ref());
+        merge_catalog(models, self.runtime_overlay().as_ref())
     }
 }
 
@@ -51,9 +60,15 @@ impl ModelsManager for CatalogOverlayModelsManager {
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'a, String> {
         Box::pin(async move {
-            let overlay = self.overlay();
+            let configured_overlay = self.configured_overlay();
+            let runtime_overlay = self.runtime_overlay();
             if let Some(model) = model
-                && overlay.iter().any(|candidate| candidate.slug == *model)
+                && (configured_overlay
+                    .iter()
+                    .any(|candidate| candidate.slug == *model)
+                    || runtime_overlay.iter().any(|candidate| {
+                        candidate.slug == *model && candidate.visibility == ModelVisibility::List
+                    }))
             {
                 return model.clone();
             }
@@ -128,7 +143,7 @@ impl ModelsManager for CatalogOverlayModelsManager {
         Box::pin(async move {
             let replacement = overlay.map_or_else(Vec::new, |overlay| overlay.models);
             let mut current = self
-                .overlay
+                .configured_overlay
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if current.as_ref() == &replacement {
@@ -138,6 +153,19 @@ impl ModelsManager for CatalogOverlayModelsManager {
             true
         })
     }
+
+    fn replace_runtime_catalog_overlay(&self, overlay: Option<ModelsResponse>) -> bool {
+        let replacement = overlay.map_or_else(Vec::new, |overlay| overlay.models);
+        let mut current = self
+            .runtime_overlay
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.as_ref() == &replacement {
+            return false;
+        }
+        *current = Arc::new(replacement);
+        true
+    }
 }
 
 pub fn with_catalog_overlay(
@@ -146,9 +174,10 @@ pub fn with_catalog_overlay(
 ) -> SharedModelsManager {
     Arc::new(CatalogOverlayModelsManager {
         inner: manager,
-        overlay: RwLock::new(Arc::new(
+        configured_overlay: RwLock::new(Arc::new(
             overlay.map_or_else(Vec::new, |overlay| overlay.models),
         )),
+        runtime_overlay: RwLock::new(Arc::new(Vec::new())),
     })
 }
 

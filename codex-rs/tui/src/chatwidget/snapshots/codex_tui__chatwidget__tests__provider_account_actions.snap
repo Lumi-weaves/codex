@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3429
+expression: popup
+---
+  Alibaba Primary
+  alibaba · opaque account handle
+
+› 1. Reauthenticate  Replace credentials without changing model targets
+  2. Remove account  Preview every affected model target first
+
+  Press enter to confirm or esc to go back

@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3236
+expression: popup
+---
+  Retire model route `gpt-5.4`?
+  Only the tag is hidden; accounts, targets, credentials, and running tasks are preserved.
+
+  1. Retire route  Hide this managed model tag
+› 2. Keep route    Return without changing the model plane
+
+  Press enter to confirm or esc to go back

@@ -226,6 +226,15 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     ) -> ModelsManagerFuture<'_, bool> {
         Box::pin(async { false })
     }
+
+    /// Atomically replace the process-scoped runtime catalog overlay.
+    ///
+    /// This layer is independent from the configured overlay so runtime-owned projections can be
+    /// refreshed without erasing user or managed configuration. Implementations that do not own
+    /// layered overlays leave the catalog unchanged and return `false`.
+    fn replace_runtime_catalog_overlay(&self, _overlay: Option<ModelsResponse>) -> bool {
+        false
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

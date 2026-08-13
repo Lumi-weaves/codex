@@ -1,0 +1,15 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3342
+expression: provider_popup
+---
+  Provider accounts
+  Credentials stay in the bundled backend; model routes use opaque account handles.
+
+› 1. Sign in with OpenAI          Add another ChatGPT/Codex account by device code
+  2. Add OpenAI API key           Create a write-only provider account
+  3. Add compatible API provider  Configure an HTTPS OpenAI-compatible Responses endpoint
+     Secondary Codex (disabled)   OpenAI OAuth · ready (disabled: Account details are read-only in
+                                  this first provider-plane slice.)
+
+  Press enter to confirm or esc to go back

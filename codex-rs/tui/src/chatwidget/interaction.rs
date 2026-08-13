@@ -8,6 +8,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.handle_model_route_key(key_event) {
+            return;
+        }
+
         if self.bottom_pane.has_active_view()
             && !matches!(
                 key_event,

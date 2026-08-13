@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3273
+expression: popup
+---
+  Choose a provider account
+  My Fast Model → my-fast-model · upstream model gpt-5.4
+
+› 1. Primary Codex           openai · verification pending
+     Needs Login (disabled)  openai · sign-in required (disabled: Reauthenticate this account
+                             before routing traffic to it.)
+
+  Press enter to confirm or esc to go back

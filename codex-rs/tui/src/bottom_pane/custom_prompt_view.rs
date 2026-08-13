@@ -33,6 +33,7 @@ pub(crate) struct CustomPromptView {
     title: String,
     placeholder: String,
     context_label: Option<String>,
+    mask_char: Option<char>,
     on_submit: PromptSubmitted,
 
     // UI state
@@ -60,12 +61,28 @@ impl CustomPromptView {
             title,
             placeholder,
             context_label,
+            mask_char: None,
             on_submit,
             textarea,
             textarea_state: RefCell::new(TextAreaState::default()),
             paste_burst: PasteBurst::default(),
             completion: None,
         }
+    }
+
+    /// Build a write-only prompt whose entered text is masked in the terminal.
+    ///
+    /// The submitted callback still receives the original value. Callers must
+    /// keep it in secret-bearing request types with redacted `Debug` output.
+    pub(crate) fn new_secret(
+        title: String,
+        placeholder: String,
+        context_label: Option<String>,
+        on_submit: PromptSubmitted,
+    ) -> Self {
+        let mut view = Self::new(title, placeholder, String::new(), context_label, on_submit);
+        view.mask_char = Some('*');
+        view
     }
 
     fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) {
@@ -232,7 +249,17 @@ impl Renderable for CustomPromptView {
                     height: text_area_height,
                 };
                 let mut state = self.textarea_state.borrow_mut();
-                StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
+                if let Some(mask_char) = self.mask_char {
+                    self.textarea
+                        .render_ref_masked(textarea_rect, buf, &mut state, mask_char);
+                } else {
+                    StatefulWidgetRef::render_ref(
+                        &(&self.textarea),
+                        textarea_rect,
+                        buf,
+                        &mut state,
+                    );
+                }
                 if self.textarea.text().is_empty() {
                     Paragraph::new(Line::from(self.placeholder.clone().dim()))
                         .render(textarea_rect, buf);

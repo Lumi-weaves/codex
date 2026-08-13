@@ -81,6 +81,8 @@ pub enum ResponseEvent {
     /// Emitted when the server includes `OpenAI-Model` on the stream response.
     /// This can differ from the requested model when backend safety routing applies.
     ServerModel(String),
+    /// Safe RichCodex route resolution metadata carried by the private backend.
+    RichCodexExecutionReceipt(RichCodexExecutionReceipt),
     /// Emitted when the server recommends additional account verification.
     ModelVerifications(Vec<ModelVerification>),
     /// Emitted when the server includes moderation metadata for first-party turn presentation.
@@ -120,6 +122,17 @@ pub enum ResponseEvent {
     },
     RateLimits(RateLimitSnapshot),
     ModelsEtag(String),
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RichCodexExecutionReceipt {
+    pub model_tag: String,
+    pub resolved_model: String,
+    pub provider_id: String,
+    pub account_id: String,
+    pub target_id: String,
+    pub attempt: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

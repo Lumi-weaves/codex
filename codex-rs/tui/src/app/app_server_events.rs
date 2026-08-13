@@ -171,6 +171,22 @@ impl App {
                 );
                 return;
             }
+            ServerNotification::ModelListUpdated(notification) => {
+                match app_server_client.list_models().await {
+                    Ok(models) => {
+                        self.model_catalog.replace_models(models.clone());
+                        self.chat_widget.refresh_model_picker_if_open(models);
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            revision = notification.revision,
+                            error = %err,
+                            "failed to refresh model catalog after update notification"
+                        );
+                    }
+                }
+                return;
+            }
             _ => {}
         }
 

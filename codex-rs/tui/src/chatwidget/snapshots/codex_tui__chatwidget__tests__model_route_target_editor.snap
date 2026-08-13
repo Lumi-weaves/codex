@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3264
+expression: popup
+---
+  Targets for GPT-5.4 Routed
+  tag: gpt-5.4 · earlier targets are tried first
+
+› 1. Add target     Append another provider account/model binding
+  2. Primary Codex  priority 1 · openai · gpt-5.4 · unverified
+  3. Secondary API  priority 2 · openai · gpt-5.4-fast · sign-in required
+
+  Press enter to confirm or esc to go back

@@ -3387,6 +3387,48 @@
       },
       "type": "object"
     },
+    "RichCodexExecutionReceiptNotification": {
+      "properties": {
+        "accountId": {
+          "description": "Opaque RichCodex-owned account handle, never an upstream account identity.",
+          "type": "string"
+        },
+        "attempt": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "modelTag": {
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "resolvedModel": {
+          "type": "string"
+        },
+        "targetId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "accountId",
+        "attempt",
+        "modelTag",
+        "providerId",
+        "resolvedModel",
+        "targetId",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "SandboxPolicy": {
       "oneOf": [
         {
@@ -7056,6 +7098,26 @@
         "params"
       ],
       "title": "Model/reroutedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "model/executionReceipt"
+          ],
+          "title": "Model/executionReceiptNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/RichCodexExecutionReceiptNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Model/executionReceiptNotification",
       "type": "object"
     },
     {

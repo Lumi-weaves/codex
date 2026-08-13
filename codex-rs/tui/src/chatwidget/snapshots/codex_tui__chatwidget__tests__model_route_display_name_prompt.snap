@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3209
+expression: popup
+---
+▌ Add RichCodex model route — display name
+▌ Semantic model: gpt-5.4
+▌
+▌ GPT-5.4
+
+Press enter to confirm or esc to go back

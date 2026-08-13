@@ -1,12 +1,16 @@
 use crate::error_code::invalid_request;
 use crate::models::model_from_preset;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::richcodex_backend::ModelSummary;
+use crate::richcodex_model_routes::ModelRouteProjectionError;
+use crate::richcodex_model_routes::project_model_routes;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::Model;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
 use codex_app_server_protocol::ModelListUpdatedNotification;
 use codex_app_server_protocol::ServerNotification;
+use codex_core::RuntimeModelProviderRoutes;
 use codex_http_client::HttpClientFactory;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
@@ -42,14 +46,43 @@ pub(crate) struct ModelListCatalog {
     outgoing: Arc<OutgoingMessageSender>,
     next_observation: AtomicU64,
     published: Mutex<PublishedModelList>,
+    runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
 }
 
 impl ModelListCatalog {
+    #[cfg(test)]
     pub(crate) fn new(
         models_manager: SharedModelsManager,
         http_client_factory: HttpClientFactory,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Self {
+        Self::new_with_runtime_routes(models_manager, http_client_factory, outgoing, &[], None)
+    }
+
+    pub(crate) fn new_with_runtime_routes(
+        models_manager: SharedModelsManager,
+        http_client_factory: HttpClientFactory,
+        outgoing: Arc<OutgoingMessageSender>,
+        routes: &[ModelSummary],
+        runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
+    ) -> Self {
+        if !routes.is_empty() {
+            match models_manager
+                .try_get_remote_models()
+                .map_err(|_| ModelRouteProjectionError)
+                .and_then(|candidates| project_model_routes(&candidates, routes))
+            {
+                Ok(overlay) => {
+                    models_manager.replace_runtime_catalog_overlay(Some(overlay));
+                    replace_active_runtime_tags(runtime_model_provider_routes.as_ref(), routes);
+                }
+                Err(ModelRouteProjectionError) => {
+                    tracing::warn!(
+                        "preserving the native model catalog because stored RichCodex routes could not be projected"
+                    );
+                }
+            }
+        }
         let models = models_manager
             .try_list_models()
             .unwrap_or_default()
@@ -66,6 +99,7 @@ impl ModelListCatalog {
                 revision: 1,
                 last_observation: 0,
             }),
+            runtime_model_provider_routes,
         }
     }
 
@@ -87,6 +121,36 @@ impl ModelListCatalog {
         }
         self.observe(RefreshStrategy::Offline).await;
         true
+    }
+
+    pub(crate) async fn validate_route_semantic_model(
+        &self,
+        semantic_model: &str,
+    ) -> Result<(), ModelRouteProjectionError> {
+        self.models_manager
+            .get_remote_models()
+            .await
+            .iter()
+            .any(|candidate| candidate.slug == semantic_model)
+            .then_some(())
+            .ok_or(ModelRouteProjectionError)
+    }
+
+    pub(crate) async fn publish_runtime_routes(
+        &self,
+        routes: &[ModelSummary],
+    ) -> Result<bool, ModelRouteProjectionError> {
+        let candidates = self.models_manager.get_remote_models().await;
+        let overlay = project_model_routes(&candidates, routes)?;
+        let changed = self
+            .models_manager
+            .replace_runtime_catalog_overlay(Some(overlay));
+        replace_active_runtime_tags(self.runtime_model_provider_routes.as_ref(), routes);
+        if !changed {
+            return Ok(false);
+        }
+        self.observe(RefreshStrategy::Offline).await;
+        Ok(true)
     }
 
     async fn observe(&self, strategy: RefreshStrategy) -> ModelListSnapshot {
@@ -121,6 +185,20 @@ impl ModelListCatalog {
             .send_server_notification(ServerNotification::ModelListUpdated(notification))
             .await;
         snapshot
+    }
+}
+
+fn replace_active_runtime_tags(
+    runtime_routes: Option<&RuntimeModelProviderRoutes>,
+    routes: &[ModelSummary],
+) {
+    if let Some(runtime_routes) = runtime_routes {
+        runtime_routes.replace_active_model_tags(
+            routes
+                .iter()
+                .filter(|route| !route.retired)
+                .map(|route| route.model_tag.clone()),
+        );
     }
 }
 
