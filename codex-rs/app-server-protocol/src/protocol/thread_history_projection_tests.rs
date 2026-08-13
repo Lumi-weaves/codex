@@ -193,6 +193,7 @@ fn ignores_legacy_abort_without_turn_id_and_context_only_records() {
         },
     )));
     let compacted = project(RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: String::new(),
         replacement_history: None,
         window_number: None,

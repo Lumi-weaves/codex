@@ -613,6 +613,7 @@ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
 
 fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> RolloutItem {
     RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: message.to_string(),
         replacement_history,
         window_number: Some(1),

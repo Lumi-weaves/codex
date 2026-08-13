@@ -7,6 +7,7 @@
 
 use std::fmt::Display;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -53,25 +54,28 @@ struct EnabledCompactionTraceContext {
 }
 
 /// One upstream request attempt made while computing a compaction checkpoint.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CompactionTraceAttempt {
     state: CompactionTraceAttemptState,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum CompactionTraceAttemptState {
     Disabled,
     Enabled(EnabledCompactionTraceAttempt),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct EnabledCompactionTraceAttempt {
     context: EnabledCompactionTraceContext,
     compaction_request_id: CompactionRequestId,
+    terminal_recorded: AtomicBool,
 }
 
 #[derive(Serialize)]
 struct TracedCompactionCompleted {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_id: Option<String>,
     output_items: Vec<JsonValue>,
 }
 
@@ -84,6 +88,24 @@ struct TracedCompactionCompleted {
 pub struct CompactionCheckpointTracePayload<'a> {
     pub input_history: &'a [ResponseItem],
     pub replacement_history: &'a [ResponseItem],
+    pub continuity: CompactionContinuityTracePayload<'a>,
+    pub window_number: Option<u64>,
+    pub first_window_id: Option<&'a str>,
+    pub previous_window_id: Option<&'a str>,
+    pub window_id: Option<&'a str>,
+}
+
+/// Content-free lifecycle facts stored beside a trace checkpoint.
+#[derive(Serialize)]
+pub struct CompactionContinuityTracePayload<'a> {
+    pub trigger: &'a str,
+    pub reason: &'a str,
+    pub implementation: &'a str,
+    pub phase: &'a str,
+    pub model: &'a str,
+    pub provider: &'a str,
+    pub reference_context_installed: bool,
+    pub world_state_baseline_installed: bool,
 }
 
 impl CompactionTraceContext {
@@ -122,18 +144,24 @@ impl CompactionTraceContext {
 
     /// Starts a new upstream attempt and records the exact compact endpoint request.
     pub fn start_attempt(&self, request: &impl Serialize) -> CompactionTraceAttempt {
+        let attempt = self.start_attempt_unrecorded();
+        attempt.record_started(request);
+        attempt
+    }
+
+    /// Starts an attempt whose exact request will be recorded after client lowering.
+    pub fn start_attempt_unrecorded(&self) -> CompactionTraceAttempt {
         let CompactionTraceContextState::Enabled(context) = &self.state else {
             return CompactionTraceAttempt::disabled();
         };
 
-        let attempt = CompactionTraceAttempt {
+        CompactionTraceAttempt {
             state: CompactionTraceAttemptState::Enabled(EnabledCompactionTraceAttempt {
                 context: context.clone(),
                 compaction_request_id: next_compaction_request_id(),
+                terminal_recorded: AtomicBool::new(false),
             }),
-        };
-        attempt.record_started(request);
-        attempt
+        }
     }
 
     /// Records the point where compacted history becomes the live thread history.
@@ -179,7 +207,7 @@ impl CompactionTraceAttempt {
         }
     }
 
-    fn record_started(&self, request: &impl Serialize) {
+    pub fn record_started(&self, request: &impl Serialize) {
         let CompactionTraceAttemptState::Enabled(attempt) = &self.state else {
             return;
         };
@@ -211,10 +239,24 @@ impl CompactionTraceAttempt {
     /// inference streams: traces are evidence, while normal ResponseItem
     /// serialization is shaped for future request construction.
     pub fn record_completed(&self, output_items: &[ResponseItem]) {
-        let CompactionTraceAttemptState::Enabled(attempt) = &self.state else {
+        self.record_completed_with_response_id(/*response_id*/ None, output_items);
+    }
+
+    /// Records a completed streaming compaction response and its transport continuation id.
+    pub fn record_stream_completed(&self, response_id: &str, output_items: &[ResponseItem]) {
+        self.record_completed_with_response_id(Some(response_id), output_items);
+    }
+
+    fn record_completed_with_response_id(
+        &self,
+        response_id: Option<&str>,
+        output_items: &[ResponseItem],
+    ) {
+        let Some(attempt) = self.take_terminal_attempt() else {
             return;
         };
         let response_payload = TracedCompactionCompleted {
+            response_id: response_id.map(str::to_owned),
             output_items: output_items.iter().map(trace_response_item_json).collect(),
         };
         let Some(response_payload) = write_json_payload_best_effort(
@@ -245,7 +287,7 @@ impl CompactionTraceAttempt {
 
     /// Records pre-response failures from the compact endpoint.
     pub fn record_failed(&self, error: impl Display) {
-        let CompactionTraceAttemptState::Enabled(attempt) = &self.state else {
+        let Some(attempt) = self.take_terminal_attempt() else {
             return;
         };
         append_with_context_best_effort(
@@ -256,6 +298,17 @@ impl CompactionTraceAttempt {
                 error: error.to_string(),
             },
         );
+    }
+
+    fn take_terminal_attempt(&self) -> Option<&EnabledCompactionTraceAttempt> {
+        let CompactionTraceAttemptState::Enabled(attempt) = &self.state else {
+            return None;
+        };
+        attempt
+            .terminal_recorded
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+            .then_some(attempt)
     }
 }
 

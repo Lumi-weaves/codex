@@ -2025,6 +2025,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
     let previous_window_id = Uuid::now_v7();
     let window_id = Uuid::now_v7();
     let rollout_items = vec![RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: String::new(),
         replacement_history: Some(replacement_history.clone()),
         window_number: Some(42),
@@ -3812,6 +3813,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
             },
         )),
         RolloutItem::Compacted(CompactedItem {
+            continuity: None,
             message: "summary after compaction".to_string(),
             replacement_history: Some(compacted_history.clone()),
             window_number: Some(7),
@@ -12672,6 +12674,7 @@ async fn sample_rollout(
     live_history.replace(rebuilt1);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: summary1.to_string(),
         replacement_history: None,
         window_number: Some(window_number),
@@ -12719,6 +12722,7 @@ async fn sample_rollout(
     live_history.replace(rebuilt2);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: summary2.to_string(),
         replacement_history: None,
         window_number: Some(window_number),

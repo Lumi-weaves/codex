@@ -210,6 +210,7 @@ fn started(turn_id: &str) -> RolloutItem {
 
 fn compacted(replacement_history: Vec<ResponseItem>) -> RolloutItem {
     RolloutItem::Compacted(CompactedItem {
+        continuity: None,
         message: "checkpoint".to_string(),
         replacement_history: Some(replacement_history),
         window_number: Some(1),
@@ -1292,6 +1293,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
         SessionSource::SubAgent(SubAgentSource::Other("test".to_string())),
         vec![
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: "superseded checkpoint".repeat(1024),
                 replacement_history: Some(Vec::new()),
                 window_number: Some(1),
@@ -1300,6 +1302,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 window_id: None,
             }),
             RolloutItem::Compacted(CompactedItem {
+                continuity: None,
                 message: "latest checkpoint".to_string(),
                 replacement_history: Some(vec![ResponseItem::Message {
                     id: None,

@@ -66,12 +66,13 @@ impl TraceReducer {
         } else {
             None
         };
+        let mut consumed_pending_compaction = false;
         let request_item_ids = if let Some(previous_response_id) = previous_response_id {
             // Streaming follow-up requests can send only the new input plus a
             // `previous_response_id`. The trace model still exposes the full
             // model-visible input, so rebuild the omitted prefix from the
             // previous request and response before reducing this delta.
-            let previous_items = self
+            let previous_inference_items = self
                 .rollout
                 .inference_calls
                 .values()
@@ -84,10 +85,32 @@ impl TraceReducer {
                     ids.extend(inference.response_item_ids.clone());
                     ids
                 });
-            let Some(mut item_ids) = previous_items else {
-                bail!(
-                    "incremental inference request {inference_call_id} referenced unknown previous_response_id {previous_response_id}"
-                );
+            let mut item_ids = if let Some(previous_items) = previous_inference_items {
+                previous_items
+            } else {
+                // A remote-v2 compaction response can become the WebSocket predecessor for the
+                // next ordinary request. Its provider response is not an inference transcript;
+                // the installed replacement checkpoint is the authoritative baseline.
+                let matching_compaction =
+                    self.rollout.compaction_requests.values().find(|request| {
+                        request.thread_id == thread_id
+                            && request.response_id.as_deref() == Some(previous_response_id)
+                    });
+                let Some(pending) = self.pending_compaction_replacement_item_ids.get(thread_id)
+                else {
+                    bail!(
+                        "incremental inference request {inference_call_id} referenced unknown previous_response_id {previous_response_id}"
+                    );
+                };
+                if matching_compaction
+                    .is_none_or(|request| request.compaction_id != pending.compaction_id)
+                {
+                    bail!(
+                        "incremental inference request {inference_call_id} referenced unknown previous_response_id {previous_response_id}"
+                    );
+                }
+                consumed_pending_compaction = true;
+                pending.replacement_item_ids.clone()
             };
             let delta_item_ids = self.reconcile_conversation_items(
                 items,
@@ -113,13 +136,15 @@ impl TraceReducer {
                     produced_by: Vec::new(),
                     start_index: 0,
                     mode: ReconcileMode::FullSnapshot,
-                    snapshot_override: post_compaction_snapshot.as_deref(),
+                    snapshot_override: post_compaction_snapshot
+                        .as_ref()
+                        .map(|pending| pending.replacement_item_ids.as_slice()),
                 },
             )?
         };
 
         self.append_thread_conversation_items(thread_id, &request_item_ids)?;
-        if post_compaction_snapshot.is_some() {
+        if post_compaction_snapshot.is_some() || consumed_pending_compaction {
             self.pending_compaction_replacement_item_ids
                 .remove(thread_id);
         }

@@ -28,6 +28,8 @@ use codex_analytics::CompactionStatus;
 use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
+use codex_history::CompactedItem;
+use codex_history::CompactionContinuity;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -44,6 +46,9 @@ use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout_trace::CompactionCheckpointTracePayload;
+use codex_rollout_trace::CompactionContinuityTracePayload;
+use codex_rollout_trace::CompactionTraceContext;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
@@ -80,6 +85,67 @@ pub(crate) struct CompactedHistoryMetadata {
     pub(crate) message: String,
     pub(crate) window_number: u64,
     pub(crate) window_ids: AutoCompactWindowIds,
+    pub(crate) continuity: Option<CompactionContinuity>,
+}
+
+pub(crate) fn compaction_continuity(
+    compaction_id: String,
+    metadata: CompactionTurnMetadata,
+    turn_context: &TurnContext,
+    reference_context_installed: bool,
+    world_state_baseline_installed: bool,
+) -> CompactionContinuity {
+    CompactionContinuity {
+        compaction_id,
+        trigger: serialized_compaction_fact(metadata.trigger()),
+        reason: serialized_compaction_fact(metadata.reason()),
+        implementation: serialized_compaction_fact(metadata.implementation()),
+        phase: serialized_compaction_fact(metadata.phase()),
+        model: turn_context.model_info.slug.clone(),
+        provider: turn_context.provider.info().name.clone(),
+        reference_context_installed,
+        world_state_baseline_installed,
+    }
+}
+
+fn serialized_compaction_fact(value: impl serde::Serialize) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Records installation only after the persisted, ID-assigned replacement becomes live history.
+pub(crate) fn record_installed_compaction(
+    trace: &CompactionTraceContext,
+    input_history: Option<&[ResponseItem]>,
+    installed: &CompactedItem,
+) {
+    let (Some(input_history), Some(replacement_history), Some(continuity)) = (
+        input_history,
+        installed.replacement_history.as_deref(),
+        installed.continuity.as_ref(),
+    ) else {
+        return;
+    };
+    trace.record_installed(&CompactionCheckpointTracePayload {
+        input_history,
+        replacement_history,
+        continuity: CompactionContinuityTracePayload {
+            trigger: &continuity.trigger,
+            reason: &continuity.reason,
+            implementation: &continuity.implementation,
+            phase: &continuity.phase,
+            model: &continuity.model,
+            provider: &continuity.provider,
+            reference_context_installed: continuity.reference_context_installed,
+            world_state_baseline_installed: continuity.world_state_baseline_installed,
+        },
+        window_number: installed.window_number,
+        first_window_id: installed.first_window_id.as_deref(),
+        previous_window_id: installed.previous_window_id.as_deref(),
+        window_id: installed.window_id.as_deref(),
+    });
 }
 
 pub(crate) async fn build_compaction_initial_context(
@@ -240,7 +306,9 @@ async fn run_compact_task_inner_impl(
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
-    let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+    let context_compaction_item = ContextCompactionItem::new();
+    let compaction_id = context_compaction_item.id.clone();
+    let compaction_item = TurnItem::ContextCompaction(context_compaction_item);
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
@@ -366,6 +434,13 @@ async fn run_compact_task_inner_impl(
             Some(turn_context.to_turn_context_item())
         }
     };
+    let continuity = compaction_continuity(
+        compaction_id,
+        compaction_metadata,
+        turn_context.as_ref(),
+        reference_context_item.is_some(),
+        world_state_baseline.is_some(),
+    );
     sess.replace_compacted_history(
         new_history,
         reference_context_item,
@@ -374,6 +449,7 @@ async fn run_compact_task_inner_impl(
             message: summary_text,
             window_number,
             window_ids,
+            continuity: Some(continuity),
         },
     )
     .await;

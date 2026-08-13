@@ -3554,10 +3554,11 @@ impl Session {
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
-    ) {
+    ) -> CompactedItem {
         let items = Self::assign_missing_response_item_ids(Cow::Owned(items)).into_owned();
         let compacted_item = CompactedItem {
             message: metadata.message,
+            continuity: metadata.continuity,
             replacement_history: Some(items.clone()),
             window_number: Some(metadata.window_number),
             first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
@@ -3579,7 +3580,7 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
+        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item.clone())])
             .await;
         // Persist the baseline after the replacement history that established it.
         if let Some(world_state_item) = world_state_item {
@@ -3594,6 +3595,7 @@ impl Session {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
         }
+        compacted_item
     }
 
     async fn persist_rollout_response_items(&self, items: &[ResponseItem]) {
@@ -3976,6 +3978,7 @@ impl Session {
                 message: String::new(),
                 window_number,
                 window_ids,
+                continuity: None,
             },
         )
         .await;

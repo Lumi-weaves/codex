@@ -41,6 +41,11 @@ pub enum RolloutItem {
 #[derive(Serialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct CompactedItem {
     pub message: String,
+    /// Stable identity and small durable index for the compaction operation that installed this
+    /// checkpoint. Detailed request/response evidence belongs in rollout traces; this record keeps
+    /// the persisted history joinable across resume and fork even when tracing was disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<CompactionContinuity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replacement_history: Option<Vec<ResponseItem>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -51,6 +56,24 @@ pub struct CompactedItem {
     pub previous_window_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+}
+
+/// Durable, content-free index for one installed compaction checkpoint.
+///
+/// The exact replacement is already carried by [`CompactedItem::replacement_history`]. These
+/// fields describe why that replacement was selected and which canonical context was installed
+/// beside it without duplicating model-visible content into another receipt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct CompactionContinuity {
+    pub compaction_id: String,
+    pub trigger: String,
+    pub reason: String,
+    pub implementation: String,
+    pub phase: String,
+    pub model: String,
+    pub provider: String,
+    pub reference_context_installed: bool,
+    pub world_state_baseline_installed: bool,
 }
 
 impl From<CompactedItem> for ResponseItem {
@@ -86,6 +109,7 @@ impl<'de> Deserialize<'de> for CompactedItem {
         };
         Ok(Self {
             message: serialized.message,
+            continuity: serialized.continuity,
             replacement_history: serialized.replacement_history,
             window_number,
             first_window_id: serialized.first_window_id,
@@ -98,6 +122,8 @@ impl<'de> Deserialize<'de> for CompactedItem {
 #[derive(Deserialize)]
 struct SerializedCompactedItem {
     message: String,
+    #[serde(default)]
+    continuity: Option<CompactionContinuity>,
     #[serde(default)]
     replacement_history: Option<Vec<ResponseItem>>,
     #[serde(default)]

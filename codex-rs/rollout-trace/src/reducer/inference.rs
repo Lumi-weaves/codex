@@ -67,6 +67,10 @@ impl TraceReducer {
             );
         }
 
+        let pending_compaction_id = self
+            .pending_compaction_replacement_item_ids
+            .get(&thread_id)
+            .map(|pending| pending.compaction_id.clone());
         let request_item_ids = self.reduce_inference_request(
             wall_time_unix_ms,
             &inference_call_id,
@@ -80,8 +84,8 @@ impl TraceReducer {
         self.rollout.inference_calls.insert(
             inference_call_id.clone(),
             InferenceCall {
-                inference_call_id,
-                thread_id,
+                inference_call_id: inference_call_id.clone(),
+                thread_id: thread_id.clone(),
                 codex_turn_id,
                 execution: ExecutionWindow {
                     started_at_unix_ms: wall_time_unix_ms,
@@ -102,6 +106,16 @@ impl TraceReducer {
                 raw_response_payload_id: None,
             },
         );
+        if let Some(compaction_id) = pending_compaction_id
+            && !self
+                .pending_compaction_replacement_item_ids
+                .contains_key(&thread_id)
+        {
+            let Some(compaction) = self.rollout.compactions.get_mut(&compaction_id) else {
+                bail!("continued compaction {compaction_id} was not installed");
+            };
+            compaction.continuation_inference_call_id = Some(inference_call_id);
+        }
         Ok(())
     }
 
