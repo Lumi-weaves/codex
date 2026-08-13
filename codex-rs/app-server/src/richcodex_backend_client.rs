@@ -9,6 +9,7 @@ use super::read_message;
 use super::read_shutdown_complete;
 use super::write_message;
 use serde::Deserialize;
+use serde::Serialize;
 use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
@@ -82,9 +83,26 @@ pub(crate) struct ModelRouteCreateRequest {
     pub upstream_model_id: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ModelRouteTargetRequest {
+    pub id: Option<String>,
+    pub provider_id: String,
+    pub account_id: String,
+    pub upstream_model_id: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ModelRouteSetTargetsRequest {
+    pub expected_revision: u64,
+    pub model_tag: String,
+    pub targets: Vec<ModelRouteTargetRequest>,
+}
+
 #[derive(Clone, Copy)]
 enum ModelRouteMutationKind {
     Create,
+    SetTargets,
     Retire,
 }
 
@@ -171,6 +189,11 @@ enum BackendCommand {
     CreateModelRoute {
         request_id: String,
         request: ModelRouteCreateRequest,
+        response: oneshot::Sender<Result<ModelRouteMutationResult, RichCodexBackendClientError>>,
+    },
+    SetModelRouteTargets {
+        request_id: String,
+        request: ModelRouteSetTargetsRequest,
         response: oneshot::Sender<Result<ModelRouteMutationResult, RichCodexBackendClientError>>,
     },
     RetireModelRoute {
@@ -327,6 +350,24 @@ impl RichCodexBackendClient {
             .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
     }
 
+    pub(crate) async fn set_model_route_targets(
+        &self,
+        request: ModelRouteSetTargetsRequest,
+    ) -> Result<ModelRouteMutationResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::SetModelRouteTargets {
+                request_id: self.request_id(),
+                request,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
     pub(super) async fn shutdown(&self) -> io::Result<()> {
         let (response, received) = oneshot::channel();
         self.commands
@@ -442,6 +483,23 @@ async fn run_backend_actor(
             } => {
                 let result =
                     request_model_route_create(&mut stdin, &mut stdout, &request_id, &request)
+                        .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::SetModelRouteTargets {
+                request_id,
+                request,
+                response,
+            } => {
+                let result =
+                    request_model_route_set_targets(&mut stdin, &mut stdout, &request_id, &request)
                         .await;
                 let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
                 let _ = response.send(result);
@@ -764,6 +822,30 @@ where
     read_model_route_mutation(reader, request_id, ModelRouteMutationKind::Retire).await
 }
 
+pub(super) async fn request_model_route_set_targets<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    request: &ModelRouteSetTargetsRequest,
+) -> Result<ModelRouteMutationResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ModelRouteSetTargets {
+            request_id,
+            expected_revision: request.expected_revision,
+            model_tag: &request.model_tag,
+            targets: &request.targets,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    read_model_route_mutation(reader, request_id, ModelRouteMutationKind::SetTargets).await
+}
+
 async fn read_model_route_mutation<R>(
     reader: &mut R,
     request_id: &str,
@@ -792,6 +874,16 @@ where
             catalog_revision,
             route,
         } if matches!(kind, ModelRouteMutationKind::Retire)
+            && returned_request_id == request_id =>
+        {
+            Some((desired_state_revision, catalog_revision, route))
+        }
+        BackendMessage::ModelRouteSetTargetsResult {
+            request_id: returned_request_id,
+            desired_state_revision,
+            catalog_revision,
+            route,
+        } if matches!(kind, ModelRouteMutationKind::SetTargets)
             && returned_request_id == request_id =>
         {
             Some((desired_state_revision, catalog_revision, route))

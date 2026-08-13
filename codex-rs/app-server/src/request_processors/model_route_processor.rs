@@ -4,6 +4,8 @@ use crate::model_list_catalog::ModelListCatalog;
 use crate::richcodex_backend::ModelRouteCreateRequest;
 use crate::richcodex_backend::ModelRouteMutationResult;
 use crate::richcodex_backend::ModelRouteReadResult;
+use crate::richcodex_backend::ModelRouteSetTargetsRequest;
+use crate::richcodex_backend::ModelRouteTargetRequest;
 use crate::richcodex_backend::ModelSummary;
 use crate::richcodex_backend::ModelTargetSummary;
 use crate::richcodex_backend::RichCodexBackendClient;
@@ -17,6 +19,8 @@ use codex_app_server_protocol::ModelRouteReadParams;
 use codex_app_server_protocol::ModelRouteReadResponse;
 use codex_app_server_protocol::ModelRouteRetireParams;
 use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ModelRouteSetTargetsParams;
+use codex_app_server_protocol::ModelRouteSetTargetsResponse;
 use codex_app_server_protocol::ModelRouteTarget;
 use codex_app_server_protocol::ModelRouteTargetStatus;
 use std::sync::Arc;
@@ -107,6 +111,59 @@ impl ModelRouteRequestProcessor {
             .map_err(model_route_error)?;
         self.publish_backend_routes(backend).await?;
         Ok(Some(model_route_retire_response(result).into()))
+    }
+
+    pub(crate) async fn set_targets(
+        &self,
+        params: ModelRouteSetTargetsParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let expected_revision = parse_revision(&params.expected_revision)?;
+        validate_model_tag(&params.model_tag)?;
+        if params.targets.is_empty() || params.targets.len() > 64 {
+            return Err(invalid_params(
+                "targets must contain between 1 and 64 entries",
+            ));
+        }
+        let mut target_ids = std::collections::HashSet::new();
+        let mut bindings = std::collections::HashSet::new();
+        let mut targets = Vec::with_capacity(params.targets.len());
+        for target in params.targets {
+            if target.provider_id != "openai" {
+                return Err(invalid_params("providerId is not supported by this build"));
+            }
+            if let Some(id) = target.id.as_deref() {
+                validate_text(id, 80, "target id")?;
+                if !target_ids.insert(id.to_string()) {
+                    return Err(invalid_params("target id is duplicated"));
+                }
+            }
+            validate_text(&target.account_id, 80, "accountId")?;
+            validate_trimmed_text(&target.upstream_model_id, 512, "upstreamModelId")?;
+            if !bindings.insert((
+                target.provider_id.clone(),
+                target.account_id.clone(),
+                target.upstream_model_id.clone(),
+            )) {
+                return Err(invalid_params("target binding is duplicated"));
+            }
+            targets.push(ModelRouteTargetRequest {
+                id: target.id,
+                provider_id: target.provider_id,
+                account_id: target.account_id,
+                upstream_model_id: target.upstream_model_id,
+            });
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        let result = backend
+            .set_model_route_targets(ModelRouteSetTargetsRequest {
+                expected_revision,
+                model_tag: params.model_tag,
+                targets,
+            })
+            .await
+            .map_err(model_route_error)?;
+        self.publish_backend_routes(backend).await?;
+        Ok(Some(model_route_set_targets_response(result).into()))
     }
 
     async fn publish_backend_routes(
@@ -216,6 +273,16 @@ fn model_route_create_response(result: ModelRouteMutationResult) -> ModelRouteCr
 
 fn model_route_retire_response(result: ModelRouteMutationResult) -> ModelRouteRetireResponse {
     ModelRouteRetireResponse {
+        route: model_route(result.route),
+        desired_state_revision: result.desired_state_revision.to_string(),
+        catalog_revision: result.catalog_revision.to_string(),
+    }
+}
+
+fn model_route_set_targets_response(
+    result: ModelRouteMutationResult,
+) -> ModelRouteSetTargetsResponse {
+    ModelRouteSetTargetsResponse {
         route: model_route(result.route),
         desired_state_revision: result.desired_state_revision.to_string(),
         catalog_revision: result.catalog_revision.to_string(),

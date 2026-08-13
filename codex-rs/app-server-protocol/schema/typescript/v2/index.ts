@@ -286,6 +286,7 @@ export type { ModelRerouteReason } from "./ModelRerouteReason";
 export type { ModelReroutedNotification } from "./ModelReroutedNotification";
 export type { ModelRoute } from "./ModelRoute";
 export type { ModelRouteTarget } from "./ModelRouteTarget";
+export type { ModelRouteTargetInput } from "./ModelRouteTargetInput";
 export type { ModelRouteTargetStatus } from "./ModelRouteTargetStatus";
 export type { ModelSafetyBufferingUpdatedNotification } from "./ModelSafetyBufferingUpdatedNotification";
 export type { ModelServiceTier } from "./ModelServiceTier";

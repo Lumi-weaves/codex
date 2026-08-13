@@ -14,7 +14,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 5 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 6 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -161,7 +161,7 @@ export type HeadlessModelRouteReadResultMessage = {
 };
 
 export type HeadlessModelRouteMutationResultMessage = {
-  readonly type: "modelRouteCreateResult" | "modelRouteRetireResult";
+  readonly type: "modelRouteCreateResult" | "modelRouteSetTargetsResult" | "modelRouteRetireResult";
   readonly requestId: string;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
@@ -212,6 +212,18 @@ type HeadlessInboundMessage =
     readonly requestId: string;
     readonly expectedRevision: number;
     readonly modelTag: string;
+  }
+  | {
+    readonly type: "modelRouteSetTargets";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly modelTag: string;
+    readonly targets: readonly {
+      readonly id?: string;
+      readonly providerId: "openai";
+      readonly accountId: string;
+      readonly upstreamModelId: string;
+    }[];
   };
 
 type EncodedInputLine =
@@ -352,6 +364,10 @@ function protocolError(code: HeadlessProtocolErrorCode): HeadlessProtocolErrorMe
 
 function ownKeys(value: Record<string, unknown>): string[] {
   return Object.keys(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function hasExactlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -499,6 +515,52 @@ function parseInboundMessage(text: string):
         providerId: "openai",
         accountId: record.accountId,
         upstreamModelId: record.upstreamModelId,
+      },
+    };
+  }
+  if (record.type === "modelRouteSetTargets") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "modelTag", "targets"])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.modelTag, 80)
+      || record.modelTag.trim() !== record.modelTag
+      || !Array.isArray(record.targets)
+      || record.targets.length === 0
+      || record.targets.length > 64
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    const targets = record.targets.flatMap(target => {
+      if (
+        !isRecord(target)
+        || ownKeys(target).some(key => !["id", "providerId", "accountId", "upstreamModelId"].includes(key))
+        || target.id !== undefined && target.id !== null && !isBoundedOpaqueText(target.id, 80)
+        || target.providerId !== "openai"
+        || !isBoundedOpaqueText(target.accountId, 80)
+        || !isBoundedOpaqueText(target.upstreamModelId, 512)
+        || target.upstreamModelId.trim() !== target.upstreamModelId
+      ) return [];
+      return [{
+        ...(typeof target.id === "string" ? { id: target.id } : {}),
+        providerId: "openai" as const,
+        accountId: target.accountId,
+        upstreamModelId: target.upstreamModelId,
+      }];
+    });
+    if (targets.length !== record.targets.length) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: {
+        type: "modelRouteSetTargets",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        modelTag: record.modelTag,
+        targets,
       },
     };
   }
@@ -800,15 +862,19 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
               }
               const route = parsed.message.type === "modelRouteCreate"
                 ? modelPlaneStore.createModelRoute(parsed.message)
-                : modelPlaneStore.retireModelRoute(
-                    parsed.message.modelTag,
-                    parsed.message.expectedRevision,
-                  );
+                : parsed.message.type === "modelRouteSetTargets"
+                  ? modelPlaneStore.setModelRouteTargets(parsed.message)
+                  : modelPlaneStore.retireModelRoute(
+                      parsed.message.modelTag,
+                      parsed.message.expectedRevision,
+                    );
               const snapshot = modelPlaneStore.snapshot();
               if (!await write({
                 type: parsed.message.type === "modelRouteCreate"
                   ? "modelRouteCreateResult"
-                  : "modelRouteRetireResult",
+                  : parsed.message.type === "modelRouteSetTargets"
+                    ? "modelRouteSetTargetsResult"
+                    : "modelRouteRetireResult",
                 requestId: parsed.message.requestId,
                 desiredStateRevision: snapshot.desiredStateRevision,
                 catalogRevision: snapshot.catalogRevision,

@@ -5,6 +5,7 @@ use codex_app_server_protocol::ModelRoute;
 use codex_app_server_protocol::ModelRouteCreateResponse;
 use codex_app_server_protocol::ModelRouteReadResponse;
 use codex_app_server_protocol::ModelRouteRetireResponse;
+use codex_app_server_protocol::ModelRouteSetTargetsResponse;
 use codex_app_server_protocol::ModelRouteTarget;
 use codex_app_server_protocol::ModelRouteTargetStatus;
 use codex_app_server_protocol::RequestId;
@@ -202,6 +203,40 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
             .any(|model| { model.model == "gpt-primary" && model.display_name == "GPT Primary" })
     );
 
+    let set_targets_id = server
+        .send_raw_request(
+            "modelRoute/targets/set",
+            Some(serde_json::json!({
+                "expectedRevision": "2",
+                "modelTag": "gpt-primary",
+                "targets": [
+                    {
+                        "id": null,
+                        "providerId": "openai",
+                        "accountId": "account-backup",
+                        "upstreamModelId": "gpt-primary-backup",
+                    },
+                    {
+                        "id": "target-created",
+                        "providerId": "openai",
+                        "accountId": "account-local",
+                        "upstreamModelId": "gpt-primary-revised",
+                    }
+                ],
+            })),
+        )
+        .await?;
+    let updated: ModelRouteSetTargetsResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(set_targets_id)).await??;
+    assert_eq!(updated.desired_state_revision, "3");
+    assert_eq!(updated.route.targets.len(), 2);
+    assert_eq!(updated.route.targets[0].id, "target-backup");
+    assert_eq!(updated.route.targets[0].priority, 0);
+    assert_eq!(updated.route.targets[1].id, "target-created");
+    assert_eq!(updated.route.targets[1].priority, 1);
+    let mut expected_retired_route = updated.route.clone();
+    expected_retired_route.retired = true;
+
     let conflict_id = server
         .send_raw_request(
             "modelRoute/create",
@@ -231,7 +266,7 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
         .send_raw_request(
             "modelRoute/retire",
             Some(serde_json::json!({
-                "expectedRevision": "2",
+                "expectedRevision": "3",
                 "modelTag": "gpt-primary",
             })),
         )
@@ -241,16 +276,9 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
     assert_eq!(
         retired,
         ModelRouteRetireResponse {
-            route: route(
-                "gpt-primary",
-                "GPT Primary",
-                true,
-                "gpt-5.6-luna",
-                "target-created",
-                "gpt-primary-2026-08-13",
-            ),
-            desired_state_revision: "3".to_string(),
-            catalog_revision: "3".to_string(),
+            route: expected_retired_route,
+            desired_state_revision: "4".to_string(),
+            catalog_revision: "4".to_string(),
         }
     );
     let model_list_id = server
@@ -287,6 +315,16 @@ async fn model_route_read_create_and_retire_round_trip_through_the_backend() -> 
             "upstreamModelId": "gpt-primary-2026-08-13",
         })
     );
+    let recorded_targets = std::fs::read_to_string(
+        codex_home
+            .path()
+            .join("richcodex/model-backend/model-route-set-targets.json"),
+    )?;
+    let recorded_targets: serde_json::Value = serde_json::from_str(&recorded_targets)?;
+    assert_eq!(recorded_targets["type"], "modelRouteSetTargets");
+    assert_eq!(recorded_targets["expectedRevision"], 2);
+    assert_eq!(recorded_targets["modelTag"], "gpt-primary");
+    assert_eq!(recorded_targets["targets"].as_array().unwrap().len(), 2);
     assert!(server.shutdown_gracefully().await?.success());
     Ok(())
 }
@@ -323,7 +361,7 @@ test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
 route_state=0
-printf '%s\n' '{"type":"ready","protocolVersion":5,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}'
+printf '%s\n' '{"type":"ready","protocolVersion":6,"instanceId":"fixture-routes","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -332,8 +370,10 @@ while IFS= read -r line; do
         printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":1,"catalogRevision":1,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]}]}\n' "$request_id"
       elif [ "$route_state" -eq 1 ]; then
         printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+      elif [ "$route_state" -eq 2 ]; then
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
       else
-        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}]}\n' "$request_id"
+        printf '{"type":"modelRouteReadResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"data":[{"modelTag":"gpt-existing","displayName":"GPT Existing","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-existing","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-existing","priority":0,"status":"unverified"}]},{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}]}\n' "$request_id"
       fi
       ;;
     *'"type":"modelRouteCreate"'*'"expectedRevision":0'*)
@@ -344,9 +384,14 @@ while IFS= read -r line; do
       route_state=1
       printf '{"type":"modelRouteCreateResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
       ;;
-    *'"type":"modelRouteRetire"'*)
+    *'"type":"modelRouteSetTargets"'*)
+      printf '%s\n' "$line" > "$state_root/model-route-set-targets.json"
       route_state=2
-      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-2026-08-13","priority":0,"status":"unverified"}]}}\n' "$request_id"
+      printf '{"type":"modelRouteSetTargetsResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
+      ;;
+    *'"type":"modelRouteRetire"'*)
+      route_state=3
+      printf '{"type":"modelRouteRetireResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"route":{"modelTag":"gpt-primary","displayName":"GPT Primary","retired":true,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-backup","providerId":"openai","accountId":"account-backup","upstreamModelId":"gpt-primary-backup","priority":0,"status":"unverified"},{"id":"target-created","providerId":"openai","accountId":"account-local","upstreamModelId":"gpt-primary-revised","priority":1,"status":"unverified"}]}}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

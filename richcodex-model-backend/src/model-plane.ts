@@ -164,11 +164,25 @@ export interface CreateModelRouteInput {
   readonly upstreamModelId: string;
 }
 
+export interface SetModelRouteTargetInput {
+  readonly id?: string;
+  readonly providerId: typeof OPENAI_PROVIDER_ID;
+  readonly accountId: string;
+  readonly upstreamModelId: string;
+}
+
+export interface SetModelRouteTargetsInput {
+  readonly expectedRevision: number;
+  readonly modelTag: string;
+  readonly targets: readonly SetModelRouteTargetInput[];
+}
+
 export interface ModelPlaneStore {
   snapshot(): ProviderAccountSnapshot;
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   addApiKeyAccount(apiKey: string, userLabel: string): SafeProviderAccount;
   createModelRoute(input: CreateModelRouteInput): SafeModelRoute;
+  setModelRouteTargets(input: SetModelRouteTargetsInput): SafeModelRoute;
   retireModelRoute(modelTag: string, expectedRevision: number): SafeModelRoute;
   resolveExecutionCandidates(modelTag: string): readonly ModelExecutionCandidate[];
   replaceOAuthCredential(
@@ -686,6 +700,26 @@ function validateCreateModelRouteInput(input: CreateModelRouteInput): void {
   }
 }
 
+function validateSetModelRouteTargetsInput(input: SetModelRouteTargetsInput): void {
+  if (
+    !Number.isSafeInteger(input.expectedRevision)
+    || input.expectedRevision < 0
+    || !isSafeText(input.modelTag, 80)
+    || input.modelTag.trim() !== input.modelTag
+    || input.targets.length === 0
+    || input.targets.length > PROVIDER_ACCOUNT_MAX_ROWS
+    || input.targets.some(target =>
+      target.id !== undefined && !isSafeText(target.id, 80)
+      || target.providerId !== OPENAI_PROVIDER_ID
+      || !isSafeText(target.accountId, 80)
+      || !isSafeText(target.upstreamModelId, 512)
+      || target.upstreamModelId.trim() !== target.upstreamModelId
+    )
+  ) {
+    throw new ModelPlaneError("invalid_request");
+  }
+}
+
 /** RichCodex-owned model-plane store; it never inspects native product homes. */
 export function createModelPlaneStore(
   stateRoot: string,
@@ -822,6 +856,61 @@ export function createModelPlaneStore(
       persistDocument(stateRoot, path, next);
       document = next;
       return safeModelRoute(document, tag, entry, now());
+    },
+    setModelRouteTargets(input: SetModelRouteTargetsInput): SafeModelRoute {
+      validateSetModelRouteTargetsInput(input);
+      if (input.expectedRevision !== document.desiredStateRevision) {
+        throw new ModelPlaneError("revision_conflict");
+      }
+      const tag = document.modelTags.find(candidate => candidate.id === input.modelTag);
+      const entry = document.displayEntries.find(candidate => candidate.modelTag === input.modelTag);
+      if (!tag || !entry) throw new ModelPlaneError("model_tag_not_found");
+      const accounts = new Map(document.accounts.map(account => [account.id, account]));
+      const currentTargets = new Map(tag.targets.map(target => [target.id, target]));
+      const occupiedIds = new Set(
+        document.modelTags.flatMap(candidate => candidate.targets.map(target => target.id)),
+      );
+      const selectedIds = new Set<string>();
+      const selectedBindings = new Set<string>();
+      const targets: StoredModelTarget[] = input.targets.map((target, priority) => {
+        const account = accounts.get(target.accountId);
+        if (!account || account.providerId !== target.providerId) {
+          throw new ModelPlaneError("account_unavailable");
+        }
+        const binding = `${target.providerId}\u0000${target.accountId}\u0000${target.upstreamModelId}`;
+        if (selectedBindings.has(binding)) throw new ModelPlaneError("invalid_request");
+        selectedBindings.add(binding);
+
+        let id = target.id;
+        if (id !== undefined) {
+          if (!currentTargets.has(id) || selectedIds.has(id)) {
+            throw new ModelPlaneError("invalid_request");
+          }
+        } else {
+          id = createTargetId();
+          if (!isSafeText(id, 80) || occupiedIds.has(id) || selectedIds.has(id)) {
+            throw new ModelPlaneError("store_unavailable");
+          }
+        }
+        selectedIds.add(id);
+        occupiedIds.add(id);
+        return {
+          id,
+          providerId: target.providerId,
+          accountId: target.accountId,
+          upstreamModelId: target.upstreamModelId,
+          priority,
+        };
+      });
+      const nextTag: StoredModelTag = { ...tag, targets };
+      const next = nextDocument(document, {
+        accounts: document.accounts,
+        modelTags: document.modelTags.map(candidate => candidate.id === tag.id ? nextTag : candidate),
+        displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeModelRoute(document, nextTag, entry, now());
     },
     retireModelRoute(modelTag: string, expectedRevision: number): SafeModelRoute {
       if (

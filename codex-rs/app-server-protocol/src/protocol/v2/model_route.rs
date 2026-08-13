@@ -77,6 +77,40 @@ pub struct ModelRouteCreateResponse {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct ModelRouteTargetInput {
+    /// Preserve an existing target by its opaque RichCodex handle. Omit this
+    /// field to allocate a new target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub id: Option<String>,
+    pub provider_id: String,
+    pub account_id: String,
+    pub upstream_model_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ModelRouteSetTargetsParams {
+    /// Opaque revision returned by a previous model-plane read or mutation.
+    pub expected_revision: String,
+    pub model_tag: String,
+    /// Complete ordered target list. Its array order becomes target priority.
+    pub targets: Vec<ModelRouteTargetInput>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ModelRouteSetTargetsResponse {
+    pub route: ModelRoute,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct ModelRouteRetireParams {
     pub expected_revision: String,
     pub model_tag: String,

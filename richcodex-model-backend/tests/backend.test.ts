@@ -121,6 +121,7 @@ function executionStore(
     importCodexAuthJson: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
     createModelRoute: () => { throw new Error("not used"); },
+    setModelRouteTargets: () => { throw new Error("not used"); },
     retireModelRoute: () => { throw new Error("not used"); },
     resolveExecutionCandidates: modelTag => modelTag === "my-fast-model" ? candidates : [],
     replaceOAuthCredential: onReplace,
@@ -396,7 +397,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 5,
+      protocolVersion: 6,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -658,6 +659,99 @@ describe("RichCodex headless backend composition root", () => {
     const serialized = JSON.stringify([...created.lines, ...retired.lines, ...restored.lines]);
     expect(serialized).not.toContain("refresh-route-account");
     expect(serialized).not.toContain("route-account");
+  });
+
+  test("atomically replaces ordered model targets while preserving explicit target identity", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-model-targets-"));
+    const stateRoot = join(root, "backend-state");
+    const accounts = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-primary-account",
+        apiKey: "sk-primary-target",
+        userLabel: "Primary API",
+      })}\n${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-secondary-account",
+        apiKey: "sk-secondary-target",
+        userLabel: "Secondary API",
+      })}\n`,
+      stateRoot,
+    );
+    const primaryAccountId = (accounts.lines[1] as { account: { id: string } }).account.id;
+    const secondaryAccountId = (accounts.lines[2] as { account: { id: string } }).account.id;
+    const created = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteCreate",
+        requestId: "create-target-route",
+        expectedRevision: 2,
+        modelTag: "ordered-route",
+        displayName: "Ordered Route",
+        semanticModel: "gpt-5.4",
+        providerId: "openai",
+        accountId: primaryAccountId,
+        upstreamModelId: "gpt-primary",
+      })}\n`,
+      stateRoot,
+    );
+    const originalTargetId = (created.lines[1] as {
+      route: { targets: [{ id: string }] };
+    }).route.targets[0].id;
+
+    const updated = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteSetTargets",
+        requestId: "set-ordered-targets",
+        expectedRevision: 3,
+        modelTag: "ordered-route",
+        targets: [
+          {
+            id: null,
+            providerId: "openai",
+            accountId: secondaryAccountId,
+            upstreamModelId: "gpt-secondary",
+          },
+          {
+            id: originalTargetId,
+            providerId: "openai",
+            accountId: primaryAccountId,
+            upstreamModelId: "gpt-primary-revised",
+          },
+        ],
+      })}\n${JSON.stringify({ type: "modelRouteRead", requestId: "read-ordered-targets" })}\n`,
+      stateRoot,
+    );
+
+    expect(updated.lines[1]).toMatchObject({
+      type: "modelRouteSetTargetsResult",
+      desiredStateRevision: 4,
+      catalogRevision: 4,
+      route: {
+        modelTag: "ordered-route",
+        targets: [
+          {
+            accountId: secondaryAccountId,
+            upstreamModelId: "gpt-secondary",
+            priority: 0,
+          },
+          {
+            id: originalTargetId,
+            accountId: primaryAccountId,
+            upstreamModelId: "gpt-primary-revised",
+            priority: 1,
+          },
+        ],
+      },
+    });
+    const newTargetId = (updated.lines[1] as {
+      route: { targets: [{ id: string }, { id: string }] };
+    }).route.targets[0].id;
+    expect(newTargetId).not.toBe(originalTargetId);
+    expect(updated.lines[2]).toMatchObject({
+      type: "modelRouteReadResult",
+      desiredStateRevision: 4,
+      data: [{ modelTag: "ordered-route", targets: [{ id: newTargetId }, { id: originalTargetId }] }],
+    });
   });
 
   test("rejects stale route creation without changing the model plane", async () => {

@@ -959,6 +959,12 @@ client_request_definitions! {
         serialization: global("richcodex-model-plane"),
         response: v2::ModelRouteCreateResponse,
     },
+    #[experimental("modelRoute/targets/set")]
+    ModelRouteSetTargets => "modelRoute/targets/set" {
+        params: v2::ModelRouteSetTargetsParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ModelRouteSetTargetsResponse,
+    },
     #[experimental("modelRoute/retire")]
     ModelRouteRetire => "modelRoute/retire" {
         params: v2::ModelRouteRetireParams,
@@ -4140,6 +4146,47 @@ mod tests {
                     "providerId": "openai",
                     "accountId": "account-local",
                     "upstreamModelId": "gpt-primary-2026-08-13"
+                }
+            })
+        );
+
+        let set_targets = ClientRequest::ModelRouteSetTargets {
+            request_id: request_id(),
+            params: v2::ModelRouteSetTargetsParams {
+                expected_revision: "8".to_string(),
+                model_tag: "gpt-primary".to_string(),
+                targets: vec![v2::ModelRouteTargetInput {
+                    id: Some("target-local".to_string()),
+                    provider_id: "openai".to_string(),
+                    account_id: "account-local".to_string(),
+                    upstream_model_id: "gpt-primary".to_string(),
+                }],
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&set_targets),
+            Some("modelRoute/targets/set")
+        );
+        assert_eq!(
+            set_targets.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(set_targets).unwrap(),
+            json!({
+                "id": 1,
+                "method": "modelRoute/targets/set",
+                "params": {
+                    "expectedRevision": "8",
+                    "modelTag": "gpt-primary",
+                    "targets": [{
+                        "id": "target-local",
+                        "providerId": "openai",
+                        "accountId": "account-local",
+                        "upstreamModelId": "gpt-primary"
+                    }]
                 }
             })
         );

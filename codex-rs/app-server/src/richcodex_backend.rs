@@ -24,6 +24,8 @@ use client::BackendOperationErrorCode;
 pub(crate) use client::ModelRouteCreateRequest;
 pub(crate) use client::ModelRouteMutationResult;
 pub(crate) use client::ModelRouteReadResult;
+pub(crate) use client::ModelRouteSetTargetsRequest;
+pub(crate) use client::ModelRouteTargetRequest;
 pub(crate) use client::ProviderAccountAddApiKeyResult;
 pub(crate) use client::ProviderAccountImportResult;
 pub(crate) use client::ProviderAccountListResult;
@@ -37,13 +39,15 @@ use client::request_model_route_read;
 #[cfg(test)]
 use client::request_model_route_retire;
 #[cfg(test)]
+use client::request_model_route_set_targets;
+#[cfg(test)]
 use client::request_provider_account_import;
 #[cfg(test)]
 use client::request_provider_account_list;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 5;
+const BACKEND_PROTOCOL_VERSION: u32 = 6;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -171,6 +175,12 @@ enum BackendMessage {
         catalog_revision: u64,
         route: ModelSummary,
     },
+    ModelRouteSetTargetsResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        route: ModelSummary,
+    },
     ModelRouteRetireResult {
         request_id: String,
         desired_state_revision: u64,
@@ -226,6 +236,12 @@ enum AppServerMessage<'a> {
         provider_id: &'a str,
         account_id: &'a str,
         upstream_model_id: &'a str,
+    },
+    ModelRouteSetTargets {
+        request_id: &'a str,
+        expected_revision: u64,
+        model_tag: &'a str,
+        targets: &'a [ModelRouteTargetRequest],
     },
     ModelRouteRetire {
         request_id: &'a str,
@@ -447,6 +463,7 @@ where
         | BackendMessage::ProviderAccountAddApiKeyResult { .. }
         | BackendMessage::ModelRouteReadResult { .. }
         | BackendMessage::ModelRouteCreateResult { .. }
+        | BackendMessage::ModelRouteSetTargetsResult { .. }
         | BackendMessage::ModelRouteRetireResult { .. }
         | BackendMessage::OperationError { .. } => Err(io::Error::new(
             io::ErrorKind::InvalidData,

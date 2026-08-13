@@ -1337,6 +1337,9 @@ impl MessageProcessor {
             ClientRequest::ModelRouteCreate { params, .. } => {
                 self.model_route_processor.create(params).await
             }
+            ClientRequest::ModelRouteSetTargets { params, .. } => {
+                self.model_route_processor.set_targets(params).await
+            }
             ClientRequest::ModelRouteRetire { params, .. } => {
                 self.model_route_processor.retire(params).await
             }
