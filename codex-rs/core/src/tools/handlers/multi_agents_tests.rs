@@ -14,6 +14,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -207,7 +208,15 @@ struct ListAgentsResult {
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    agent_state: String,
+    residency: String,
     agent_status: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CloseAgentResultV2 {
+    closed: bool,
+    previous_status: AgentStatus,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1531,7 +1540,9 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
-    assert_eq!(worker.agent_status, json!({"completed": "done"}));
+    assert_eq!(worker.agent_state, "stopped");
+    assert_eq!(worker.residency, "resident");
+    assert_eq!(worker.agent_status, json!({"completed": null}));
     assert_eq!(success, Some(true));
 }
 
@@ -1620,7 +1631,7 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_list_agents_omits_closed_agents() {
+async fn multi_agent_v2_close_agent_omits_closed_agents() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1655,12 +1666,31 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
         .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
         .await
         .expect("worker path should resolve");
-    session
-        .services
-        .agent_control
-        .close_agent(agent_id)
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
         .await
         .expect("close_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: CloseAgentResultV2 =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert!(result.closed);
+    assert!(matches!(
+        result.previous_status,
+        AgentStatus::PendingInit | AgentStatus::Running
+    ));
+    assert_eq!(success, Some(true));
+    assert!(
+        session
+            .services
+            .agent_control
+            .get_agent_metadata(agent_id)
+            .is_none()
+    );
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
@@ -1722,6 +1752,12 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
         .expect("worker metadata should exist")
         .agent_path
         .expect("worker path should exist");
+    let mut status_rx = session
+        .services
+        .agent_control
+        .subscribe_status(agent_id)
+        .await
+        .expect("worker status should be observable");
     let interrupt_output = InterruptAgentHandler
         .handle(invocation(
             session.clone(),
@@ -1732,6 +1768,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
         .await
         .expect("interrupt_agent should succeed");
     let _ = expect_text_output(interrupt_output);
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(*status_rx.borrow(), AgentStatus::Interrupted) {
+                break;
+            }
+            status_rx
+                .changed()
+                .await
+                .expect("worker status stream should stay open");
+        }
+    })
+    .await
+    .expect("worker should become interrupted");
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
@@ -1749,6 +1798,8 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     assert_eq!(result.agents.len(), 2);
     assert_eq!(result.agents[0].agent_name, "/root");
     assert_eq!(result.agents[1].agent_name, agent_path.as_str());
+    assert_eq!(result.agents[1].agent_state, "stopped");
+    assert_eq!(result.agents[1].residency, "resident");
 }
 
 #[tokio::test]
@@ -4004,6 +4055,58 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
         ))
         .await
         .expect("list_agents should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    assert_eq!(result.agents.len(), 2);
+    assert_eq!(result.agents[0].agent_name, "/root");
+    assert_eq!(result.agents[1].agent_name, "/root/worker");
+    assert_eq!(result.agents[1].agent_state, "stopped");
+    assert_eq!(result.agents[1].residency, "unloaded");
+    assert_eq!(result.agents[1].agent_status, json!("not_found"));
+
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("close_agent should accept unloaded v2 task names");
+    let (content, success) = expect_text_output(output);
+    let result: CloseAgentResultV2 =
+        serde_json::from_str(&content).expect("close_agent result should be json");
+    assert!(result.closed);
+    assert_eq!(result.previous_status, AgentStatus::NotFound);
+    assert_eq!(success, Some(true));
+
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open children should load after close");
+    assert_eq!(open_children, Vec::<ThreadId>::new());
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            root.thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed children should load after close");
+    assert_eq!(closed_children, vec![agent_id]);
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after close");
     let (content, _) = expect_text_output(output);
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");

@@ -45,6 +45,7 @@ use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::PLAINTEXT_MULTI_AGENT_V2_NAMESPACE;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -1188,6 +1189,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
             }
             registry.register_trusted_with_exposure(
                 multi_agent_v2_handler(InterruptAgentHandler, tool_namespace),
+                exposure,
+            );
+            registry.register_trusted_with_exposure(
+                multi_agent_v2_handler(CloseAgentHandlerV2, tool_namespace),
                 exposure,
             );
             registry.register_trusted_with_exposure(

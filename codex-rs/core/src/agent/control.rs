@@ -91,7 +91,44 @@ pub(crate) struct LiveAgent {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
+    pub(crate) agent_state: ListedAgentState,
+    pub(crate) residency: ListedAgentResidency,
     pub(crate) agent_status: AgentStatus,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ListedAgentState {
+    Running,
+    Stopped,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ListedAgentResidency {
+    Resident,
+    Unloaded,
+}
+
+impl ListedAgent {
+    fn resident(agent_name: String, status: AgentStatus) -> Self {
+        let agent_status = status_without_payload(status);
+        Self {
+            agent_name,
+            agent_state: listed_agent_state(&agent_status),
+            residency: ListedAgentResidency::Resident,
+            agent_status,
+        }
+    }
+
+    fn unloaded(agent_name: String) -> Self {
+        Self {
+            agent_name,
+            agent_state: ListedAgentState::Stopped,
+            residency: ListedAgentResidency::Unloaded,
+            agent_status: AgentStatus::NotFound,
+        }
+    }
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -470,10 +507,10 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
-            agents.push(ListedAgent {
-                agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
-            });
+            agents.push(ListedAgent::resident(
+                root_path.to_string(),
+                root_thread.agent_status().await,
+            ));
         }
 
         for metadata in live_agents {
@@ -487,18 +524,26 @@ impl AgentControl {
                 continue;
             }
 
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
-            };
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
-            agents.push(ListedAgent {
-                agent_name,
-                agent_status: thread.agent_status().await,
-            });
+            match state.get_thread(thread_id).await {
+                Ok(thread) => agents.push(ListedAgent::resident(
+                    agent_name,
+                    thread.agent_status().await,
+                )),
+                Err(err)
+                    if matches!(
+                        err.details(),
+                        CodexErrorDetails::ThreadNotFound(_) | CodexErrorDetails::InternalAgentDied
+                    ) =>
+                {
+                    agents.push(ListedAgent::unloaded(agent_name));
+                }
+                Err(err) => return Err(err),
+            }
         }
 
         Ok(agents)
@@ -806,6 +851,27 @@ impl AgentControl {
         }
 
         Ok(descendants)
+    }
+}
+
+fn listed_agent_state(status: &AgentStatus) -> ListedAgentState {
+    match status {
+        AgentStatus::PendingInit | AgentStatus::Running => ListedAgentState::Running,
+        AgentStatus::Interrupted
+        | AgentStatus::Completed(_)
+        | AgentStatus::Errored(_)
+        | AgentStatus::Shutdown
+        | AgentStatus::NotFound => ListedAgentState::Stopped,
+    }
+}
+
+fn status_without_payload(status: AgentStatus) -> AgentStatus {
+    match status {
+        AgentStatus::Completed(_) => AgentStatus::Completed(None),
+        AgentStatus::Errored(_) => {
+            AgentStatus::Errored("details available from the agent checkpoint".to_string())
+        }
+        status => status,
     }
 }
 
