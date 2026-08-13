@@ -48,6 +48,7 @@ use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FileSystemAccessMode;
 use codex_protocol::protocol::FileSystemPath;
@@ -63,6 +64,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
@@ -1518,8 +1520,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1544,6 +1546,40 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     assert_eq!(worker.residency, "resident");
     assert_eq!(worker.agent_status, json!({"completed": null}));
     assert_eq!(success, Some(true));
+
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::Error(ErrorEvent {
+                message: "boom".to_string(),
+                codex_error_info: None,
+            }),
+        )
+        .await;
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after an agent error");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let worker = result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/worker")
+        .expect("errored worker agent should remain listed");
+    assert_eq!(worker.agent_state, "stopped");
+    assert_eq!(worker.residency, "resident");
+    assert_eq!(
+        worker.agent_status,
+        json!({"errored": "details available from the agent checkpoint"})
+    );
 }
 
 #[tokio::test]
@@ -1994,8 +2030,8 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
 
     FollowupTaskHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            session.clone(),
+            turn.clone(),
             "followup_task",
             function_payload(json!({
                 "target": agent_id.to_string(),
@@ -2018,6 +2054,39 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     }));
 
     let second_turn = thread.session.new_default_turn().await;
+    thread
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: second_turn.sub_id.clone(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }),
+        )
+        .await;
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed after follow-up starts");
+    let (content, _) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+    let worker = result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == "/root/worker")
+        .expect("followed-up worker should remain listed");
+    assert_eq!(worker.agent_state, "running");
+    assert_eq!(worker.residency, "resident");
+
     thread
         .session
         .send_event(
