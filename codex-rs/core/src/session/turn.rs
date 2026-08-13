@@ -385,6 +385,7 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    finish_rejected,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -446,7 +447,7 @@ pub(crate) async fn run_turn(
                     );
                 }
 
-                let should_roll_over = needs_follow_up
+                let should_roll_over = (needs_follow_up || finish_rejected)
                     && (sess.take_new_context_window_request().await || token_limit_reached);
                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
@@ -509,6 +510,12 @@ pub(crate) async fn run_turn(
                             AwaitedPollWaitOutcome::Resume => continue,
                             AwaitedPollWaitOutcome::AwaitedWorkCleared => {}
                         }
+                    }
+                    // A constrained response tried to finish, but direct cleanup can close the
+                    // resource without queuing model-visible completion input. Sample once more
+                    // after closure so the model can produce the task's accepted final answer.
+                    if finish_rejected {
+                        continue;
                     }
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
@@ -1422,8 +1429,12 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        if sess.has_awaited_terminals().await {
-            prompt_input.push(ContextualUserFragment::into(ActiveResourceNoFinish));
+        let active_resource_no_finish = sess
+            .has_awaited_terminals()
+            .await
+            .then_some(ActiveResourceNoFinish);
+        if let Some(no_finish) = active_resource_no_finish {
+            prompt_input.push(ContextualUserFragment::into(no_finish));
         }
         let prompt = build_prompt(
             prompt_input,
@@ -1440,6 +1451,7 @@ async fn run_sampling_request(
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
+            active_resource_no_finish,
             cancellation_token.child_token(),
         )
         .await
@@ -1620,6 +1632,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    finish_rejected: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2201,6 +2214,32 @@ fn assign_missing_streamed_response_item_id(
     Session::assign_missing_response_item_id(item);
 }
 
+fn active_resource_no_finish_rejects(
+    constraint: Option<ActiveResourceNoFinish>,
+    item: &ResponseItem,
+) -> bool {
+    constraint.is_some()
+        && matches!(
+            item,
+            ResponseItem::Message {
+                role,
+                phase,
+                ..
+            } if role == "assistant" && !matches!(phase, Some(MessagePhase::Commentary))
+        )
+}
+
+fn active_resource_no_finish_defers_assistant_message(
+    constraint: Option<ActiveResourceNoFinish>,
+    item: &ResponseItem,
+) -> bool {
+    constraint.is_some()
+        && matches!(
+            item,
+            ResponseItem::Message { role, .. } if role == "assistant"
+        )
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace",
     skip_all,
@@ -2218,6 +2257,7 @@ async fn try_run_sampling_request(
     responses_metadata: &CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
+    active_resource_no_finish: Option<ActiveResourceNoFinish>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
     feedback_tags!(
@@ -2258,6 +2298,7 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut finish_rejected = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2363,6 +2404,13 @@ async fn try_run_sampling_request(
                     )
                     .await;
                 }
+                if active_resource_no_finish_rejects(active_resource_no_finish, &item) {
+                    // The request was sampled while the task still owned a live resource. Do not
+                    // record or complete a final answer that violates the request's no-finish
+                    // constraint; the resource wake will drive the next sampling request.
+                    finish_rejected = true;
+                    continue;
+                }
                 if let Some(state) = plan_mode_state.as_mut()
                     && handle_assistant_item_done_in_plan_mode(
                         &sess,
@@ -2428,11 +2476,19 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        finish_rejected,
                     });
                 }
             }
             ResponseEvent::OutputItemAdded(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
+                // Hold all assistant text until the completed item supplies the authoritative
+                // phase. Providers are allowed to omit or revise phase between added and done.
+                let defer_active_resource_assistant_message =
+                    active_resource_no_finish_defers_assistant_message(
+                        active_resource_no_finish,
+                        &item,
+                    );
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,
@@ -2456,7 +2512,8 @@ async fn try_run_sampling_request(
                 .await
                 {
                     let mut turn_item = turn_item;
-                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors;
+                    let stream_item_to_client = !defer_streamed_turn_items_for_contributors
+                        && !defer_active_resource_assistant_message;
                     let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                     let mut seeded_item_id: Option<String> = None;
                     if stream_item_to_client
@@ -2608,6 +2665,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    finish_rejected,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
