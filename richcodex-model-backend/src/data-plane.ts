@@ -8,6 +8,7 @@ const OPENAI_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/respon
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
+const DATA_PLANE_TOKEN_HEADER = "x-richcodex-data-plane-token";
 const TOKEN_REFRESH_SKEW_MS = 5 * 60_000;
 const QUOTA_EVIDENCE_TTL_MS = 15 * 60_000;
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -318,7 +319,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     if (new URL(request.url).pathname !== "/v1/responses" || request.method !== "POST") {
       return staticError(404, "not_found");
     }
-    if (request.headers.get("authorization") !== `Bearer ${options.capability}`) {
+    if (request.headers.get(DATA_PLANE_TOKEN_HEADER) !== options.capability) {
       return staticError(401, "unauthorized");
     }
     const declaredLength = Number(request.headers.get("content-length"));

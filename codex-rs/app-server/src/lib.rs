@@ -11,7 +11,7 @@ use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
-use codex_model_provider::create_ephemeral_openai_bearer_model_provider;
+use codex_model_provider::create_private_openai_loopback_model_provider;
 #[cfg(debug_assertions)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
@@ -707,7 +707,7 @@ pub async fn run_main_with_transport_options(
         let (capability, port) = backend.data_plane();
         RuntimeModelProviderRoutes::new(
             "richcodex",
-            create_ephemeral_openai_bearer_model_provider(port, capability.to_owned()),
+            create_private_openai_loopback_model_provider(port, capability.to_owned()),
             std::iter::empty(),
         )
     });

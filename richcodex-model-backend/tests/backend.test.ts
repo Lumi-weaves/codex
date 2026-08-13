@@ -156,6 +156,7 @@ describe("RichCodex private model data plane", () => {
 
     const unauthorized = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
       method: "POST",
+      headers: { authorization: `Bearer ${TEST_DATA_PLANE_CAPABILITY}` },
       body: JSON.stringify({ model: "my-fast-model", input: [] }),
     }));
     expect(unauthorized.status).toBe(401);
@@ -164,7 +165,7 @@ describe("RichCodex private model data plane", () => {
     const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${TEST_DATA_PLANE_CAPABILITY}`,
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
         "content-type": "application/json",
         "x-codex-turn-state": "turn-state",
       },
@@ -178,6 +179,8 @@ describe("RichCodex private model data plane", () => {
     expect(calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(new Headers(calls[0]!.init?.headers).get("authorization"))
       .toBe("Bearer private-access-token");
+    expect(new Headers(calls[0]!.init?.headers).get("x-richcodex-data-plane-token"))
+      .toBeNull();
     expect(new Headers(calls[0]!.init?.headers).get("chatgpt-account-id"))
       .toBe("workspace-account");
     expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
@@ -242,7 +245,7 @@ describe("RichCodex private model data plane", () => {
     const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
       method: "POST",
       headers: {
-        authorization: `Bearer ${TEST_DATA_PLANE_CAPABILITY}`,
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
         "content-type": "application/json",
       },
       body: JSON.stringify({ model: "my-fast-model", input: [] }),

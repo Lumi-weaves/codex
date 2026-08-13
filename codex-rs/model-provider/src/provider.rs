@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use codex_api::ApiError;
+use codex_api::AuthProvider;
 use codex_api::Provider;
 use codex_api::SharedAuthProvider;
 use codex_api::is_azure_responses_provider;
@@ -18,6 +19,8 @@ use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
 use codex_protocol::error::CodexErr;
 use codex_protocol::openai_models::ModelsResponse;
+use http::HeaderMap;
+use http::HeaderValue;
 
 use crate::amazon_bedrock::AmazonBedrockModelProvider;
 use crate::auth::ProviderAuthScope;
@@ -282,15 +285,17 @@ pub fn create_model_provider(
     }
 }
 
-/// Creates a process-local provider whose bearer is intentionally absent from
+const RICHCODEX_DATA_PLANE_TOKEN_HEADER: &str = "x-richcodex-data-plane-token";
+
+/// Creates a process-local provider whose capability is intentionally absent from
 /// its serializable [`ModelProviderInfo`].
 ///
 /// This is for supervised private transports whose admission capability must
 /// remain in memory rather than entering config reads, logs, or environment
 /// projection.
-fn create_ephemeral_bearer_model_provider(
+fn create_private_loopback_model_provider(
     mut provider_info: ModelProviderInfo,
-    bearer: String,
+    capability: String,
 ) -> SharedModelProvider {
     provider_info.env_key = None;
     provider_info.experimental_bearer_token = None;
@@ -298,43 +303,43 @@ fn create_ephemeral_bearer_model_provider(
     provider_info.aws = None;
     provider_info.requires_openai_auth = false;
     provider_info.supports_websockets = false;
-    Arc::new(EphemeralBearerModelProvider {
+    Arc::new(PrivateLoopbackModelProvider {
         info: provider_info,
-        bearer,
+        capability,
     })
 }
 
 /// Creates the private OpenAI-compatible provider used by a supervised local
 /// model data plane. Transport retries stay disabled here because the backend
 /// owns account fallback and must observe every upstream attempt exactly once.
-pub fn create_ephemeral_openai_bearer_model_provider(
+pub fn create_private_openai_loopback_model_provider(
     loopback_port: u16,
-    bearer: String,
+    capability: String,
 ) -> SharedModelProvider {
     let mut provider_info = ModelProviderInfo::create_openai_provider(Some(format!(
         "http://127.0.0.1:{loopback_port}/v1"
     )));
     provider_info.request_max_retries = Some(0);
     provider_info.stream_max_retries = Some(0);
-    create_ephemeral_bearer_model_provider(provider_info, bearer)
+    create_private_loopback_model_provider(provider_info, capability)
 }
 
-struct EphemeralBearerModelProvider {
+struct PrivateLoopbackModelProvider {
     info: ModelProviderInfo,
-    bearer: String,
+    capability: String,
 }
 
-impl fmt::Debug for EphemeralBearerModelProvider {
+impl fmt::Debug for PrivateLoopbackModelProvider {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("EphemeralBearerModelProvider")
+            .debug_struct("PrivateLoopbackModelProvider")
             .field("info", &self.info)
-            .field("bearer", &"[REDACTED]")
+            .field("capability", &"[REDACTED]")
             .finish()
     }
 }
 
-impl ModelProvider for EphemeralBearerModelProvider {
+impl ModelProvider for PrivateLoopbackModelProvider {
     fn info(&self) -> &ModelProviderInfo {
         &self.info
     }
@@ -364,10 +369,9 @@ impl ModelProvider for EphemeralBearerModelProvider {
     fn api_auth(
         &self,
     ) -> ModelProviderFuture<'_, codex_protocol::error::Result<SharedAuthProvider>> {
-        let bearer = self.bearer.clone();
+        let capability = self.capability.clone();
         Box::pin(async move {
-            let auth: SharedAuthProvider =
-                Arc::new(crate::bearer_auth_provider::BearerAuthProvider::new(bearer));
+            let auth: SharedAuthProvider = Arc::new(PrivateDataPlaneAuthProvider { capability });
             Ok(auth)
         })
     }
@@ -388,6 +392,22 @@ impl ModelProvider for EphemeralBearerModelProvider {
             .or_else(|| codex_models_manager::bundled_models_response().ok())
             .unwrap_or_default();
         Arc::new(StaticModelsManager::new(None, catalog))
+    }
+}
+
+/// Process-private admission for the supervised model data plane.
+///
+/// A dedicated header keeps this capability distinct from model-provider
+/// credentials and prevents ordinary OpenAI auth handling from replacing it.
+struct PrivateDataPlaneAuthProvider {
+    capability: String,
+}
+
+impl AuthProvider for PrivateDataPlaneAuthProvider {
+    fn add_auth_headers(&self, headers: &mut HeaderMap) {
+        if let Ok(header) = HeaderValue::from_str(&self.capability) {
+            let _ = headers.insert(RICHCODEX_DATA_PLANE_TOKEN_HEADER, header);
+        }
     }
 }
 
@@ -710,9 +730,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ephemeral_openai_provider_keeps_its_bearer_out_of_metadata_and_debug() {
+    async fn private_openai_provider_keeps_its_capability_out_of_metadata_and_debug() {
         let secret = "private-loopback-capability";
-        let provider = create_ephemeral_openai_bearer_model_provider(48767, secret.to_string());
+        let provider = create_private_openai_loopback_model_provider(48767, secret.to_string());
 
         assert_eq!(
             provider.info().base_url.as_deref(),
@@ -733,10 +753,11 @@ mod tests {
         let headers = auth.to_auth_headers();
         assert_eq!(
             headers
-                .get("authorization")
+                .get(RICHCODEX_DATA_PLANE_TOKEN_HEADER)
                 .and_then(|value| value.to_str().ok()),
-            Some("Bearer private-loopback-capability")
+            Some("private-loopback-capability")
         );
+        assert!(headers.get(http::header::AUTHORIZATION).is_none());
     }
 
     #[test]

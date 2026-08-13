@@ -53,7 +53,7 @@ impl RuntimeModelProviderRoutes {
 
 #[cfg(test)]
 mod tests {
-    use codex_model_provider::create_ephemeral_openai_bearer_model_provider;
+    use codex_model_provider::create_private_openai_loopback_model_provider;
 
     use super::*;
 
@@ -61,7 +61,7 @@ mod tests {
     fn active_tags_are_replaced_as_one_snapshot() {
         let routes = RuntimeModelProviderRoutes::new(
             "richcodex",
-            create_ephemeral_openai_bearer_model_provider(
+            create_private_openai_loopback_model_provider(
                 48767,
                 "private-loopback-capability".to_string(),
             ),
