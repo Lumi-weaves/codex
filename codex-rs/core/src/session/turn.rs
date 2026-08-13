@@ -2446,7 +2446,7 @@ async fn try_run_sampling_request(
                             } if role == "assistant"
                         ) && sess.input_queue.has_pending_session_inputs().await;
                     item = match active_resource_assistant_buffer.push_if_assistant(item) {
-                        Ok(()) => {
+                        None => {
                             if preempt_for_buffered_commentary {
                                 finish_downgraded |= deliver_active_resource_commentary(
                                     &sess,
@@ -2470,7 +2470,7 @@ async fn try_run_sampling_request(
                             // commentary item.
                             continue;
                         }
-                        Err(item) => {
+                        Some(item) => {
                             finish_downgraded |= deliver_active_resource_commentary(
                                 &sess,
                                 &turn_context,

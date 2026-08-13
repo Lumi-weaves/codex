@@ -16,7 +16,7 @@ pub(crate) struct ActiveResourceNoFinishBuffer {
 }
 
 impl ActiveResourceNoFinishBuffer {
-    pub(crate) fn push_if_assistant(&mut self, item: ResponseItem) -> Result<(), ResponseItem> {
+    pub(crate) fn push_if_assistant(&mut self, item: ResponseItem) -> Option<ResponseItem> {
         let ResponseItem::Message {
             role,
             content,
@@ -24,10 +24,10 @@ impl ActiveResourceNoFinishBuffer {
             ..
         } = &item
         else {
-            return Err(item);
+            return Some(item);
         };
         if role != "assistant" {
-            return Err(item);
+            return Some(item);
         }
 
         self.downgraded_finish |= !matches!(phase, Some(MessagePhase::Commentary));
@@ -52,7 +52,7 @@ impl ActiveResourceNoFinishBuffer {
             }
             Some(_) => unreachable!("active-resource buffer stores only assistant messages"),
         }
-        Ok(())
+        None
     }
 
     pub(crate) fn take_commentary(&mut self) -> Option<ResponseItem> {
