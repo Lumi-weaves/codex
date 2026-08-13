@@ -7,7 +7,7 @@ const TEST_WAIT: Duration = Duration::from_millis(100);
 
 #[tokio::test]
 async fn reads_bounded_ready_snapshot() {
-    let input = br#"{"type":"ready","protocolVersion":1,"instanceId":"backend-1","catalogRevision":7,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","compositionVersion":1},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"healthy"}],"models":[{"tag":"gpt-5.6-luna","displayName":"Luna","available":true,"capabilities":["tools"]}]}
+    let input = br#"{"type":"ready","protocolVersion":2,"instanceId":"backend-1","desiredStateRevision":3,"catalogRevision":7,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fd809eafabdcd42b72ebce5dc9ff9faf93e7a279fe0f12acc794dbc124d23808","compositionVersion":2},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"ready"}],"models":[{"tag":"gpt-5.6-luna","displayName":"Luna","available":true,"capabilities":["tools"]}]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 
@@ -17,13 +17,14 @@ async fn reads_bounded_ready_snapshot() {
         snapshot,
         BackendSnapshot {
             instance_id: "backend-1".to_string(),
+            desired_state_revision: 3,
             catalog_revision: 7,
             kernel: expected_kernel_provenance().unwrap(),
             providers: vec![ProviderSummary {
                 id: "openai".to_string(),
                 display_name: "OpenAI".to_string(),
                 account_count: 2,
-                status: "healthy".to_string(),
+                status: "ready".to_string(),
             }],
             models: vec![ModelSummary {
                 tag: "gpt-5.6-luna".to_string(),
@@ -37,7 +38,7 @@ async fn reads_bounded_ready_snapshot() {
 
 #[tokio::test]
 async fn rejects_a_kernel_provenance_mismatch() {
-    let input = br#"{"type":"ready","protocolVersion":1,"instanceId":"backend-1","catalogRevision":0,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","compositionVersion":1},"providers":[],"models":[]}
+    let input = br#"{"type":"ready","protocolVersion":2,"instanceId":"backend-1","desiredStateRevision":0,"catalogRevision":0,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","selectionDigest":"sha256:untrusted-selection","compositionVersion":2},"providers":[],"models":[]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 

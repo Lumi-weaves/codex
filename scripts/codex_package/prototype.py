@@ -1,5 +1,6 @@
 """Profile-driven exports of locally runnable Codex prototypes."""
 
+import hashlib
 import json
 import re
 import shutil
@@ -42,6 +43,7 @@ MODEL_BACKEND_BUN = (
 MODEL_BACKEND_KERNEL_LOCK = (
     REPO_ROOT / "codex-rs" / "app-server" / "richcodex-kernel.lock.json"
 )
+MODEL_BACKEND_KERNEL_SELECTION = MODEL_BACKEND_ROOT / "kernel-selection.json"
 
 
 @dataclass(frozen=True)
@@ -221,10 +223,20 @@ def add_prototype_metadata(package_dir: Path, profile: PrototypeProfile) -> None
 
 def model_backend_kernel_provenance() -> dict[str, object]:
     payload = json.loads(MODEL_BACKEND_KERNEL_LOCK.read_text(encoding="utf-8"))
+    expected_selection = payload["selectionDigest"]
+    actual_selection = (
+        "sha256:"
+        + hashlib.sha256(MODEL_BACKEND_KERNEL_SELECTION.read_bytes()).hexdigest()
+    )
+    if payload["selectionManifest"] != "richcodex-model-backend/kernel-selection.json":
+        raise RuntimeError("RichCodex kernel selection manifest path is invalid")
+    if actual_selection != expected_selection:
+        raise RuntimeError("RichCodex kernel selection digest does not match its lock")
     return {
         "sourceRepository": payload["sourceRepository"],
         "sourceCommit": payload["sourceCommit"],
         "contentDigest": payload["archiveDigest"],
+        "selectionDigest": expected_selection,
         "compositionVersion": payload["compositionVersion"],
     }
 

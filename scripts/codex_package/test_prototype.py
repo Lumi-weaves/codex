@@ -16,6 +16,7 @@ from codex_package.prototype import export_profile
 from codex_package.prototype import load_profile
 from codex_package.prototype import model_backend_builder_command
 from codex_package.prototype import model_backend_entrypoint
+from codex_package.prototype import model_backend_kernel_provenance
 from codex_package.prototype import prototype_entrypoint
 from codex_package.prototype import replace_directory
 from codex_package.targets import native_target
@@ -65,6 +66,11 @@ class LoadProfileTest(unittest.TestCase):
 
 
 class ExportProfileTest(unittest.TestCase):
+    def test_backend_kernel_selection_matches_its_lock(self) -> None:
+        provenance = model_backend_kernel_provenance()
+
+        self.assertTrue(str(provenance["selectionDigest"]).startswith("sha256:"))
+
     def setUp(self) -> None:
         self.profile = PrototypeProfile(
             name="local-test",
