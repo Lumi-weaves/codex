@@ -247,6 +247,9 @@ enum DebugSubcommand {
     /// Render the versioned model invocation and prompt contribution census as JSON.
     PromptCensus,
 
+    /// Render the validated flat prompt-resource manifest and source navigation as JSON.
+    PromptResources,
+
     /// Render the versioned root/shadow prompt inheritance contract as JSON.
     PromptInheritance,
 
@@ -1672,6 +1675,17 @@ async fn cli_main(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&codex_core::prompt_context_census())?
+                );
+            }
+            DebugSubcommand::PromptResources => {
+                reject_remote_mode_for_subcommand(
+                    root_remote.as_deref(),
+                    root_remote_auth_token_env.as_deref(),
+                    "debug prompt-resources",
+                )?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&codex_core::prompt_resource_manifest()?)?
                 );
             }
             DebugSubcommand::PromptInheritance => {
@@ -3380,6 +3394,19 @@ mod tests {
             cli.subcommand,
             Some(Subcommand::Debug(DebugCommand {
                 subcommand: DebugSubcommand::PromptCensus,
+            }))
+        ));
+    }
+
+    #[test]
+    fn debug_prompt_resources_parses_without_runtime_configuration() {
+        let cli =
+            MultitoolCli::try_parse_from(["codex", "debug", "prompt-resources"]).expect("parse");
+
+        assert!(matches!(
+            cli.subcommand,
+            Some(Subcommand::Debug(DebugCommand {
+                subcommand: DebugSubcommand::PromptResources,
             }))
         ));
     }
