@@ -12158,6 +12158,75 @@
       ],
       "type": "object"
     },
+    "ProviderAccount": {
+      "properties": {
+        "addedAt": {
+          "description": "Unix timestamp in seconds.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "id": {
+          "description": "Opaque local identifier. This is not the upstream provider account id.",
+          "type": "string"
+        },
+        "providerId": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ProviderAccountStatus"
+        },
+        "userLabel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "addedAt",
+        "id",
+        "providerId",
+        "status",
+        "userLabel"
+      ],
+      "type": "object"
+    },
+    "ProviderAccountProvider": {
+      "properties": {
+        "accountCount": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "displayName": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/definitions/ProviderAccountProviderStatus"
+        }
+      },
+      "required": [
+        "accountCount",
+        "displayName",
+        "id",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ProviderAccountProviderStatus": {
+      "enum": [
+        "ready",
+        "needsAccount"
+      ],
+      "type": "string"
+    },
+    "ProviderAccountStatus": {
+      "enum": [
+        "verificationRequired",
+        "reauthenticationRequired"
+      ],
+      "type": "string"
+    },
     "RateLimitReachedType": {
       "enum": [
         "rate_limit_reached",

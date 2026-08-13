@@ -929,6 +929,18 @@ client_request_definitions! {
         serialization: None,
         response: v2::ModelProviderCapabilitiesReadResponse,
     },
+    #[experimental("providerAccount/list")]
+    ProviderAccountList => "providerAccount/list" {
+        params: v2::ProviderAccountListParams,
+        serialization: global_shared_read("richcodex-provider-accounts"),
+        response: v2::ProviderAccountListResponse,
+    },
+    #[experimental("providerAccount/import")]
+    ProviderAccountImport => "providerAccount/import" {
+        params: v2::ProviderAccountImportParams,
+        serialization: global("richcodex-provider-accounts"),
+        response: v2::ProviderAccountImportResponse,
+    },
     ExperimentalFeatureList => "experimentalFeature/list" {
         params: v2::ExperimentalFeatureListParams,
         serialization: global("config"),
@@ -3985,6 +3997,56 @@ mod tests {
         };
         let reason = crate::experimental_api::ExperimentalApi::experimental_reason(&request);
         assert_eq!(reason, Some("mock/experimentalMethod"));
+    }
+
+    #[test]
+    fn provider_account_methods_are_experimental_and_serialized() {
+        let list = ClientRequest::ProviderAccountList {
+            request_id: request_id(),
+            params: v2::ProviderAccountListParams {
+                cursor: None,
+                limit: Some(20),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&list),
+            Some("providerAccount/list")
+        );
+        assert_eq!(
+            list.serialization_scope(),
+            Some(ClientRequestSerializationScope::GlobalSharedRead(
+                "richcodex-provider-accounts"
+            ))
+        );
+
+        let import = ClientRequest::ProviderAccountImport {
+            request_id: request_id(),
+            params: v2::ProviderAccountImportParams {
+                auth_json_path: absolute_path("selected/auth.json"),
+                user_label: "Secondary".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&import),
+            Some("providerAccount/import")
+        );
+        assert_eq!(
+            import.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-provider-accounts"
+            ))
+        );
+        assert_eq!(
+            serde_json::to_value(import).unwrap(),
+            json!({
+                "id": 1,
+                "method": "providerAccount/import",
+                "params": {
+                    "authJsonPath": absolute_path_string("selected/auth.json"),
+                    "userLabel": "Secondary"
+                }
+            })
+        );
     }
 
     #[test]
