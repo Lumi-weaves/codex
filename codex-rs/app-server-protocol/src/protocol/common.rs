@@ -941,6 +941,12 @@ client_request_definitions! {
         serialization: global("richcodex-model-plane"),
         response: v2::ProviderAccountImportResponse,
     },
+    #[experimental("providerAccount/apiKey/add")]
+    ProviderAccountAddApiKey => "providerAccount/apiKey/add" {
+        params: v2::ProviderAccountAddApiKeyParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountAddApiKeyResponse,
+    },
     #[experimental("modelRoute/read")]
     ModelRouteRead => "modelRoute/read" {
         params: v2::ModelRouteReadParams,
@@ -4062,6 +4068,39 @@ mod tests {
                 "params": {
                     "authJsonPath": absolute_path_string("selected/auth.json"),
                     "userLabel": "Secondary"
+                }
+            })
+        );
+
+        let api_key = "sk-api-key-debug-canary";
+        let add_api_key = ClientRequest::ProviderAccountAddApiKey {
+            request_id: request_id(),
+            params: v2::ProviderAccountAddApiKeyParams {
+                api_key: api_key.to_string(),
+                user_label: "OpenAI API".to_string(),
+            },
+        };
+        assert_eq!(
+            crate::experimental_api::ExperimentalApi::experimental_reason(&add_api_key),
+            Some("providerAccount/apiKey/add")
+        );
+        assert_eq!(
+            add_api_key.serialization_scope(),
+            Some(ClientRequestSerializationScope::Global(
+                "richcodex-model-plane"
+            ))
+        );
+        let debug = format!("{add_api_key:?}");
+        assert!(!debug.contains(api_key));
+        assert!(debug.contains("[REDACTED]"));
+        assert_eq!(
+            serde_json::to_value(add_api_key).unwrap(),
+            json!({
+                "id": 1,
+                "method": "providerAccount/apiKey/add",
+                "params": {
+                    "apiKey": api_key,
+                    "userLabel": "OpenAI API"
                 }
             })
         );

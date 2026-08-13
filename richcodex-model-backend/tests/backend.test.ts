@@ -24,6 +24,7 @@ import type {
   ModelExecutionCandidate,
   ModelPlaneStore,
   ProviderAccountStatus,
+  StoredProviderCredential,
   StoredOAuthCredential,
 } from "../src/model-plane";
 
@@ -86,7 +87,7 @@ function executionCandidate(
   accountId: string,
   targetId: string,
   priority: number,
-  credential: StoredOAuthCredential,
+  credential: StoredProviderCredential,
 ): ModelExecutionCandidate {
   return {
     modelTag: "my-fast-model",
@@ -118,6 +119,7 @@ function executionStore(
       modelRoutes: [],
     }),
     importCodexAuthJson: () => { throw new Error("not used"); },
+    addApiKeyAccount: () => { throw new Error("not used"); },
     createModelRoute: () => { throw new Error("not used"); },
     retireModelRoute: () => { throw new Error("not used"); },
     resolveExecutionCandidates: modelTag => modelTag === "my-fast-model" ? candidates : [],
@@ -262,6 +264,97 @@ describe("RichCodex private model data plane", () => {
       expiresAt: now + 3_600_000,
     }]);
   });
+
+  test("routes API-key accounts to the OpenAI API without forwarding private admission", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const statuses: Array<[string, ProviderAccountStatus]> = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore(
+        [executionCandidate("api-account", "api-target", 0, {
+          kind: "apiKey",
+          apiKey: "sk-private-api-key",
+        })],
+        (accountId, status) => { statuses.push([accountId, status]); },
+      ),
+      fetch: (async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response('data: {"type":"response.completed"}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }) as typeof fetch,
+    });
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.url).toBe("https://api.openai.com/v1/responses");
+    const headers = new Headers(calls[0]!.init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer sk-private-api-key");
+    expect(headers.get("chatgpt-account-id")).toBeNull();
+    expect(headers.get("x-richcodex-data-plane-token")).toBeNull();
+    expect(statuses).toEqual([["api-account", "ready"]]);
+  });
+
+  test("does not OAuth-refresh a rejected API key and falls through by target priority", async () => {
+    const calls: string[] = [];
+    const statuses: Array<[string, ProviderAccountStatus]> = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore(
+        [
+          executionCandidate("rejected-api", "first-target", 0, {
+            kind: "apiKey",
+            apiKey: "sk-rejected",
+          }),
+          executionCandidate("working-api", "second-target", 1, {
+            kind: "apiKey",
+            apiKey: "sk-working",
+          }),
+        ],
+        (accountId, status) => { statuses.push([accountId, status]); },
+      ),
+      fetch: (async (input, init) => {
+        calls.push(String(input));
+        const authorization = new Headers(init?.headers).get("authorization");
+        return authorization === "Bearer sk-rejected"
+          ? new Response("rejected", { status: 401 })
+          : new Response('data: {"type":"response.completed"}\n\n', {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+      }) as typeof fetch,
+    });
+
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      "https://api.openai.com/v1/responses",
+      "https://api.openai.com/v1/responses",
+    ]);
+    expect(calls).not.toContain("https://auth.openai.com/oauth/token");
+    expect(statuses).toEqual([
+      ["rejected-api", "reauthenticationRequired"],
+      ["working-api", "ready"],
+    ]);
+  });
 });
 
 describe("RichCodex headless backend composition root", () => {
@@ -303,7 +396,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 4,
+      protocolVersion: 5,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -427,6 +520,44 @@ describe("RichCodex headless backend composition root", () => {
       catalogRevision: 1,
       account: { providerId: "openai", status: "verificationRequired" },
     });
+  });
+
+  test("adds an API-key account without reflecting its secret", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-provider-api-key-"));
+    const stateRoot = join(root, "backend-state");
+    const apiKey = "sk-private-provider-key";
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-api-key",
+        apiKey,
+        userLabel: "OpenAI API",
+      })}\n${JSON.stringify({ type: "providerAccountList", requestId: "list-api-key" })}\n`,
+      stateRoot,
+    );
+
+    expect(result.lines[1]).toMatchObject({
+      type: "providerAccountAddApiKeyResult",
+      desiredStateRevision: 1,
+      catalogRevision: 1,
+      account: {
+        providerId: "openai",
+        userLabel: "OpenAI API",
+        credentialKind: "apiKey",
+        status: "verificationRequired",
+      },
+    });
+    expect(result.lines[2]).toMatchObject({
+      type: "providerAccountListResult",
+      data: [{ credentialKind: "apiKey", userLabel: "OpenAI API" }],
+    });
+    expect(JSON.stringify(result.lines)).not.toContain(apiKey);
+    expect(result.stderr.join("\n")).not.toContain(apiKey);
+    expect(readFileSync(join(stateRoot, "model-plane.json"), "utf8")).toContain(apiKey);
+    if (process.platform !== "win32") {
+      expect(statSync(join(stateRoot, "model-plane.json")).mode & 0o777).toBe(0o600);
+    }
   });
 
   test("creates, reads, retires, and restores one account-bound model route", async () => {

@@ -1,5 +1,6 @@
 use crate::error_code::internal_error;
 use crate::error_code::invalid_params;
+use crate::richcodex_backend::ProviderAccountAddApiKeyResult;
 use crate::richcodex_backend::ProviderAccountImportResult;
 use crate::richcodex_backend::ProviderAccountListResult;
 use crate::richcodex_backend::ProviderAccountSummary;
@@ -9,6 +10,9 @@ use crate::richcodex_backend::RichCodexBackendClientError;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountAddApiKeyParams;
+use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
+use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountImportParams;
 use codex_app_server_protocol::ProviderAccountImportResponse;
 use codex_app_server_protocol::ProviderAccountListParams;
@@ -66,6 +70,30 @@ impl ProviderAccountRequestProcessor {
             .map(|response| Some(response.into()))
             .map_err(provider_account_error)
     }
+
+    pub(crate) async fn add_api_key(
+        &self,
+        params: ProviderAccountAddApiKeyParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        if params.api_key.is_empty()
+            || params.api_key.len() > 64 * 1024
+            || params.api_key.trim() != params.api_key
+            || params.api_key.chars().any(char::is_control)
+            || params.user_label.is_empty()
+            || params.user_label.len() > 80
+            || params.user_label.trim() != params.user_label
+            || params.user_label.chars().any(char::is_control)
+        {
+            return Err(invalid_params("API-key provider account input is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .add_api_key_provider_account(params.api_key, params.user_label)
+            .await
+            .map(provider_account_add_api_key_response)
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
 }
 
 fn provider_account_list_response(
@@ -90,11 +118,26 @@ fn provider_account_import_response(
     }
 }
 
+fn provider_account_add_api_key_response(
+    result: ProviderAccountAddApiKeyResult,
+) -> ProviderAccountAddApiKeyResponse {
+    ProviderAccountAddApiKeyResponse {
+        account: provider_account(result.account),
+        desired_state_revision: result.desired_state_revision.to_string(),
+        catalog_revision: result.catalog_revision.to_string(),
+    }
+}
+
 fn provider_account(account: ProviderAccountSummary) -> ProviderAccount {
     ProviderAccount {
         id: account.id,
         provider_id: account.provider_id,
         user_label: account.user_label,
+        credential_kind: match account.credential_kind.as_str() {
+            "oauth" => ProviderAccountCredentialKind::OAuth,
+            "apiKey" => ProviderAccountCredentialKind::ApiKey,
+            _ => unreachable!("backend response kind is validated by the client actor"),
+        },
         status: match account.status.as_str() {
             "ready" => ProviderAccountStatus::Ready,
             "verificationRequired" => ProviderAccountStatus::VerificationRequired,
@@ -145,6 +188,7 @@ fn provider_account_error(error: RichCodexBackendClientError) -> JSONRPCErrorErr
         RichCodexBackendClientError::AccountLimitReached => {
             invalid_params("provider account limit reached")
         }
+        RichCodexBackendClientError::InvalidApiKey => invalid_params("API key is invalid"),
         RichCodexBackendClientError::StoreUnavailable => {
             internal_error("RichCodex provider account store is unavailable")
         }

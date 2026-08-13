@@ -11,6 +11,7 @@ use codex_app_server_protocol::PluginShareContext;
 use codex_app_server_protocol::PluginShareDiscoverability;
 use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
@@ -3276,6 +3277,7 @@ async fn model_route_account_picker_exposes_only_safe_account_labels() {
                 id: "opaque-primary".to_string(),
                 provider_id: "openai".to_string(),
                 user_label: "Primary Codex".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
                 status: ProviderAccountStatus::VerificationRequired,
                 added_at: 1,
             },
@@ -3283,6 +3285,7 @@ async fn model_route_account_picker_exposes_only_safe_account_labels() {
                 id: "opaque-expired".to_string(),
                 provider_id: "openai".to_string(),
                 user_label: "Needs Login".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
                 status: ProviderAccountStatus::ReauthenticationRequired,
                 added_at: 2,
             },

@@ -24,6 +24,7 @@ use client::BackendOperationErrorCode;
 pub(crate) use client::ModelRouteCreateRequest;
 pub(crate) use client::ModelRouteMutationResult;
 pub(crate) use client::ModelRouteReadResult;
+pub(crate) use client::ProviderAccountAddApiKeyResult;
 pub(crate) use client::ProviderAccountImportResult;
 pub(crate) use client::ProviderAccountListResult;
 pub(crate) use client::ProviderAccountSummary;
@@ -42,7 +43,7 @@ use client::request_provider_account_list;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 4;
+const BACKEND_PROTOCOL_VERSION: u32 = 5;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -152,6 +153,12 @@ enum BackendMessage {
         catalog_revision: u64,
         account: ProviderAccountSummary,
     },
+    ProviderAccountAddApiKeyResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+    },
     ModelRouteReadResult {
         request_id: String,
         desired_state_revision: u64,
@@ -200,6 +207,11 @@ enum AppServerMessage<'a> {
     ProviderAccountImport {
         request_id: &'a str,
         auth_json_path: &'a str,
+        user_label: &'a str,
+    },
+    ProviderAccountAddApiKey {
+        request_id: &'a str,
+        api_key: &'a str,
         user_label: &'a str,
     },
     ModelRouteRead {
@@ -432,6 +444,7 @@ where
         | BackendMessage::Ready { .. }
         | BackendMessage::ProviderAccountListResult { .. }
         | BackendMessage::ProviderAccountImportResult { .. }
+        | BackendMessage::ProviderAccountAddApiKeyResult { .. }
         | BackendMessage::ModelRouteReadResult { .. }
         | BackendMessage::ModelRouteCreateResult { .. }
         | BackendMessage::ModelRouteRetireResult { .. }

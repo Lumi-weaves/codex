@@ -1,6 +1,8 @@
 use anyhow::Result;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ProviderAccount;
+use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
+use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountImportResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_app_server_protocol::RequestId;
@@ -88,6 +90,7 @@ async fn provider_account_import_forwards_but_does_not_open_the_selected_path() 
                 id: "local-secondary".to_string(),
                 provider_id: "openai".to_string(),
                 user_label: "Secondary".to_string(),
+                credential_kind: ProviderAccountCredentialKind::OAuth,
                 status: ProviderAccountStatus::VerificationRequired,
                 added_at: 123,
             },
@@ -114,18 +117,62 @@ async fn provider_account_import_forwards_but_does_not_open_the_selected_path() 
 }
 
 #[cfg(unix)]
+#[tokio::test]
+async fn provider_account_api_key_add_returns_only_safe_account_state() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let codex_home = TempDir::new()?;
+    let fixture_root = TempDir::new()?;
+    let backend_path = fixture_root.path().join("fake-richcodex-model-backend");
+    std::fs::write(&backend_path, FAKE_BACKEND)?;
+    std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700))?;
+
+    let backend_path = backend_path.display().to_string();
+    let mut server = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .with_env_overrides(&[("RICHCX_MODEL_BACKEND_PATH", Some(&backend_path))])
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let api_key = "sk-api-key-canary-must-not-return";
+    let request_id = server
+        .send_raw_request(
+            "providerAccount/apiKey/add",
+            Some(serde_json::json!({
+                "apiKey": api_key,
+                "userLabel": "OpenAI API",
+            })),
+        )
+        .await?;
+    let response: ProviderAccountAddApiKeyResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(request_id)).await??;
+
+    assert_eq!(
+        response.account.credential_kind,
+        ProviderAccountCredentialKind::ApiKey
+    );
+    assert_eq!(response.account.user_label, "OpenAI API");
+    assert!(!serde_json::to_string(&response)?.contains(api_key));
+    assert!(server.shutdown_gracefully().await?.success());
+    Ok(())
+}
+
+#[cfg(unix)]
 const FAKE_BACKEND: &str = r#"#!/bin/sh
 set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":4,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":5,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
     *'"type":"providerAccountImport"'*)
       printf '%s\n' "$line" > "$state_root/provider-account-import.json"
-      printf '{"type":"providerAccountImportResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":3,"account":{"id":"local-secondary","providerId":"openai","userLabel":"Secondary","status":"verificationRequired","addedAt":123}}\n' "$request_id"
+      printf '{"type":"providerAccountImportResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":3,"account":{"id":"local-secondary","providerId":"openai","userLabel":"Secondary","credentialKind":"oauth","status":"verificationRequired","addedAt":123}}\n' "$request_id"
+      ;;
+    *'"type":"providerAccountAddApiKey"'*'sk-api-key-canary-must-not-return'*)
+      printf '{"type":"providerAccountAddApiKeyResult","requestId":"%s","desiredStateRevision":2,"catalogRevision":2,"account":{"id":"local-api-key","providerId":"openai","userLabel":"OpenAI API","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
       ;;
     *'"type":"shutdown"'*)
       printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"

@@ -365,6 +365,7 @@ export type { ProcessOutputDeltaNotification } from "./ProcessOutputDeltaNotific
 export type { ProcessOutputStream } from "./ProcessOutputStream";
 export type { ProcessTerminalSize } from "./ProcessTerminalSize";
 export type { ProviderAccount } from "./ProviderAccount";
+export type { ProviderAccountCredentialKind } from "./ProviderAccountCredentialKind";
 export type { ProviderAccountProvider } from "./ProviderAccountProvider";
 export type { ProviderAccountProviderStatus } from "./ProviderAccountProviderStatus";
 export type { ProviderAccountStatus } from "./ProviderAccountStatus";

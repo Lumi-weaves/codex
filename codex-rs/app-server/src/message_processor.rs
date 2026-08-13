@@ -1328,6 +1328,9 @@ impl MessageProcessor {
             ClientRequest::ProviderAccountImport { params, .. } => {
                 self.provider_account_processor.import(params).await
             }
+            ClientRequest::ProviderAccountAddApiKey { params, .. } => {
+                self.provider_account_processor.add_api_key(params).await
+            }
             ClientRequest::ModelRouteRead { params, .. } => {
                 self.model_route_processor.read(params).await
             }

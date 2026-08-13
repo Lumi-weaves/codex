@@ -15919,6 +15919,9 @@
             "format": "int64",
             "type": "integer"
           },
+          "credentialKind": {
+            "$ref": "#/definitions/v2/ProviderAccountCredentialKind"
+          },
           "id": {
             "description": "Opaque local identifier. This is not the upstream provider account id.",
             "type": "string"
@@ -15935,12 +15938,20 @@
         },
         "required": [
           "addedAt",
+          "credentialKind",
           "id",
           "providerId",
           "status",
           "userLabel"
         ],
         "type": "object"
+      },
+      "ProviderAccountCredentialKind": {
+        "enum": [
+          "oauth",
+          "apiKey"
+        ],
+        "type": "string"
       },
       "ProviderAccountProvider": {
         "properties": {

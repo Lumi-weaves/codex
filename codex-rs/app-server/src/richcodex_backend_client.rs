@@ -34,6 +34,7 @@ pub(crate) struct ProviderAccountSummary {
     pub id: String,
     pub provider_id: String,
     pub user_label: String,
+    pub credential_kind: String,
     pub status: String,
     pub added_at: u64,
 }
@@ -53,6 +54,8 @@ pub(crate) struct ProviderAccountImportResult {
     pub catalog_revision: u64,
     pub account: ProviderAccountSummary,
 }
+
+pub(crate) type ProviderAccountAddApiKeyResult = ProviderAccountImportResult;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ModelRouteReadResult {
@@ -94,6 +97,7 @@ pub(super) enum BackendOperationErrorCode {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    InvalidApiKey,
     StoreUnavailable,
     InvalidRequest,
     RevisionConflict,
@@ -111,6 +115,7 @@ pub(crate) enum RichCodexBackendClientError {
     CredentialExpired,
     AccountAlreadyExists,
     AccountLimitReached,
+    InvalidApiKey,
     StoreUnavailable,
     InvalidRequest,
     RevisionConflict,
@@ -128,6 +133,7 @@ impl From<BackendOperationErrorCode> for RichCodexBackendClientError {
             BackendOperationErrorCode::CredentialExpired => Self::CredentialExpired,
             BackendOperationErrorCode::AccountAlreadyExists => Self::AccountAlreadyExists,
             BackendOperationErrorCode::AccountLimitReached => Self::AccountLimitReached,
+            BackendOperationErrorCode::InvalidApiKey => Self::InvalidApiKey,
             BackendOperationErrorCode::StoreUnavailable => Self::StoreUnavailable,
             BackendOperationErrorCode::InvalidRequest => Self::InvalidRequest,
             BackendOperationErrorCode::RevisionConflict => Self::RevisionConflict,
@@ -150,6 +156,13 @@ enum BackendCommand {
         auth_json_path: String,
         user_label: String,
         response: oneshot::Sender<Result<ProviderAccountImportResult, RichCodexBackendClientError>>,
+    },
+    AddApiKey {
+        request_id: String,
+        api_key: String,
+        user_label: String,
+        response:
+            oneshot::Sender<Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>>,
     },
     ReadModelRoutes {
         request_id: String,
@@ -230,6 +243,26 @@ impl RichCodexBackendClient {
             .send(BackendCommand::Import {
                 request_id: self.request_id(),
                 auth_json_path,
+                user_label,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn add_api_key_provider_account(
+        &self,
+        api_key: String,
+        user_label: String,
+    ) -> Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::AddApiKey {
+                request_id: self.request_id(),
+                api_key,
                 user_label,
                 response,
             })
@@ -353,6 +386,29 @@ async fn run_backend_actor(
                     &mut stdout,
                     &request_id,
                     &auth_json_path,
+                    &user_label,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
+            BackendCommand::AddApiKey {
+                request_id,
+                api_key,
+                user_label,
+                response,
+            } => {
+                let result = request_provider_account_add_api_key(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    &api_key,
                     &user_label,
                 )
                 .await;
@@ -548,6 +604,54 @@ where
         .map_err(|_| RichCodexBackendClientError::Unavailable)?
     {
         BackendMessage::ProviderAccountImportResult {
+            request_id: returned_request_id,
+            desired_state_revision,
+            catalog_revision,
+            account,
+        } if returned_request_id == request_id => {
+            validate_provider_account(&account)
+                .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+            Ok(ProviderAccountImportResult {
+                desired_state_revision,
+                catalog_revision,
+                account,
+            })
+        }
+        BackendMessage::OperationError {
+            request_id: returned_request_id,
+            code,
+            ..
+        } if returned_request_id == request_id => Err(code.into()),
+        _ => Err(RichCodexBackendClientError::Unavailable),
+    }
+}
+
+pub(super) async fn request_provider_account_add_api_key<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    api_key: &str,
+    user_label: &str,
+) -> Result<ProviderAccountAddApiKeyResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ProviderAccountAddApiKey {
+            request_id,
+            api_key,
+            user_label,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    match read_message(reader, REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| RichCodexBackendClientError::Unavailable)?
+    {
+        BackendMessage::ProviderAccountAddApiKeyResult {
             request_id: returned_request_id,
             desired_state_revision,
             catalog_revision,
@@ -874,6 +978,12 @@ fn validate_provider_account(account: &ProviderAccountSummary) -> io::Result<()>
     validate_safe_text(&account.id, 80)?;
     validate_safe_text(&account.provider_id, 256)?;
     validate_safe_text(&account.user_label, 80)?;
+    if !matches!(account.credential_kind.as_str(), "oauth" | "apiKey") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "model backend sent an invalid provider-account credential kind",
+        ));
+    }
     if i64::try_from(account.added_at).is_err() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

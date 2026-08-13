@@ -28,6 +28,28 @@ pub struct ProviderAccountImportParams {
     pub user_label: String,
 }
 
+/// Add one API-key credential to the RichCodex provider plane.
+///
+/// The key is write-only request material: it is never returned by any public
+/// model-plane response.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountAddApiKeyParams {
+    pub api_key: String,
+    pub user_label: String,
+}
+
+impl std::fmt::Debug for ProviderAccountAddApiKeyParams {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderAccountAddApiKeyParams")
+            .field("api_key", &"[REDACTED]")
+            .field("user_label", &self.user_label)
+            .finish()
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -40,12 +62,24 @@ pub enum ProviderAccountStatus {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ProviderAccountCredentialKind {
+    #[serde(rename = "oauth")]
+    #[ts(rename = "oauth")]
+    OAuth,
+    ApiKey,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccount {
     /// Opaque local identifier. This is not the upstream provider account id.
     pub id: String,
     pub provider_id: String,
     pub user_label: String,
+    pub credential_kind: ProviderAccountCredentialKind,
     pub status: ProviderAccountStatus,
     /// Unix timestamp in seconds.
     #[ts(type = "number")]
@@ -88,6 +122,15 @@ pub struct ProviderAccountListResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountImportResponse {
+    pub account: ProviderAccount,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountAddApiKeyResponse {
     pub account: ProviderAccount,
     pub desired_state_revision: String,
     pub catalog_revision: String,

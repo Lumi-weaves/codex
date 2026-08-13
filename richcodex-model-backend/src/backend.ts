@@ -14,7 +14,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 4 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 5 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -145,7 +145,7 @@ export type HeadlessProviderAccountListResultMessage = {
 };
 
 export type HeadlessProviderAccountImportResultMessage = {
-  readonly type: "providerAccountImportResult";
+  readonly type: "providerAccountImportResult" | "providerAccountAddApiKeyResult";
   readonly requestId: string;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
@@ -187,6 +187,12 @@ type HeadlessInboundMessage =
     readonly type: "providerAccountImport";
     readonly requestId: string;
     readonly authJsonPath: string;
+    readonly userLabel: string;
+  }
+  | {
+    readonly type: "providerAccountAddApiKey";
+    readonly requestId: string;
+    readonly apiKey: string;
     readonly userLabel: string;
   }
   | { readonly type: "modelRouteRead"; readonly requestId: string }
@@ -421,6 +427,28 @@ function parseInboundMessage(text: string):
       },
     };
   }
+  if (record.type === "providerAccountAddApiKey") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "apiKey", "userLabel"])
+      || !requestId
+      || !isBoundedOpaqueText(record.apiKey, 64 * 1024)
+      || record.apiKey.trim() !== record.apiKey
+      || !isBoundedOpaqueText(record.userLabel, 80)
+      || record.userLabel.trim() !== record.userLabel
+    ) {
+      return { ok: false, error: protocolError("malformed_message") };
+    }
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountAddApiKey",
+        requestId,
+        apiKey: record.apiKey,
+        userLabel: record.userLabel,
+      },
+    };
+  }
   if (record.type === "modelRouteRead") {
     const requestId = parseRequestId(record.requestId);
     if (!hasExactlyKeys(record, ["type", "requestId"]) || !requestId) {
@@ -589,6 +617,7 @@ function operationErrorForCode(
     credential_expired: "selected Codex login has expired",
     account_already_exists: "this provider account is already configured",
     account_limit_reached: "provider account limit reached",
+    invalid_api_key: "API key is invalid",
     store_unavailable: "RichCodex model plane store is unavailable",
     invalid_request: "model plane request is invalid",
     revision_conflict: "model plane revision does not match",
@@ -747,6 +776,21 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 const snapshot = modelPlaneStore.snapshot();
                 if (!await write({
                   type: "providerAccountImportResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountAddApiKey") {
+                const account = modelPlaneStore.addApiKeyAccount(
+                  parsed.message.apiKey,
+                  parsed.message.userLabel,
+                );
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountAddApiKeyResult",
                   requestId: parsed.message.requestId,
                   desiredStateRevision: snapshot.desiredStateRevision,
                   catalogRevision: snapshot.catalogRevision,

@@ -1,10 +1,12 @@
 import type {
   ModelExecutionCandidate,
   ModelPlaneStore,
+  StoredProviderCredential,
   StoredOAuthCredential,
 } from "./model-plane";
 
 const OPENAI_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
+const OPENAI_API_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
@@ -153,14 +155,17 @@ function sortedCandidates(
     });
 }
 
-function forwardedRequestHeaders(request: Request, credential: StoredOAuthCredential): Headers {
+function forwardedRequestHeaders(request: Request, credential: StoredProviderCredential): Headers {
   const headers = new Headers();
   for (const name of FORWARDED_REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  headers.set("authorization", `Bearer ${credential.accessToken}`);
-  headers.set("chatgpt-account-id", credential.chatgptAccountId);
+  const bearer = credential.kind === "oauth" ? credential.accessToken : credential.apiKey;
+  headers.set("authorization", `Bearer ${bearer}`);
+  if (credential.kind === "oauth") {
+    headers.set("chatgpt-account-id", credential.chatgptAccountId);
+  }
   headers.set("content-type", "application/json");
   return headers;
 }
@@ -206,9 +211,11 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
   const refreshCredential = async (
     candidate: ModelExecutionCandidate,
     force: boolean,
-  ): Promise<StoredOAuthCredential> => {
-    if (!force && candidate.credential.expiresAt > now() + TOKEN_REFRESH_SKEW_MS) {
-      return candidate.credential;
+  ): Promise<StoredProviderCredential> => {
+    if (candidate.credential.kind === "apiKey") return candidate.credential;
+    const oauthCredential = candidate.credential;
+    if (!force && oauthCredential.expiresAt > now() + TOKEN_REFRESH_SKEW_MS) {
+      return oauthCredential;
     }
     const existing = refreshFlights.get(candidate.accountId);
     if (existing) return existing;
@@ -220,7 +227,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         body: new URLSearchParams({
           grant_type: "refresh_token",
           client_id: OPENAI_CODEX_CLIENT_ID,
-          refresh_token: candidate.credential.refreshToken,
+          refresh_token: oauthCredential.refreshToken,
         }),
         redirect: "manual",
       });
@@ -246,23 +253,25 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         : 3600;
       const refreshToken = typeof payload.refresh_token === "string" && payload.refresh_token.length > 0
         ? payload.refresh_token
-        : candidate.credential.refreshToken;
+        : oauthCredential.refreshToken;
       const credential: StoredOAuthCredential = {
         kind: "oauth",
         accessToken: payload.access_token,
         refreshToken,
-        chatgptAccountId: candidate.credential.chatgptAccountId,
+        chatgptAccountId: oauthCredential.chatgptAccountId,
         expiresAt: now() + expiresIn * 1000,
       };
       if (!options.modelPlaneStore.replaceOAuthCredential(
         candidate.accountId,
-        candidate.credential.refreshToken,
+        oauthCredential.refreshToken,
         credential,
       )) {
         const current = options.modelPlaneStore
           .resolveExecutionCandidates(candidate.modelTag)
           .find(value => value.targetId === candidate.targetId);
-        if (!current) throw new CredentialRefreshError("verificationRequired");
+        if (!current || current.credential.kind !== "oauth") {
+          throw new CredentialRefreshError("verificationRequired");
+        }
         return current.credential;
       }
       return credential;
@@ -283,13 +292,16 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     forceRefresh: boolean,
   ): Promise<Response> => {
     const credential = await refreshCredential(candidate, forceRefresh);
-    const upstream = await fetchImpl(OPENAI_CODEX_RESPONSES_URL, {
-      method: "POST",
-      headers: forwardedRequestHeaders(request, credential),
-      body: JSON.stringify({ ...body, model: candidate.upstreamModelId }),
-      redirect: "manual",
-      signal: request.signal,
-    });
+    const upstream = await fetchImpl(
+      credential.kind === "oauth" ? OPENAI_CODEX_RESPONSES_URL : OPENAI_API_RESPONSES_URL,
+      {
+        method: "POST",
+        headers: forwardedRequestHeaders(request, credential),
+        body: JSON.stringify({ ...body, model: candidate.upstreamModelId }),
+        redirect: "manual",
+        signal: request.signal,
+      },
+    );
     const state = runtime.get(candidate.accountId) ?? {};
     const resetAt = quotaResetAt(upstream.headers);
     if (resetAt !== undefined) {
@@ -360,7 +372,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           index + 1,
           false,
         );
-        if (response.status === 401) {
+        if (response.status === 401 && candidate.credential.kind === "oauth") {
           await response.body?.cancel().catch(() => undefined);
           response = await send(
             request,
