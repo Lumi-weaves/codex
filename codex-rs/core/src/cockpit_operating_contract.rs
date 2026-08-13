@@ -15,6 +15,16 @@ const GOVERNANCE: &str =
     "versioned built-in contract; changes require prompt-plane conformance review";
 const MAX_UTF8_BYTES: usize = 4_096;
 
+fn assert_contract_body_is_bounded(body: &str) {
+    let rendered_len = COCKPIT_OPERATING_CONTRACT_OPEN_TAG.len()
+        + body.len()
+        + COCKPIT_OPERATING_CONTRACT_CLOSE_TAG.len();
+    assert!(
+        rendered_len <= MAX_UTF8_BYTES,
+        "cockpit operating contract exceeds its {MAX_UTF8_BYTES}-byte hard bound"
+    );
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CockpitContractRole {
@@ -109,7 +119,7 @@ pub(crate) fn ingress_contracts() -> Vec<CockpitIngressContract> {
             kind: CockpitIngressKind::CompactEventWake,
             payload: "only compact typed red dots carrying stable handle identity",
             admission: "serialize at the next model-generation safe boundary",
-            required_interpretation: "open one or more typed views deliberately; delivery alone is not acceptance or resolution",
+            required_interpretation: "open one or more typed views deliberately; delivery alone is not acceptance or resolution, and the wake does not reset the independent resource-audit cadence",
         },
         CockpitIngressContract {
             kind: CockpitIngressKind::ConsolidatedResourceAuditWake,
@@ -130,7 +140,7 @@ pub(crate) fn contract_body(role: CockpitContractRole) -> String {
         }
     };
 
-    format!(
+    let body = format!(
         r#"
 id: {COCKPIT_OPERATING_CONTRACT_ID}
 revision: {COCKPIT_OPERATING_CONTRACT_REVISION}
@@ -140,15 +150,19 @@ governance: {GOVERNANCE}
 
 Operate the cockpit as a typed event-and-handle system, not as a dashboard transcript.
 - Fletcher messages are privileged ingress: admit them first at the next safe model-generation boundary. They carry no implicit status panel.
-- Event wakes carry compact red dots with stable handle identity only. Open any needed typed views deliberately; progressive disclosure is the default.
-- Resource-audit wakes carry one consolidated view of active resources while resources are held. Their adjustable cadence is a leak/forgetfulness safety rope, never a progress feed. Events may wake earlier without the audit panel.
+- Event wakes carry only compact typed red dots with stable handle identity, never source payloads or the resource-audit panel. Open any needed typed views deliberately; progressive disclosure is the default.
+- Resource-audit wakes carry one consolidated view of active resources while resources are held. Their adjustable cadence is a leak/forgetfulness safety rope, never a progress feed. Events may wake earlier without the audit panel and do not reset its independent cadence.
 - Serialize all ingress at model-generation safe boundaries. Handle state is explicit: delivered != opened != accepted != resolved.
-- Every handle exposes typed views and typed actions. Preserve its identity through follow-up, parking, refresh, retirement, and closure receipts.
+- Every handle exposes its available typed views and actions. Preserve its identity through follow-up, parking, refresh, retirement, and closure receipts.
 - {lifecycle}
-- With no active handles, work may end unless an explicit subscription remains. A subscription is an active front that may push a future event.
+- With no active resources, work may end unless an explicit wake-capable message subscription remains. Other subscriptions are active handles and therefore keep the owning task live while armed.
 "#,
         role.as_str()
-    )
+    );
+    // This is the production render path used by `ContextualUserFragment::body`, so additions
+    // cannot bypass the public descriptor's hard prompt bound.
+    assert_contract_body_is_bounded(&body);
+    body
 }
 
 pub(crate) fn rendered_contract(role: CockpitContractRole) -> String {
@@ -160,7 +174,6 @@ pub(crate) fn rendered_contract(role: CockpitContractRole) -> String {
 
 pub(crate) fn descriptor(role: CockpitContractRole) -> CockpitOperatingContractDescriptor {
     let rendered = rendered_contract(role);
-    debug_assert!(rendered.len() <= MAX_UTF8_BYTES);
     CockpitOperatingContractDescriptor {
         id: COCKPIT_OPERATING_CONTRACT_ID,
         revision: COCKPIT_OPERATING_CONTRACT_REVISION,
@@ -229,6 +242,7 @@ mod tests {
 
         assert!(event.payload.contains("red dots"));
         assert!(event.required_interpretation.contains("typed views"));
+        assert!(event.required_interpretation.contains("does not reset"));
         assert!(audit.payload.contains("consolidated view"));
         assert!(audit.required_interpretation.contains("never treat"));
         assert_ne!(event.required_interpretation, audit.required_interpretation);

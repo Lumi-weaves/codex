@@ -8,6 +8,7 @@ use codex_extension_api::UserInstructionsProvider;
 use codex_login::AuthManager;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
@@ -196,10 +197,8 @@ impl CockpitContractReceipt {
         expected_role: Option<CockpitContractRole>,
         request: &ResponsesApiRequest,
     ) -> CodexResult<Self> {
-        let value = serde_json::to_value(request).map_err(|err| {
-            CodexErr::Fatal(format!("failed to inspect cockpit contract receipt: {err}"))
-        })?;
-        let effective_copy_count = count_cockpit_contracts(&value);
+        let effective_contracts = cockpit_contract_texts(request);
+        let effective_copy_count = effective_contracts.len();
         let expected_copy_count = usize::from(expected_role.is_some());
         if effective_copy_count != expected_copy_count {
             return Err(CodexErr::Fatal(format!(
@@ -209,7 +208,10 @@ impl CockpitContractReceipt {
         if let Some(expected_role) = expected_role {
             let expected_contract =
                 crate::cockpit_operating_contract::rendered_contract(expected_role);
-            let effective_role_copy_count = count_exact_strings(&value, &expected_contract);
+            let effective_role_copy_count = effective_contracts
+                .iter()
+                .filter(|contract| **contract == expected_contract.as_str())
+                .count();
             if effective_role_copy_count != 1 {
                 return Err(CodexErr::Fatal(format!(
                     "cockpit operating contract role conformance failed: expected one {} contract, found {effective_role_copy_count}",
@@ -231,28 +233,21 @@ impl CockpitContractReceipt {
     }
 }
 
-fn count_exact_strings(value: &Value, expected: &str) -> usize {
-    match value {
-        Value::String(text) => usize::from(text == expected),
-        Value::Array(values) => values
-            .iter()
-            .map(|value| count_exact_strings(value, expected))
-            .sum(),
-        Value::Object(values) => values
-            .values()
-            .map(|value| count_exact_strings(value, expected))
-            .sum(),
-        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-    }
-}
-
-fn count_cockpit_contracts(value: &Value) -> usize {
-    match value {
-        Value::String(text) => usize::from(CockpitOperatingContract::matches_text(text)),
-        Value::Array(values) => values.iter().map(count_cockpit_contracts).sum(),
-        Value::Object(values) => values.values().map(count_cockpit_contracts).sum(),
-        Value::Null | Value::Bool(_) | Value::Number(_) => 0,
-    }
+fn cockpit_contract_texts(request: &ResponsesApiRequest) -> Vec<&str> {
+    request
+        .input
+        .iter()
+        .filter_map(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            let [ContentItem::InputText { text }] = content.as_slice() else {
+                return None;
+            };
+            (role == "developer" && CockpitOperatingContract::matches_text(text))
+                .then_some(text.as_str())
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize)]
@@ -655,3 +650,7 @@ fn canonicalize_json(value: Value) -> Value {
 fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+
+#[cfg(test)]
+#[path = "prompt_debug_tests.rs"]
+mod tests;

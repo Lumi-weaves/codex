@@ -17,6 +17,7 @@ use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
 use crate::attestation::AttestationProvider;
+use crate::cockpit_operating_contract::COCKPIT_OPERATING_CONTRACT_OPEN_TAG;
 use crate::compact;
 use crate::compact::CompactedHistoryMetadata;
 use crate::config::ManagedFeatures;
@@ -3858,6 +3859,12 @@ impl Session {
                 }
                 "developer" if fragment.markers().0 == MULTI_AGENT_MODE_OPEN_TAG => {
                     initial_multi_agent_mode = Some(fragment);
+                }
+                "developer"
+                    if fragment.requires_separate_message()
+                        && fragment.markers().0 == COCKPIT_OPERATING_CONTRACT_OPEN_TAG =>
+                {
+                    separate_developer_sections.push(fragment.render());
                 }
                 "developer"
                     if fragment.requires_separate_message() && fragment.markers().0.is_empty() =>
