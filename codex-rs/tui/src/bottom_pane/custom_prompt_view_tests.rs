@@ -96,7 +96,7 @@ fn secret_prompt_masks_the_terminal_but_submits_the_original_value() {
     let rendered = buffer
         .content()
         .iter()
-        .map(|cell| cell.symbol())
+        .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
     assert!(!rendered.contains(secret));
     assert!(rendered.contains(&"*".repeat(secret.len())));
