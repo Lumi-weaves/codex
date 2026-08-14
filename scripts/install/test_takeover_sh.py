@@ -22,7 +22,7 @@ class TakeoverShTest(unittest.TestCase):
     def test_takeover_sh_never_evals_or_sources_state(self) -> None:
         contents = SCRIPT.read_text(encoding="utf-8")
         self.assertIsNone(re.search(r"(^|[;&|`\s])eval\s", contents, re.M))
-        self.assertNotIn(". \"$TAKEOVER_DIR", contents)
+        self.assertNotIn('. "$TAKEOVER_DIR', contents)
         self.assertNotIn("source ", contents)
 
     def test_help_lists_commands(self) -> None:
@@ -73,8 +73,10 @@ class TakeoverShTest(unittest.TestCase):
             result = self.run_takeover(root, "cli")
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(other.is_file())
-            self.assertEqual(sorted(p.name for p in paths.install_dir.iterdir()),
-                             ["codex", "codex-code-mode-host", "lumi-codex"])
+            self.assertEqual(
+                sorted(p.name for p in paths.install_dir.iterdir()),
+                ["codex", "codex-code-mode-host", "lumi-codex"],
+            )
 
     def test_cli_takeover_preserves_prior_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -261,9 +263,7 @@ class TakeoverShTest(unittest.TestCase):
                 ({"LUMI_ROOT": "/tmp/evil'root"}, "control characters or quotes"),
             ):
                 with self.subTest(env_overrides=env_overrides):
-                    result = self.run_takeover(
-                        root, "cli", env_overrides=env_overrides
-                    )
+                    result = self.run_takeover(root, "cli", env_overrides=env_overrides)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn(message, result.stderr)
 
@@ -377,9 +377,7 @@ class TakeoverShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
             cli_link = paths.install_dir / "codex"
-            self.assertEqual(
-                self.launchctl_get(paths, "CODEX_CLI_PATH"), str(cli_link)
-            )
+            self.assertEqual(self.launchctl_get(paths, "CODEX_CLI_PATH"), str(cli_link))
             plist = paths.home / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
             self.assertTrue(plist.is_file())
             self.assertFalse(plist.is_symlink())
@@ -398,7 +396,9 @@ class TakeoverShTest(unittest.TestCase):
             self.assertTrue(receipt.is_file())
             self.assert_mode(receipt, 0o600)
             self.assertIn("prior_env_kind=set", receipt.read_text(encoding="utf-8"))
-            self.assertIn("prior_env_value=/old/cli", receipt.read_text(encoding="utf-8"))
+            self.assertIn(
+                "prior_env_value=/old/cli", receipt.read_text(encoding="utf-8")
+            )
 
             result = self.run_takeover(root, "rollback", reuse=paths)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -446,10 +446,7 @@ class TakeoverShTest(unittest.TestCase):
             self.assertTrue((paths.takeover_dir / "desktop.receipt").is_file())
             self.assertTrue(
                 (
-                    paths.home
-                    / "Library"
-                    / "LaunchAgents"
-                    / f"{PLIST_LABEL}.plist"
+                    paths.home / "Library" / "LaunchAgents" / f"{PLIST_LABEL}.plist"
                 ).is_file()
             )
             self.assertIsNone(self.launchctl_get(paths, "CODEX_CLI_PATH"))
@@ -485,8 +482,8 @@ class TakeoverShTest(unittest.TestCase):
             launch_agents.mkdir(parents=True)
             plist = launch_agents / f"{PLIST_LABEL}.plist"
             foreign = (
-                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-                "<plist version=\"1.0\"><dict>"
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<plist version="1.0"><dict>'
                 "<key>Label</key><string>com.someone.else</string>"
                 "</dict></plist>\n"
             )
@@ -581,7 +578,9 @@ class TakeoverShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("codex: ok", result.stdout)
             self.assertIn("codex-code-mode-host: ok", result.stdout)
-            self.assertIn(f"CODEX_CLI_PATH: {paths.install_dir / 'codex'}", result.stdout)
+            self.assertIn(
+                f"CODEX_CLI_PATH: {paths.install_dir / 'codex'}", result.stdout
+            )
             self.assertIn("plist: owned, points to", result.stdout)
 
             (paths.install_dir / "codex").unlink()
