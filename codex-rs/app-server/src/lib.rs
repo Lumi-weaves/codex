@@ -12,7 +12,6 @@ use codex_config::ThreadConfigLoader;
 use codex_core::config::Config;
 use codex_core::resolve_installation_id;
 use codex_login::AuthManager;
-use codex_model_provider::create_private_openai_loopback_model_provider;
 #[cfg(debug_assertions)]
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_cli::CliConfigOverrides;
@@ -60,7 +59,6 @@ use codex_config::ConfigLayerSource;
 use codex_config::ConfigLoadError;
 use codex_config::TextRange as CoreTextRange;
 use codex_core::ExecPolicyError;
-use codex_core::RuntimeModelProviderRoutes;
 use codex_core::check_execpolicy_for_warnings;
 use codex_core::config::find_codex_home;
 use codex_exec_server::EnvironmentManager;
@@ -699,34 +697,12 @@ pub async fn run_main_with_transport_options(
             None => error!("{}", warning.summary),
         }
     }
-    let richcodex_backend =
-        richcodex_backend::RichCodexBackend::start_if_bundled(codex_home.as_path()).await?;
-    if let Some(backend) = &richcodex_backend {
-        let snapshot = backend.snapshot();
-        info!(
-            backend_instance_id = %snapshot.instance_id,
-            kernel_source_commit = %snapshot.kernel.source_commit,
-            catalog_revision = snapshot.catalog_revision,
-            provider_count = snapshot.providers.len(),
-            model_count = snapshot.models.len(),
-            "bundled RichCodex model backend is ready"
-        );
-    }
-    let richcodex_backend_client = richcodex_backend
-        .as_ref()
-        .map(richcodex_backend::RichCodexBackend::client);
-    let richcodex_runtime_model_provider_routes = richcodex_backend.as_ref().map(|backend| {
-        let (capability, port) = backend.data_plane();
-        RuntimeModelProviderRoutes::new(
-            "richcodex",
-            create_private_openai_loopback_model_provider(port, capability.to_owned()),
-            std::iter::empty(),
-        )
-    });
-    let richcodex_initial_model_routes = richcodex_backend
-        .as_ref()
-        .map(|backend| backend.snapshot().models.clone())
-        .unwrap_or_default();
+    let richcodex_backend_runtime =
+        richcodex_backend::RichCodexBackendRuntime::start_if_bundled(codex_home.as_path()).await?;
+    let richcodex_backend_client = richcodex_backend_runtime.client();
+    let richcodex_runtime_model_provider_routes =
+        richcodex_backend_runtime.runtime_model_provider_routes();
+    let richcodex_initial_model_routes = richcodex_backend_runtime.initial_model_routes();
     let remote_control_policy = if config
         .config_layer_stack
         .requirements()
@@ -1240,9 +1216,7 @@ pub async fn run_main_with_transport_options(
     for handle in transport_accept_handles {
         let _ = handle.await;
     }
-    if let Some(backend) = richcodex_backend
-        && let Err(err) = backend.shutdown().await
-    {
+    if let Err(err) = richcodex_backend_runtime.shutdown().await {
         warn!(error = %err, "failed to stop bundled RichCodex model backend cleanly");
     }
 
