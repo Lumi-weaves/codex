@@ -941,6 +941,9 @@ pub(crate) enum AppEvent {
         result: Result<ProviderAccountListResponse, String>,
     },
 
+    /// Open the account-creation choices from the provider-account console.
+    OpenProviderAccountAddChoices,
+
     OpenProviderAccountActions {
         account: ProviderAccount,
         expected_revision: String,

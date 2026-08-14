@@ -4,12 +4,9 @@ assertion_line: 3342
 expression: provider_popup
 ---
   Provider accounts
-  Credentials stay in the bundled backend; model routes use opaque account handles.
+  Select an account to manage it; credentials stay in the bundled backend.
 
-› 1. Sign in with OpenAI          Add another ChatGPT/Codex account by device code
-  2. Add OpenAI API key           Create a write-only provider account
-  3. Add compatible API provider  Configure an HTTPS OpenAI-compatible Responses endpoint
-     Secondary Codex (disabled)   OpenAI OAuth · ready (disabled: Account details are read-only in
-                                  this first provider-plane slice.)
+› 1. Secondary Codex        OpenAI OAuth · ready
+  2. Add provider account… (i)  OpenAI sign-in, API key, or compatible provider
 
-  Press enter to confirm or esc to go back
+  enter manage  i add account  esc back
