@@ -3336,12 +3336,35 @@ async fn model_picker_p_opens_safe_provider_plane_and_masks_api_key_input() {
     });
     let provider_popup = render_bottom_popup(&chat, /*width*/ 100);
     assert!(provider_popup.contains("Provider accounts"));
-    assert!(provider_popup.contains("Sign in with OpenAI"));
-    assert!(provider_popup.contains("Add OpenAI API key"));
-    assert!(provider_popup.contains("Add compatible API provider"));
     assert!(provider_popup.contains("Secondary Codex"));
+    assert!(provider_popup.contains("Add provider account"));
     assert!(!provider_popup.contains("opaque-provider-id-must-not-render"));
     assert_chatwidget_snapshot!("provider_accounts", provider_popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenProviderAccountActions { account, .. })
+            if account.user_label == "Secondary Codex"
+    ));
+
+    chat.show_provider_accounts(ProviderAccountListResponse {
+        data: Vec::new(),
+        providers: Vec::new(),
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+        next_cursor: None,
+    });
+    chat.handle_key_event(KeyEvent::from(KeyCode::Char('i')));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenProviderAccountAddChoices)
+    ));
+    chat.open_provider_account_add_choices();
+    let add_popup = render_bottom_popup(&chat, /*width*/ 100);
+    assert!(add_popup.contains("Sign in with OpenAI"));
+    assert!(add_popup.contains("Add OpenAI API key"));
+    assert!(add_popup.contains("Add compatible API provider"));
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
@@ -3533,9 +3556,17 @@ async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
     let popup = render_bottom_popup(&chat, /*width*/ 110);
     assert!(popup.contains("https://auth.openai.com/codex/device"));
     assert!(popup.contains("ABCD-EFGH"));
+    assert!(popup.contains("Open verification page"));
     assert!(!popup.contains("opaque-login-handle-must-not-render"));
     assert_chatwidget_snapshot!("provider_oauth_device_login", popup);
 
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenUrlInBrowser { url })
+            if url == "https://auth.openai.com/codex/device"
+    ));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),

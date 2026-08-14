@@ -21,40 +21,8 @@ const PROVIDER_OAUTH_LOGIN_VIEW_ID: &str = "provider-oauth-login";
 
 impl ChatWidget {
     pub(crate) fn show_provider_accounts(&mut self, response: ProviderAccountListResponse) {
-        let mut items = Vec::with_capacity(response.data.len() + 3);
-        items.push(SelectionItem {
-            name: "Sign in with OpenAI".to_string(),
-            description: Some("Add another ChatGPT/Codex account by device code".to_string()),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenProviderOAuthLabelPrompt);
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-        items.push(SelectionItem {
-            name: "Add OpenAI API key".to_string(),
-            description: Some("Create a write-only provider account".to_string()),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenProviderApiKeyLabelPrompt {
-                    config: openai_api_key_config(),
-                });
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-        items.push(SelectionItem {
-            name: "Add compatible API provider".to_string(),
-            description: Some(
-                "Configure an HTTPS OpenAI-compatible Responses endpoint".to_string(),
-            ),
-            actions: vec![Box::new(|tx| {
-                tx.send(AppEvent::OpenCompatibleProviderIdPrompt);
-            })],
-            dismiss_on_select: true,
-            ..Default::default()
-        });
-
-        for account in response.data {
+        let mut items = Vec::with_capacity(response.data.len() + 1);
+        for account in &response.data {
             let provider_name = response
                 .providers
                 .iter()
@@ -73,7 +41,7 @@ impl ChatWidget {
             let action_account = account.clone();
             let expected_revision = response.desired_state_revision.clone();
             items.push(SelectionItem {
-                name: account.user_label,
+                name: account.user_label.clone(),
                 description: Some(format!("{credential} · {status}")),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenProviderAccountActions {
@@ -85,15 +53,84 @@ impl ChatWidget {
                 ..Default::default()
             });
         }
+        if response.data.is_empty() {
+            items.push(SelectionItem {
+                name: "No provider accounts configured".to_string(),
+                description: Some("Add one before attaching a provider target".to_string()),
+                is_disabled: true,
+                disabled_gutter_marker: Some("·"),
+                ..Default::default()
+            });
+        }
+        items.push(SelectionItem {
+            name: "Add provider account…".to_string(),
+            description: Some("OpenAI sign-in, API key, or compatible provider".to_string()),
+            display_shortcut: Some(key_hint::plain(KeyCode::Char('i')).into()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::OpenProviderAccountAddChoices);
+            })],
+            dismiss_on_select: true,
+            ..Default::default()
+        });
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
             title: Some("Provider accounts".to_string()),
             subtitle: Some(
-                "Credentials stay in the bundled backend; model routes use opaque account handles."
+                "Select an account to manage it; credentials stay in the bundled backend."
                     .to_string(),
             ),
-            footer_hint: Some(standard_popup_hint_line()),
+            footer_hint: Some(Line::from(vec![
+                "enter".bold(),
+                " manage  ".into(),
+                "i".bold(),
+                " add account  ".into(),
+                "esc".bold(),
+                " back".into(),
+            ])),
             items,
+            is_searchable: false,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_provider_account_add_choices(&mut self) {
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Add provider account".to_string()),
+            subtitle: Some("Choose how RichCodex should authenticate model traffic.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items: vec![
+                SelectionItem {
+                    name: "Sign in with OpenAI".to_string(),
+                    description: Some("Add another ChatGPT/Codex account".to_string()),
+                    actions: vec![Box::new(|tx| {
+                        tx.send(AppEvent::OpenProviderOAuthLabelPrompt);
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Add OpenAI API key".to_string(),
+                    description: Some("Create a write-only provider account".to_string()),
+                    actions: vec![Box::new(|tx| {
+                        tx.send(AppEvent::OpenProviderApiKeyLabelPrompt {
+                            config: openai_api_key_config(),
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Add compatible API provider".to_string(),
+                    description: Some(
+                        "Configure an HTTPS OpenAI-compatible Responses endpoint".to_string(),
+                    ),
+                    actions: vec![Box::new(|tx| {
+                        tx.send(AppEvent::OpenCompatibleProviderIdPrompt);
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
             is_searchable: false,
             ..Default::default()
         });
@@ -370,25 +407,45 @@ impl ChatWidget {
             return;
         };
         let login_id = login.login_id.clone();
+        let open_url = verification_url.to_string();
+        let mut header = ColumnRenderable::new();
+        header.push(Line::from("Sign in with OpenAI".bold()));
+        header.push(Line::from("Open this URL:".dim()));
+        header.push(Line::from(open_url.clone().cyan().underlined()));
+        header.push(Line::from(vec![
+            "Device code: ".dim(),
+            user_code.to_string().cyan().bold(),
+        ]));
+        header.push(Line::from("RichCodex is waiting in the background.".dim()));
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(PROVIDER_OAUTH_LOGIN_VIEW_ID),
-            title: Some("Sign in with OpenAI".to_string()),
-            subtitle: Some(format!(
-                "Open {verification_url} and enter code {user_code}; RichCodex is waiting in the background."
-            )),
+            header: Box::new(header),
             footer_hint: Some(standard_popup_hint_line()),
             initial_selected_idx: Some(0),
-            items: vec![SelectionItem {
-                name: "Cancel login".to_string(),
-                description: Some("Stop this device authorization attempt".to_string()),
-                actions: vec![Box::new(move |tx| {
-                    tx.send(AppEvent::CancelProviderOAuthLogin {
-                        login_id: login_id.clone(),
-                    });
-                })],
-                dismiss_on_select: false,
-                ..Default::default()
-            }],
+            items: vec![
+                SelectionItem {
+                    name: "Open verification page".to_string(),
+                    description: Some("Launch the highlighted URL in your browser".to_string()),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::OpenUrlInBrowser {
+                            url: open_url.clone(),
+                        });
+                    })],
+                    dismiss_on_select: false,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Cancel login".to_string(),
+                    description: Some("Stop this device authorization attempt".to_string()),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::CancelProviderOAuthLogin {
+                            login_id: login_id.clone(),
+                        });
+                    })],
+                    dismiss_on_select: false,
+                    ..Default::default()
+                },
+            ],
             ..Default::default()
         });
     }

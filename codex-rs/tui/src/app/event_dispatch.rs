@@ -1326,6 +1326,9 @@ impl App {
                     .chat_widget
                     .add_error_message(format!("Could not load provider accounts: {error}")),
             },
+            AppEvent::OpenProviderAccountAddChoices => {
+                self.chat_widget.open_provider_account_add_choices();
+            }
             AppEvent::OpenProviderAccountActions {
                 account,
                 expected_revision,
