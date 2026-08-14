@@ -1498,7 +1498,7 @@ impl App {
                     choices,
                 }) => {
                     self.chat_widget
-                        .show_model_route_account_choices(draft, choices);
+                        .show_model_route_account_choices(*draft, choices);
                 }
                 Err(error) => self
                     .chat_widget
