@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3550
+expression: methods
+---
+  Sign in with OpenAI
+  Provider account: OpenAI Codex
+
+› 1. Continue in browser  Use a browser that can reach this machine's localhost callback
+  2. Use device code      Best for remote, headless, or container sessions
+
+  Press enter to confirm or esc to go back

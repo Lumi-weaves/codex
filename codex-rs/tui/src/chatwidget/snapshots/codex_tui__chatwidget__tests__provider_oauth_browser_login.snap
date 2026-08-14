@@ -1,0 +1,14 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3617
+expression: popup
+---
+  Sign in with OpenAI
+  Open this URL:
+  https://auth.openai.com/oauth/authorize?state=safe-state
+  RichCodex is waiting in the background.
+
+› 1. Continue in browser  Launch the highlighted URL in your browser
+  2. Cancel login         Stop this authorization attempt
+
+  Press enter to confirm or esc to go back

@@ -59,7 +59,7 @@ use provider_login::request_provider_account_login_start;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 9;
+const BACKEND_PROTOCOL_VERSION: u32 = 10;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -377,6 +377,7 @@ enum AppServerMessage<'a> {
         request_id: &'a str,
         user_label: &'a str,
         account_id: Option<&'a str>,
+        mode: &'a str,
     },
     ProviderAccountReplaceApiKey {
         request_id: &'a str,

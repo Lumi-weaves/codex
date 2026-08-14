@@ -46,15 +46,25 @@ pub struct ProviderAccountAddApiKeyParams {
     pub user_label: String,
 }
 
-/// Begin one backend-owned OpenAI device login.
+/// Begin one backend-owned OpenAI login.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountLoginStartParams {
     pub user_label: String,
+    pub mode: ProviderAccountLoginMode,
     /// Existing OAuth account to reauthenticate in place. Omit to add an account.
     #[ts(optional = nullable)]
     pub account_id: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ProviderAccountLoginMode {
+    Browser,
+    DeviceCode,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, JsonSchema, TS)]

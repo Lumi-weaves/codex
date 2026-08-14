@@ -36,6 +36,7 @@ use codex_app_server_protocol::ProviderAccountListParams;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLoginCancelParams;
 use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
+use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountLoginStartParams;
 use codex_app_server_protocol::ProviderAccountLoginStartResponse;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
@@ -117,6 +118,7 @@ impl App {
         app_server: &AppServerSession,
         user_label: String,
         account_id: Option<String>,
+        mode: ProviderAccountLoginMode,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
@@ -129,6 +131,7 @@ impl App {
                     params: ProviderAccountLoginStartParams {
                         user_label,
                         account_id,
+                        mode,
                     },
                 })
                 .await

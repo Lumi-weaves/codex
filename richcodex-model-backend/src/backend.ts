@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 import { RICHCODEX_BACKEND_KERNEL, type RichCodexBackendKernel } from "./kernel-manifest";
 import { createModelDataPlane } from "./data-plane";
+import { createBrowserOAuthCoordinator } from "./browser-oauth";
 import {
   createDeviceOAuthCoordinator,
   type DeviceOAuthCoordinator,
@@ -20,7 +21,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 9 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 10 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -81,6 +82,8 @@ export interface HeadlessBackendOptions {
   readonly dataPlaneCapability?: string;
   /** Internal deterministic seam for provider-login lifecycle tests. */
   readonly deviceOAuthCoordinator?: DeviceOAuthCoordinator;
+  /** Internal deterministic seam for browser-login lifecycle tests. */
+  readonly browserOAuthCoordinator?: DeviceOAuthCoordinator;
 }
 
 export interface HeadlessBackendRunIo {
@@ -230,6 +233,7 @@ type HeadlessInboundMessage =
     readonly requestId: string;
     readonly userLabel: string;
     readonly accountId: string | null;
+    readonly mode: "browser" | "deviceCode";
   }
   | {
     readonly type: "providerAccountReplaceApiKey";
@@ -552,11 +556,12 @@ function parseInboundMessage(text: string):
       ? null
       : record.accountId;
     if (
-      ownKeys(record).some(key => !["type", "requestId", "userLabel", "accountId"].includes(key))
+      ownKeys(record).some(key => !["type", "requestId", "userLabel", "accountId", "mode"].includes(key))
       || !requestId
       || !isBoundedOpaqueText(record.userLabel, 80)
       || record.userLabel.trim() !== record.userLabel
       || accountId !== null && !isBoundedOpaqueText(accountId, 80)
+      || record.mode !== "browser" && record.mode !== "deviceCode"
     ) {
       return { ok: false, error: protocolError("malformed_message") };
     }
@@ -567,6 +572,7 @@ function parseInboundMessage(text: string):
         requestId,
         userLabel: record.userLabel,
         accountId,
+        mode: record.mode,
       },
     };
   }
@@ -927,6 +933,11 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
     modelPlaneStore,
     env: options.env,
   });
+  const browserOAuth = options.browserOAuthCoordinator ?? createBrowserOAuthCoordinator({
+    modelPlaneStore,
+    env: options.env,
+  });
+  const loginModes = new Map<string, "browser" | "deviceCode">();
   const dataPlaneCapability = options.dataPlaneCapability
     ?? options.env?.[RICHCODEX_BACKEND_DATA_PLANE_TOKEN_ENV];
   if (!dataPlaneCapability) {
@@ -1073,10 +1084,12 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 continue;
               }
               if (parsed.message.type === "providerAccountLoginStart") {
-                const login = await deviceOAuth.start(
+                const coordinator = parsed.message.mode === "browser" ? browserOAuth : deviceOAuth;
+                const login = await coordinator.start(
                   parsed.message.userLabel,
                   parsed.message.accountId ?? undefined,
                 );
+                loginModes.set(login.loginId, parsed.message.mode);
                 if (!await write({
                   type: "providerAccountLoginStartResult",
                   requestId: parsed.message.requestId,
@@ -1128,7 +1141,10 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 continue;
               }
               if (parsed.message.type === "providerAccountLoginStatus") {
-                const login = deviceOAuth.status(parsed.message.loginId);
+                const mode = loginModes.get(parsed.message.loginId);
+                if (!mode) throw new ModelPlaneError("login_not_found");
+                const login = (mode === "browser" ? browserOAuth : deviceOAuth)
+                  .status(parsed.message.loginId);
                 if (!await write({
                   type: "providerAccountLoginStatusResult",
                   requestId: parsed.message.requestId,
@@ -1137,7 +1153,10 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 continue;
               }
               if (parsed.message.type === "providerAccountLoginCancel") {
-                const login = deviceOAuth.cancel(parsed.message.loginId);
+                const mode = loginModes.get(parsed.message.loginId);
+                if (!mode) throw new ModelPlaneError("login_not_found");
+                const login = (mode === "browser" ? browserOAuth : deviceOAuth)
+                  .cancel(parsed.message.loginId);
                 if (!await write({
                   type: "providerAccountLoginCancelResult",
                   requestId: parsed.message.requestId,
@@ -1182,6 +1201,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
         return { exitCode: 0, reason: "eof" };
       } finally {
         deviceOAuth.shutdown();
+        browserOAuth.shutdown();
         await dataPlane.stop();
       }
     },

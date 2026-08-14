@@ -22,6 +22,7 @@ import { RICHCODEX_BACKEND_KERNEL } from "../src/kernel-manifest";
 import { createModelDataPlane } from "../src/data-plane";
 import { createDeviceOAuthCoordinator } from "../src/device-oauth";
 import type { DeviceOAuthCoordinator, SafeProviderLogin } from "../src/device-oauth";
+import { createBrowserOAuthCoordinator } from "../src/browser-oauth";
 import { createModelPlaneStore } from "../src/model-plane";
 import type {
   ModelExecutionCandidate,
@@ -49,6 +50,7 @@ async function runBackend(
   input: string,
   stateRoot: string,
   deviceOAuthCoordinator?: DeviceOAuthCoordinator,
+  browserOAuthCoordinator?: DeviceOAuthCoordinator,
 ): Promise<{ lines: unknown[]; result: unknown; stderr: string[] }> {
   const lines: unknown[] = [];
   const stderr: string[] = [];
@@ -57,6 +59,7 @@ async function runBackend(
     env: {},
     dataPlaneCapability: TEST_DATA_PLANE_CAPABILITY,
     deviceOAuthCoordinator,
+    browserOAuthCoordinator,
   });
   const result = await backend.run({
     stdin: inputOf(input),
@@ -150,6 +153,62 @@ function executionStore(
     markAccountStatus: onStatus,
   };
 }
+
+describe("RichCodex browser OAuth coordinator", () => {
+  test("validates callback state and persists only exchanged credentials", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-browser-oauth-"));
+    const now = 1_900_000_000_000;
+    const store = createModelPlaneStore(root, { now: () => now });
+    const coordinator = createBrowserOAuthCoordinator({
+      modelPlaneStore: store,
+      env: {},
+      now: () => now,
+      callbackPort: 0,
+      createLoginId: () => "browser-login-safe",
+      fetch: async (input, init) => {
+        expect(String(input)).toBe("https://auth.openai.com/oauth/token");
+        const body = new URLSearchParams(String(init?.body));
+        expect(body.get("code")).toBe("callback-code");
+        expect(body.get("code_verifier")).toBeTruthy();
+        return new Response(JSON.stringify({
+          id_token: jwt({
+            exp: Math.floor((now + 3_600_000) / 1000),
+            chatgpt_account_id: "browser-workspace",
+          }),
+          access_token: jwt({ exp: Math.floor((now + 3_600_000) / 1000) }),
+          refresh_token: "browser-refresh-token",
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      },
+    });
+
+    const started = await coordinator.start("Browser Account");
+    const authorization = new URL(started.verificationUrl!);
+    expect(authorization.origin + authorization.pathname)
+      .toBe("https://auth.openai.com/oauth/authorize");
+    const state = authorization.searchParams.get("state");
+    const redirect = new URL(authorization.searchParams.get("redirect_uri")!);
+    const wrong = await fetch(
+      `http://127.0.0.1:${redirect.port}${redirect.pathname}?code=wrong&state=wrong`,
+    );
+    expect(wrong.status).toBe(400);
+    expect(coordinator.status(started.loginId).status).toBe("awaitingUser");
+
+    const accepted = await fetch(
+      `http://127.0.0.1:${redirect.port}${redirect.pathname}?code=callback-code&state=${state}`,
+    );
+    expect(accepted.status).toBe(200);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (coordinator.status(started.loginId).status === "completed") break;
+      await Bun.sleep(10);
+    }
+    const completed = coordinator.status(started.loginId);
+    expect(completed.status).toBe("completed");
+    expect(completed.account?.userLabel).toBe("Browser Account");
+    expect(JSON.stringify(completed)).not.toContain("callback-code");
+    expect(JSON.stringify(completed)).not.toContain("browser-refresh-token");
+    coordinator.shutdown();
+  });
+});
 
 describe("RichCodex private model data plane", () => {
   test("requires its process capability and rewrites only the stable model tag", async () => {
@@ -646,7 +705,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 9,
+      protocolVersion: 10,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -721,6 +780,7 @@ describe("RichCodex headless backend composition root", () => {
         type: "providerAccountLoginStart",
         requestId: "login-start",
         userLabel: "Third Codex",
+        mode: "deviceCode",
       })}\n${JSON.stringify({
         type: "providerAccountLoginStatus",
         requestId: "login-status",
@@ -760,6 +820,82 @@ describe("RichCodex headless backend composition root", () => {
     ]);
     expect(JSON.stringify(result.lines)).not.toContain("access_token");
     expect(JSON.stringify(result.lines)).not.toContain("refresh_token");
+  });
+
+  test("routes browser-login lifecycle messages to the browser coordinator", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-headless-browser-login-"));
+    const calls: string[] = [];
+    const login = (status: SafeProviderLogin["status"], url: string | null): SafeProviderLogin => ({
+      loginId: "browser-safe-handle",
+      status,
+      verificationUrl: url,
+      userCode: null,
+      expiresAt: 2_000,
+      failure: null,
+      account: null,
+      desiredStateRevision: 0,
+      catalogRevision: 0,
+    });
+    const browserOAuthCoordinator: DeviceOAuthCoordinator = {
+      start: async userLabel => {
+        calls.push(`start:${userLabel}`);
+        return login("awaitingUser", "https://auth.openai.com/oauth/authorize?safe=1");
+      },
+      status: loginId => {
+        calls.push(`status:${loginId}`);
+        return login("exchanging", null);
+      },
+      cancel: loginId => {
+        calls.push(`cancel:${loginId}`);
+        return login("cancelled", null);
+      },
+      shutdown: () => { calls.push("shutdown"); },
+    };
+
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountLoginStart",
+        requestId: "browser-start",
+        userLabel: "Browser Codex",
+        mode: "browser",
+      })}\n${JSON.stringify({
+        type: "providerAccountLoginStatus",
+        requestId: "browser-status",
+        loginId: "browser-safe-handle",
+      })}\n${JSON.stringify({
+        type: "providerAccountLoginCancel",
+        requestId: "browser-cancel",
+        loginId: "browser-safe-handle",
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "browser-shutdown" })}\n`,
+      root,
+      undefined,
+      browserOAuthCoordinator,
+    );
+
+    expect(result.lines.slice(1)).toEqual([
+      {
+        type: "providerAccountLoginStartResult",
+        requestId: "browser-start",
+        ...login("awaitingUser", "https://auth.openai.com/oauth/authorize?safe=1"),
+      },
+      {
+        type: "providerAccountLoginStatusResult",
+        requestId: "browser-status",
+        ...login("exchanging", null),
+      },
+      {
+        type: "providerAccountLoginCancelResult",
+        requestId: "browser-cancel",
+        ...login("cancelled", null),
+      },
+      { type: "shutdownComplete", requestId: "browser-shutdown" },
+    ]);
+    expect(calls).toEqual([
+      "start:Browser Codex",
+      "status:browser-safe-handle",
+      "cancel:browser-safe-handle",
+      "shutdown",
+    ]);
   });
 
   test("imports an explicitly selected Codex login and lists only safe account state", async () => {

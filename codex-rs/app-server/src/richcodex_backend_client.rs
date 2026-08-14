@@ -267,6 +267,7 @@ enum BackendCommand {
         request_id: String,
         user_label: String,
         account_id: Option<String>,
+        mode: String,
         response: oneshot::Sender<Result<ProviderAccountLoginResult, RichCodexBackendClientError>>,
     },
     ReadLogin {
@@ -395,6 +396,7 @@ impl RichCodexBackendClient {
         &self,
         user_label: String,
         account_id: Option<String>,
+        mode: String,
     ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError> {
         let (response, received) = oneshot::channel();
         self.commands
@@ -402,6 +404,7 @@ impl RichCodexBackendClient {
                 request_id: self.request_id(),
                 user_label,
                 account_id,
+                mode,
                 response,
             })
             .await
@@ -744,6 +747,7 @@ async fn run_backend_actor(
                 request_id,
                 user_label,
                 account_id,
+                mode,
                 response,
             } => {
                 let result = request_provider_account_login_start(
@@ -752,6 +756,7 @@ async fn run_backend_actor(
                     &request_id,
                     &user_label,
                     account_id.as_deref(),
+                    &mode,
                 )
                 .await;
                 let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
