@@ -69,7 +69,7 @@ fn codex_behavior_resource_exists_once_with_agent_owned_legacy_provenance() {
 
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].owner, "Agent Definition codex@1");
-    assert!(matches[0].provenance.contains("legacy model-catalog"));
+    assert!(matches[0].provenance.contains("legacy template"));
     assert!(
         matches[0]
             .source_navigation
@@ -77,11 +77,15 @@ fn codex_behavior_resource_exists_once_with_agent_owned_legacy_provenance() {
             .iter()
             .any(|module| module == "codex-rs/models-manager/models.json")
     );
-    assert!(PromptInvocationKind::ALL.into_iter().all(|invocation| {
-        !invocation
-            .contributions()
-            .contains(&PromptContributionKind::CodexAgentBaseInstructions)
-    }));
+    assert_eq!(
+        matches[0].applicable_invocations,
+        vec![
+            PromptInvocationKind::Turn,
+            PromptInvocationKind::StartupPrewarm,
+            PromptInvocationKind::LocalCompaction,
+            PromptInvocationKind::RemoteCompaction,
+        ]
+    );
 }
 
 #[test]

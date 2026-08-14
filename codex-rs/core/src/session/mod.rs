@@ -15,6 +15,8 @@ use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::agent_program::applies_to_session_source;
+use crate::agent_program::resolve_agent_program;
 use crate::attestation::AttestationProvider;
 use crate::cockpit_operating_contract::COCKPIT_OPERATING_CONTRACT_OPEN_TAG;
 use crate::compact;
@@ -669,10 +671,6 @@ impl Session {
             );
         }
 
-        // Resolve base instructions for the session. Priority order:
-        // 1. config.base_instructions override
-        // 2. conversation history => session_meta.base_instructions
-        // 3. rendered instructions_template for current model
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
@@ -683,11 +681,21 @@ impl Session {
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
-        let base_instructions = config
-            .base_instructions
-            .clone()
-            .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
-            .unwrap_or_else(|| model_info.get_model_instructions(config.personality));
+        let base_instructions = match (
+            config.agent.as_ref(),
+            applies_to_session_source(&session_source),
+        ) {
+            (Some(selection), true) => {
+                resolve_agent_program(selection, config.personality)?
+                    .base_instructions
+                    .text
+            }
+            _ => config
+                .base_instructions
+                .clone()
+                .or_else(|| conversation_history.get_base_instructions().map(|s| s.text))
+                .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
+        };
 
         // Dynamic tools are defined at thread start and persisted in rollout session metadata.
         let dynamic_tools = if dynamic_tools.is_empty() {

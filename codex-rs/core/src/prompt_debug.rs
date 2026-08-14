@@ -15,12 +15,12 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
 use codex_utils_string::approx_tokens_from_byte_count;
 use serde::Serialize;
-use serde_json::Value;
-use sha2::Digest;
-use sha2::Sha256;
 use tokio_util::sync::CancellationToken;
 
 use crate::TurnContext;
+use crate::agent_program::ResolvedAgentProgram;
+use crate::agent_program::applies_to_session_source;
+use crate::agent_program::resolve_agent_program;
 use crate::client_common::Prompt;
 use crate::cockpit_operating_contract::CockpitContractRole;
 use crate::cockpit_operating_contract::CockpitOperatingContractDescriptor;
@@ -29,12 +29,15 @@ use crate::config::Config;
 use crate::context::CockpitOperatingContract;
 use crate::context::ContextualUserFragment;
 use crate::multi_agent_v2_capability::MultiAgentV2CapabilityProjection;
+use crate::prompt_agent_program_receipt::AgentProgramReceipt;
 use crate::prompt_capability_receipt::MultiAgentV2CapabilityReceipt;
 use crate::prompt_capability_receipt::inspect_multi_agent_v2_capability;
 use crate::prompt_census::PROMPT_CENSUS_SCHEMA_VERSION;
 use crate::prompt_census::PromptContributionKind;
 use crate::prompt_census::PromptInvocationKind;
 use crate::prompt_compiler::PromptCompiler;
+use crate::prompt_hash::canonical_json_bytes;
+use crate::prompt_hash::sha256_hex;
 use crate::prompt_inheritance::PromptInheritanceProvenance;
 use crate::resolve_installation_id;
 use crate::responses_metadata::CodexResponsesRequestKind;
@@ -44,7 +47,7 @@ use crate::thread_manager::StartThreadOptions;
 use crate::thread_manager::ThreadManager;
 use crate::thread_manager::thread_store_from_config;
 
-const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 6;
+const PROMPT_RECEIPT_SCHEMA_VERSION: u32 = 7;
 
 /// The client-owned logical request produced for one local prompt diagnostic.
 ///
@@ -55,6 +58,7 @@ pub struct PromptRequestReceipt {
     schema_version: u32,
     compiler_revision: String,
     agent_selection: Option<AgentSelection>,
+    agent_program: Option<AgentProgramReceipt>,
     invocation_kind: PromptInvocationKind,
     request_form: PromptRequestForm,
     provider: PromptRequestProvider,
@@ -63,6 +67,7 @@ pub struct PromptRequestReceipt {
     cockpit_contract: CockpitContractReceipt,
     multi_agent_v2_capability: MultiAgentV2CapabilityReceipt,
     summary: PromptReceiptSummary,
+    execution: PromptExecutionReceipt,
     bounds: PromptReceiptBounds,
     request: ResponsesApiRequest,
 }
@@ -86,6 +91,8 @@ pub struct RenderedPromptRequestReceipt<'a> {
     compiler_revision: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_selection: Option<&'a AgentSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_program: Option<&'a AgentProgramReceipt>,
     invocation_kind: PromptInvocationKind,
     request_form: &'a PromptRequestForm,
     provider: &'a PromptRequestProvider,
@@ -94,6 +101,7 @@ pub struct RenderedPromptRequestReceipt<'a> {
     cockpit_contract: &'a CockpitContractReceipt,
     multi_agent_v2_capability: &'a MultiAgentV2CapabilityReceipt,
     summary: &'a PromptReceiptSummary,
+    execution: &'a PromptExecutionReceipt,
     bounds: &'a PromptReceiptBounds,
     redaction: PromptReceiptRedaction,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,6 +113,7 @@ impl PromptRequestReceipt {
     pub(crate) fn from_lowered_request(
         invocation_kind: PromptInvocationKind,
         agent_selection: Option<AgentSelection>,
+        agent_program: Option<&ResolvedAgentProgram>,
         provider_id: String,
         provider_info: &codex_model_provider_info::ModelProviderInfo,
         use_responses_lite: bool,
@@ -122,7 +131,16 @@ impl PromptRequestReceipt {
         } else {
             PromptClientNormalization::NonOpenAiSanitized
         };
-        let summary = build_receipt_summary(&request)?;
+        let agent_program_receipt = agent_program
+            .map(|program| AgentProgramReceipt::inspect(program, &request))
+            .transpose()?;
+        let summary = build_receipt_summary(&request, agent_program_receipt.is_some())?;
+        let execution = PromptExecutionReceipt {
+            requested_model_tag: request.model.clone(),
+            actual_execution_target: None,
+            actual_execution_target_status: "available_only_after_dispatch",
+            final_logical_request_sha256: summary.canonical_request_sha256.clone(),
+        };
         let cockpit_contract = CockpitContractReceipt::inspect(
             multi_agent_v2_projection.and_then(|projection| projection.prompt_role),
             &request,
@@ -134,6 +152,7 @@ impl PromptRequestReceipt {
             schema_version: PROMPT_RECEIPT_SCHEMA_VERSION,
             compiler_revision: context_inheritance.compiler_revision.clone(),
             agent_selection,
+            agent_program: agent_program_receipt,
             invocation_kind,
             request_form: PromptRequestForm::LogicalFull,
             provider: PromptRequestProvider {
@@ -146,13 +165,17 @@ impl PromptRequestReceipt {
             provenance: PromptReceiptProvenance {
                 census_schema_version: PROMPT_CENSUS_SCHEMA_VERSION,
                 invocation_ref: invocation_kind,
-                contribution_refs: invocation_kind.contributions(),
+                contribution_refs: effective_contribution_refs(
+                    invocation_kind,
+                    agent_program.is_some(),
+                ),
                 provider_processing: "provider_owned_unknown",
             },
             context_inheritance,
             cockpit_contract,
             multi_agent_v2_capability,
             summary,
+            execution,
             bounds: PromptReceiptBounds {
                 receipt_content_truncated: false,
                 request_is_post_client_lowering: true,
@@ -168,6 +191,7 @@ impl PromptRequestReceipt {
             schema_version: self.schema_version,
             compiler_revision: &self.compiler_revision,
             agent_selection: self.agent_selection.as_ref(),
+            agent_program: self.agent_program.as_ref(),
             invocation_kind: self.invocation_kind,
             request_form: &self.request_form,
             provider: &self.provider,
@@ -176,6 +200,7 @@ impl PromptRequestReceipt {
             cockpit_contract: &self.cockpit_contract,
             multi_agent_v2_capability: &self.multi_agent_v2_capability,
             summary: &self.summary,
+            execution: &self.execution,
             bounds: &self.bounds,
             redaction: PromptReceiptRedaction {
                 view,
@@ -193,6 +218,15 @@ impl PromptRequestReceipt {
     pub fn request(&self) -> &ResponsesApiRequest {
         &self.request
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptExecutionReceipt {
+    requested_model_tag: String,
+    actual_execution_target: Option<serde_json::Value>,
+    actual_execution_target_status: &'static str,
+    final_logical_request_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -306,7 +340,7 @@ pub enum PromptClientNormalization {
 pub struct PromptReceiptProvenance {
     census_schema_version: u32,
     invocation_ref: PromptInvocationKind,
-    contribution_refs: &'static [PromptContributionKind],
+    contribution_refs: Vec<PromptContributionKind>,
     provider_processing: &'static str,
 }
 
@@ -325,7 +359,7 @@ pub struct PromptReceiptSummary {
 #[serde(rename_all = "camelCase")]
 pub struct PromptReceiptRegion {
     id: &'static str,
-    contribution_refs: &'static [PromptContributionKind],
+    contribution_refs: Vec<PromptContributionKind>,
     sha256: String,
     canonical_bytes: usize,
     estimated_tokens: u64,
@@ -542,10 +576,17 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
         .await?;
     let multi_agent_v2_projection =
         crate::multi_agent_v2_capability::multi_agent_v2_projection(turn_context.as_ref());
-    let agent_selection = sess.get_config().await.agent.clone();
+    let config = sess.get_config().await;
+    let agent_selection = config.agent.clone();
+    let agent_program = agent_selection
+        .as_ref()
+        .filter(|_| applies_to_session_source(&turn_context.session_source))
+        .map(|selection| resolve_agent_program(selection, turn_context.personality))
+        .transpose()?;
     PromptRequestReceipt::from_lowered_request(
         PromptInvocationKind::Turn,
         agent_selection,
+        agent_program.as_ref(),
         turn_context.config.model_provider_id.clone(),
         turn_context.provider.info(),
         turn_context.model_info.use_responses_lite,
@@ -555,27 +596,42 @@ pub(crate) async fn build_prompt_request_receipt_from_session(
     )
 }
 
-fn build_receipt_summary(request: &ResponsesApiRequest) -> CodexResult<PromptReceiptSummary> {
+fn build_receipt_summary(
+    request: &ResponsesApiRequest,
+    agent_program_included: bool,
+) -> CodexResult<PromptReceiptSummary> {
     let request_bytes = canonical_json_bytes(request)?;
+    let base_contribution = if agent_program_included {
+        PromptContributionKind::CodexAgentBaseInstructions
+    } else {
+        PromptContributionKind::BaseInstructions
+    };
     let regions = vec![
         receipt_region(
             "base_instructions",
-            &[
-                PromptContributionKind::BaseInstructions,
-                PromptContributionKind::ProviderLowering,
-            ],
+            vec![base_contribution, PromptContributionKind::ProviderLowering],
             &request.instructions,
             /*sensitive*/ true,
         )?,
         receipt_region(
             "ordered_input",
-            INPUT_CONTRIBUTIONS,
+            INPUT_CONTRIBUTIONS
+                .iter()
+                .copied()
+                .map(|contribution| {
+                    if contribution == PromptContributionKind::BaseInstructions {
+                        base_contribution
+                    } else {
+                        contribution
+                    }
+                })
+                .collect(),
             &request.input,
             /*sensitive*/ true,
         )?,
         receipt_region(
             "tool_specifications",
-            &[
+            vec![
                 PromptContributionKind::ToolSpecifications,
                 PromptContributionKind::ProviderLowering,
             ],
@@ -584,7 +640,7 @@ fn build_receipt_summary(request: &ResponsesApiRequest) -> CodexResult<PromptRec
         )?,
         receipt_region(
             "output_control",
-            &[
+            vec![
                 PromptContributionKind::OutputSchema,
                 PromptContributionKind::ProviderLowering,
             ],
@@ -593,7 +649,7 @@ fn build_receipt_summary(request: &ResponsesApiRequest) -> CodexResult<PromptRec
         )?,
         receipt_region(
             "request_shape",
-            &[PromptContributionKind::ProviderLowering],
+            vec![PromptContributionKind::ProviderLowering],
             &serde_json::json!({
                 "model": request.model,
                 "tool_choice": request.tool_choice,
@@ -622,7 +678,7 @@ fn build_receipt_summary(request: &ResponsesApiRequest) -> CodexResult<PromptRec
 
 fn receipt_region<T: Serialize>(
     id: &'static str,
-    contribution_refs: &'static [PromptContributionKind],
+    contribution_refs: Vec<PromptContributionKind>,
     value: &T,
     sensitive: bool,
 ) -> CodexResult<PromptReceiptRegion> {
@@ -637,32 +693,22 @@ fn receipt_region<T: Serialize>(
     })
 }
 
-fn canonical_json_bytes<T: Serialize>(value: &T) -> CodexResult<Vec<u8>> {
-    let value = serde_json::to_value(value)
-        .map_err(|err| CodexErr::Fatal(format!("failed to serialize prompt receipt: {err}")))?;
-    serde_json::to_vec(&canonicalize_json(value))
-        .map_err(|err| CodexErr::Fatal(format!("failed to encode prompt receipt: {err}")))
-}
-
-fn canonicalize_json(value: Value) -> Value {
-    match value {
-        Value::Array(values) => Value::Array(values.into_iter().map(canonicalize_json).collect()),
-        Value::Object(values) => {
-            let mut entries = values.into_iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key, canonicalize_json(value)))
-                    .collect(),
-            )
-        }
-        scalar => scalar,
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+fn effective_contribution_refs(
+    invocation_kind: PromptInvocationKind,
+    agent_program_included: bool,
+) -> Vec<PromptContributionKind> {
+    invocation_kind
+        .contributions()
+        .iter()
+        .copied()
+        .filter(|contribution| {
+            if agent_program_included {
+                *contribution != PromptContributionKind::BaseInstructions
+            } else {
+                *contribution != PromptContributionKind::CodexAgentBaseInstructions
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
