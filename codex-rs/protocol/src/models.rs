@@ -1317,6 +1317,10 @@ pub const BASE_INSTRUCTIONS_DEFAULT: &str = include_str!("prompts/base_instructi
 pub enum BaseInstructionsProvenance {
     /// The instructions were explicitly configured and must survive model changes unchanged.
     Custom,
+    /// The instructions were compiled from one pinned Agent Definition revision.
+    Agent {
+        agent: crate::agent::AgentDefinitionRef,
+    },
     /// The instructions were generated from this model's instruction template.
     Model { model: String },
 }
@@ -2292,6 +2296,12 @@ mod tests {
 
         for provenance in [
             BaseInstructionsProvenance::Custom,
+            BaseInstructionsProvenance::Agent {
+                agent: crate::agent::AgentDefinitionRef {
+                    id: "codex".to_string(),
+                    revision: 1,
+                },
+            },
             BaseInstructionsProvenance::Model {
                 model: "gpt-5.2".to_string(),
             },

@@ -276,6 +276,10 @@ async fn apply_role_regenerates_model_instructions_when_personality_changes() {
 
         let expected = match provenance {
             BaseInstructionsProvenance::Model { .. } => (None, None),
+            BaseInstructionsProvenance::Agent { agent } => (
+                Some("inherited instructions".to_string()),
+                Some(BaseInstructionsProvenance::Agent { agent }),
+            ),
             BaseInstructionsProvenance::Custom => (
                 Some("inherited instructions".to_string()),
                 Some(BaseInstructionsProvenance::Custom),

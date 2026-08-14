@@ -635,7 +635,15 @@ impl Session {
             session_configuration.collaboration_mode.model(),
             session_configuration.provider
         );
-        let base_instructions_provenance = if config.base_instructions.is_some() {
+        let base_instructions_provenance = if let Some(selection) = config
+            .agent
+            .as_ref()
+            .filter(|_| crate::agent_program::applies_to_session_source(&session_source))
+        {
+            Some(BaseInstructionsProvenance::Agent {
+                agent: selection.agent.clone(),
+            })
+        } else if config.base_instructions.is_some() {
             Some(
                 config
                     .base_instructions_provenance

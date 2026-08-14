@@ -98,7 +98,8 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
     model
 }
 
-fn strip_personality_section(mut instructions: String) -> String {
+/// Remove the complete top-level personality section from rendered base instructions.
+pub fn strip_personality_section(mut instructions: String) -> String {
     let mut section_start = None;
     let mut section_end = None;
     let mut offset = 0;
