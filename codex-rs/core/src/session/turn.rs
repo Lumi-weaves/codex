@@ -2636,6 +2636,7 @@ async fn try_run_sampling_request(
                 sess.send_event(
                     &turn_context,
                     EventMsg::RichCodexExecutionReceipt(RichCodexExecutionReceiptEvent {
+                        client_attempt_id: receipt.client_attempt_id,
                         model_tag: receipt.model_tag,
                         resolved_model: receipt.resolved_model,
                         provider_id: receipt.provider_id,

@@ -133,6 +133,9 @@ pub struct RichCodexExecutionReceipt {
     pub account_id: String,
     pub target_id: String,
     pub attempt: u32,
+    /// Opaque client-owned identity echoed by the private RichCodex transport.
+    #[serde(skip)]
+    pub client_attempt_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

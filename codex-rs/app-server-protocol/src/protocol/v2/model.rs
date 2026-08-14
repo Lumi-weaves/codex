@@ -178,6 +178,7 @@ pub struct ModelReroutedNotification {
 pub struct RichCodexExecutionReceiptNotification {
     pub thread_id: String,
     pub turn_id: String,
+    pub client_attempt_id: Option<String>,
     pub model_tag: String,
     pub resolved_model: String,
     pub provider_id: String,

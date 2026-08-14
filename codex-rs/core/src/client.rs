@@ -148,6 +148,7 @@ use codex_response_debug_context::telemetry_transport_error_message;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 pub const X_CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
+pub const X_CODEX_CLIENT_ATTEMPT_ID_HEADER: &str = "x-codex-client-attempt-id";
 pub const X_CODEX_ROUTING_HINT_HEADER: &str = "x-codex-routing-hint";
 pub const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 pub const X_CODEX_TURN_METADATA_HEADER: &str = "x-codex-turn-metadata";
@@ -1668,6 +1669,7 @@ impl ModelClientSession {
                 session_telemetry_for_request(session_telemetry, &request);
             let trace_attempt = trace_context.start_attempt();
             trace_attempt.add_request_headers(&mut options.extra_headers);
+            add_client_attempt_id_header(&self.client.state.provider, &mut options.extra_headers);
             trace_attempt.record_started(&request);
             let client = ApiResponsesClient::new(
                 transport,
@@ -2150,6 +2152,16 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+}
+
+fn add_client_attempt_id_header(provider: &SharedModelProvider, headers: &mut ApiHeaderMap) {
+    if !provider.requires_direct_transport() {
+        return;
+    }
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    if let Ok(value) = HeaderValue::from_str(&attempt_id) {
+        headers.insert(X_CODEX_CLIENT_ATTEMPT_ID_HEADER, value);
     }
 }
 

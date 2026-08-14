@@ -1967,6 +1967,9 @@ pub struct ModelRerouteEvent {
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct RichCodexExecutionReceiptEvent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub client_attempt_id: Option<String>,
     pub model_tag: String,
     pub resolved_model: String,
     pub provider_id: String,

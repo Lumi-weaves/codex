@@ -10,6 +10,12 @@
       "minimum": 0.0,
       "type": "integer"
     },
+    "clientAttemptId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "modelTag": {
       "type": "string"
     },

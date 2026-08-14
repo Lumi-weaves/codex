@@ -33,6 +33,7 @@ import type {
 } from "../src/model-plane";
 
 const TEST_DATA_PLANE_CAPABILITY = "richcodex-test-capability-0123456789abcdef";
+const TEST_CLIENT_ATTEMPT_ID = "018f0000-0000-4000-8000-000000000001";
 
 function executionReceipt(response: Response): Record<string, unknown> {
   const encoded = response.headers.get("x-richcodex-execution-receipt");
@@ -256,6 +257,7 @@ describe("RichCodex private model data plane", () => {
       headers: {
         "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
         "content-type": "application/json",
+        "x-codex-client-attempt-id": TEST_CLIENT_ATTEMPT_ID,
         "x-codex-turn-state": "turn-state",
       },
       body: JSON.stringify({ model: "my-fast-model", input: [{ role: "user" }] }),
@@ -263,6 +265,7 @@ describe("RichCodex private model data plane", () => {
     expect(response.status).toBe(200);
     expect(response.headers.get("x-richcodex-model-tag")).toBe("my-fast-model");
     expect(response.headers.get("x-richcodex-account-id")).toBe("account-1");
+    expect(response.headers.get("x-richcodex-client-attempt-id")).toBe(TEST_CLIENT_ATTEMPT_ID);
     expect(executionReceipt(response)).toEqual({
       modelTag: "my-fast-model",
       resolvedModel: "gpt-5.6-luna",
@@ -278,6 +281,8 @@ describe("RichCodex private model data plane", () => {
       .toBe("Bearer private-access-token");
     expect(new Headers(calls[0]!.init?.headers).get("x-richcodex-data-plane-token"))
       .toBeNull();
+    expect(new Headers(calls[0]!.init?.headers).get("x-codex-client-attempt-id"))
+      .toBeNull();
     expect(new Headers(calls[0]!.init?.headers).get("chatgpt-account-id"))
       .toBe("workspace-account");
     expect(JSON.parse(String(calls[0]!.init?.body))).toMatchObject({
@@ -285,6 +290,41 @@ describe("RichCodex private model data plane", () => {
       input: [{ role: "user" }],
     });
     expect(statuses).toEqual([["account-1", "ready"]]);
+  });
+
+  test("rejects malformed or non-v4 client attempt identity before dispatch", async () => {
+    let dispatched = false;
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([]),
+      fetch: (async () => {
+        dispatched = true;
+        return new Response(null, { status: 200 });
+      }) as typeof fetch,
+    });
+
+    for (const clientAttemptId of [
+      "not-a-client-attempt",
+      "018f0000-0000-1000-8000-000000000001",
+      "018f0000-0000-4000-7000-000000000001",
+      "018F0000-0000-4000-8000-000000000001",
+    ]) {
+      const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+        method: "POST",
+        headers: {
+          "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+          "content-type": "application/json",
+          "x-codex-client-attempt-id": clientAttemptId,
+        },
+        body: JSON.stringify({ model: "my-fast-model", input: [] }),
+      }));
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: "invalid_client_attempt_id" },
+      });
+    }
+    expect(dispatched).toBe(false);
   });
 
   test("refreshes expiring OAuth and falls through quota-limited targets", async () => {
@@ -334,7 +374,10 @@ describe("RichCodex private model data plane", () => {
         }
         return new Response('data: {"type":"response.completed"}\n\n', {
           status: 200,
-          headers: { "content-type": "text/event-stream" },
+          headers: {
+            "content-type": "text/event-stream",
+            "x-richcodex-client-attempt-id": "018f0000-0000-4000-8000-000000000099",
+          },
         });
       }) as typeof fetch,
     });
@@ -344,12 +387,14 @@ describe("RichCodex private model data plane", () => {
       headers: {
         "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
         "content-type": "application/json",
+        "x-codex-client-attempt-id": TEST_CLIENT_ATTEMPT_ID,
       },
       body: JSON.stringify({ model: "my-fast-model", input: [] }),
     }));
     expect(response.status).toBe(200);
     expect(response.headers.get("x-richcodex-account-id")).toBe("account-2");
     expect(response.headers.get("x-richcodex-route-attempt")).toBe("2");
+    expect(response.headers.get("x-richcodex-client-attempt-id")).toBe(TEST_CLIENT_ATTEMPT_ID);
     expect(responseAccounts).toEqual(["workspace-1", "workspace-2"]);
     expect(replacements).toEqual([{
       kind: "oauth",
@@ -397,6 +442,7 @@ describe("RichCodex private model data plane", () => {
     expect(headers.get("authorization")).toBe("Bearer sk-private-api-key");
     expect(headers.get("chatgpt-account-id")).toBeNull();
     expect(headers.get("x-richcodex-data-plane-token")).toBeNull();
+    expect(response.headers.get("x-richcodex-client-attempt-id")).toBeNull();
     expect(statuses).toEqual([["api-account", "ready"]]);
   });
 

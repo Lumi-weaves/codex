@@ -724,6 +724,7 @@ async fn live_richcodex_execution_receipt_renders_safe_route() {
             codex_app_server_protocol::RichCodexExecutionReceiptNotification {
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),
+                client_attempt_id: Some("018f0000-0000-4000-8000-000000000001".to_string()),
                 model_tag: "reviewer".to_string(),
                 resolved_model: "qwen3-coder".to_string(),
                 provider_id: "alibaba".to_string(),
