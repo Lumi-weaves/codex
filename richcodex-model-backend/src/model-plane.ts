@@ -226,6 +226,11 @@ export interface ModelPlaneStore {
   addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
   previewAccountRemoval(accountId: string): AccountRemovalPreview;
   removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
+  renameAccount(
+    accountId: string,
+    expectedRevision: number,
+    userLabel: string,
+  ): SafeProviderAccount;
   replaceApiKeyCredential(
     accountId: string,
     expectedRevision: number,
@@ -1069,6 +1074,35 @@ export function createModelPlaneStore(
       persistDocument(stateRoot, path, next);
       document = next;
       return preview.account;
+    },
+    renameAccount(
+      accountId: string,
+      expectedRevision: number,
+      userLabel: string,
+    ): SafeProviderAccount {
+      if (
+        !isSafeText(accountId, 80)
+        || !Number.isSafeInteger(expectedRevision)
+        || expectedRevision < 0
+        || !isSafeText(userLabel, 80)
+        || userLabel.trim() !== userLabel
+      ) throw new ModelPlaneError("invalid_request");
+      if (expectedRevision !== document.desiredStateRevision) {
+        throw new ModelPlaneError("revision_conflict");
+      }
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      const nextAccount: StoredProviderAccount = { ...account, userLabel };
+      const next = nextDocument(document, {
+        accounts: document.accounts.map(candidate =>
+          candidate.id === accountId ? nextAccount : candidate
+        ),
+        modelTags: document.modelTags,
+        displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeAccount(nextAccount, now());
     },
     replaceApiKeyCredential(
       accountId: string,

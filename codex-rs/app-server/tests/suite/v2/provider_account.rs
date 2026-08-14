@@ -10,6 +10,7 @@ use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountLoginStatusResponse;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountRenameResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 use codex_app_server_protocol::RequestId;
@@ -191,6 +192,26 @@ async fn provider_account_api_key_add_returns_only_safe_account_state() -> Resul
     assert_eq!(replaced.account.id, response.account.id);
     assert!(!serde_json::to_string(&replaced)?.contains(replacement));
 
+    let rename_id = server
+        .send_raw_request(
+            "providerAccount/rename",
+            Some(serde_json::json!({
+                "accountId": response.account.id,
+                "expectedRevision": replaced.desired_state_revision,
+                "userLabel": "Alibaba Renamed",
+            })),
+        )
+        .await?;
+    let renamed: ProviderAccountRenameResponse =
+        timeout(DEFAULT_TIMEOUT, server.read_response(rename_id)).await??;
+    assert_eq!(
+        renamed.account,
+        ProviderAccount {
+            user_label: "Alibaba Renamed".to_string(),
+            ..replaced.account.clone()
+        }
+    );
+
     let preview_id = server
         .send_raw_request(
             "providerAccount/removalPreview",
@@ -305,7 +326,7 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":10,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:5e7c03c78ba23105858523d923f000bfcb0ba6f352395fd5f72cdf823c49c97a","compositionVersion":4},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":11,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:5e7c03c78ba23105858523d923f000bfcb0ba6f352395fd5f72cdf823c49c97a","compositionVersion":4},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in
@@ -320,11 +341,14 @@ while IFS= read -r line; do
     *'"type":"providerAccountReplaceApiKey"'*'sk-replacement-canary-must-not-return'*)
       printf '{"type":"providerAccountReplaceApiKeyResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
       ;;
+    *'"type":"providerAccountRename"'*)
+      printf '{"type":"providerAccountRenameResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Renamed","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      ;;
     *'"type":"providerAccountRemovalPreview"'*)
-      printf '{"type":"providerAccountRemovalPreviewResult","requestId":"%s","desiredStateRevision":3,"catalogRevision":3,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124},"affectedTargets":[],"canRemove":true}\n' "$request_id"
+      printf '{"type":"providerAccountRemovalPreviewResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Renamed","credentialKind":"apiKey","status":"verificationRequired","addedAt":124},"affectedTargets":[],"canRemove":true}\n' "$request_id"
       ;;
     *'"type":"providerAccountRemove"'*)
-      printf '{"type":"providerAccountRemoveResult","requestId":"%s","desiredStateRevision":4,"catalogRevision":4,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Primary","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
+      printf '{"type":"providerAccountRemoveResult","requestId":"%s","desiredStateRevision":5,"catalogRevision":5,"account":{"id":"local-api-key","providerId":"alibaba","userLabel":"Alibaba Renamed","credentialKind":"apiKey","status":"verificationRequired","addedAt":124}}\n' "$request_id"
       ;;
     *'"type":"providerAccountLoginStart"'*)
       printf '{"type":"providerAccountLoginStartResult","requestId":"%s","loginId":"login-safe-handle","status":"awaitingUser","verificationUrl":"https://auth.openai.com/codex/device","userCode":"SAFE-CODE","expiresAt":2000,"failure":null,"account":null,"desiredStateRevision":1,"catalogRevision":1}\n' "$request_id"

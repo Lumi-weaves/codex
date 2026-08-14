@@ -38,6 +38,8 @@ use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemovalTarget;
 use codex_app_server_protocol::ProviderAccountRemoveParams;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountRenameParams;
+use codex_app_server_protocol::ProviderAccountRenameResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyParams;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
@@ -201,6 +203,30 @@ impl ProviderAccountRequestProcessor {
             .replace_api_key_provider_account(expected_revision, params.account_id, params.api_key)
             .await
             .map(|result| ProviderAccountReplaceApiKeyResponse {
+                account: provider_account(result.account),
+                desired_state_revision: result.desired_state_revision.to_string(),
+                catalog_revision: result.catalog_revision.to_string(),
+            })
+            .map(|response| Some(response.into()))
+            .map_err(provider_account_error)
+    }
+
+    pub(crate) async fn rename(
+        &self,
+        params: ProviderAccountRenameParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        let expected_revision = parse_revision(&params.expected_revision)?;
+        if !valid_safe_text(&params.account_id, 80)
+            || !valid_safe_text(&params.user_label, 80)
+            || params.user_label.trim() != params.user_label
+        {
+            return Err(invalid_params("provider account rename input is invalid"));
+        }
+        let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        backend
+            .rename_provider_account(expected_revision, params.account_id, params.user_label)
+            .await
+            .map(|result| ProviderAccountRenameResponse {
                 account: provider_account(result.account),
                 desired_state_revision: result.desired_state_revision.to_string(),
                 catalog_revision: result.catalog_revision.to_string(),

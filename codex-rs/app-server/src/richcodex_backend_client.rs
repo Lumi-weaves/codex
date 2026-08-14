@@ -249,6 +249,14 @@ enum BackendCommand {
         response:
             oneshot::Sender<Result<ProviderAccountMutationResult, RichCodexBackendClientError>>,
     },
+    RenameAccount {
+        request_id: String,
+        expected_revision: u64,
+        account_id: String,
+        user_label: String,
+        response:
+            oneshot::Sender<Result<ProviderAccountMutationResult, RichCodexBackendClientError>>,
+    },
     PreviewRemoval {
         request_id: String,
         account_id: String,
@@ -445,6 +453,28 @@ impl RichCodexBackendClient {
             .send(BackendCommand::PreviewRemoval {
                 request_id: self.request_id(),
                 account_id,
+                response,
+            })
+            .await
+            .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+        received
+            .await
+            .unwrap_or(Err(RichCodexBackendClientError::Unavailable))
+    }
+
+    pub(crate) async fn rename_provider_account(
+        &self,
+        expected_revision: u64,
+        account_id: String,
+        user_label: String,
+    ) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError> {
+        let (response, received) = oneshot::channel();
+        self.commands
+            .send(BackendCommand::RenameAccount {
+                request_id: self.request_id(),
+                expected_revision,
+                account_id,
+                user_label,
                 response,
             })
             .await
@@ -789,6 +819,31 @@ async fn run_backend_actor(
                     ));
                 }
             }
+            BackendCommand::RenameAccount {
+                request_id,
+                expected_revision,
+                account_id,
+                user_label,
+                response,
+            } => {
+                let result = request_provider_account_rename(
+                    &mut stdin,
+                    &mut stdout,
+                    &request_id,
+                    expected_revision,
+                    &account_id,
+                    &user_label,
+                )
+                .await;
+                let is_fatal = matches!(&result, Err(RichCodexBackendClientError::Unavailable));
+                let _ = response.send(result);
+                if is_fatal {
+                    stop_child(&mut child).await;
+                    return Err(io::Error::other(
+                        "RichCodex model backend became unavailable",
+                    ));
+                }
+            }
             BackendCommand::CancelLogin {
                 request_id,
                 login_id,
@@ -1110,6 +1165,56 @@ where
         .map_err(|_| RichCodexBackendClientError::Unavailable)?
     {
         BackendMessage::ProviderAccountReplaceApiKeyResult {
+            request_id: returned,
+            desired_state_revision,
+            catalog_revision,
+            account,
+        } if returned == request_id => {
+            validate_provider_account(&account)
+                .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+            Ok(ProviderAccountMutationResult {
+                desired_state_revision,
+                catalog_revision,
+                account,
+            })
+        }
+        BackendMessage::OperationError {
+            request_id: returned,
+            code,
+            ..
+        } if returned == request_id => Err(code.into()),
+        _ => Err(RichCodexBackendClientError::Unavailable),
+    }
+}
+
+async fn request_provider_account_rename<W, R>(
+    writer: &mut W,
+    reader: &mut R,
+    request_id: &str,
+    expected_revision: u64,
+    account_id: &str,
+    user_label: &str,
+) -> Result<ProviderAccountMutationResult, RichCodexBackendClientError>
+where
+    W: AsyncWrite + Unpin,
+    R: AsyncBufRead + Unpin,
+{
+    write_message(
+        writer,
+        &AppServerMessage::ProviderAccountRename {
+            request_id,
+            expected_revision,
+            account_id,
+            user_label,
+        },
+    )
+    .await
+    .map_err(|_| RichCodexBackendClientError::Unavailable)?;
+    match read_message(reader, REQUEST_TIMEOUT)
+        .await
+        .map_err(|_| RichCodexBackendClientError::Unavailable)?
+    {
+        BackendMessage::ProviderAccountRenameResult {
             request_id: returned,
             desired_state_revision,
             catalog_revision,

@@ -77,6 +77,16 @@ pub struct ProviderAccountReplaceApiKeyParams {
     pub api_key: String,
 }
 
+/// Rename a provider account without changing its opaque identity, credential, or model targets.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRenameParams {
+    pub account_id: String,
+    pub expected_revision: String,
+    pub user_label: String,
+}
+
 impl std::fmt::Debug for ProviderAccountReplaceApiKeyParams {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -280,6 +290,15 @@ pub struct ProviderAccountAddApiKeyResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ProviderAccountReplaceApiKeyResponse {
+    pub account: ProviderAccount,
+    pub desired_state_revision: String,
+    pub catalog_revision: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ProviderAccountRenameResponse {
     pub account: ProviderAccount,
     pub desired_state_revision: String,
     pub catalog_revision: String,

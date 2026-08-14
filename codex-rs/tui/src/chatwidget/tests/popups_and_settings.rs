@@ -3256,11 +3256,11 @@ async fn model_picker_e_opens_ordered_target_editor_without_rendering_account_ha
     chat.open_all_models_popup(vec![preset]);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Char('e')));
-    let model_tag = match rx.try_recv() {
-        Ok(AppEvent::BeginModelRouteTargetManage { model_tag }) => model_tag,
+    let selected_model = match rx.try_recv() {
+        Ok(AppEvent::BeginModelRouteTargetManage { selected_model }) => selected_model,
         other => panic!("expected BeginModelRouteTargetManage, got {other:?}"),
     };
-    assert_eq!(model_tag, "gpt-5.4");
+    assert_eq!(selected_model.model, "gpt-5.4");
 
     chat.show_model_route_target_editor(model_route_target_editor_fixture());
     let popup = render_bottom_popup(&chat, /*width*/ 100);
@@ -3453,6 +3453,7 @@ async fn provider_plane_reauthenticates_an_api_key_without_changing_its_handle()
     chat.open_provider_account_actions(account.clone(), "7".to_string());
     let popup = render_bottom_popup(&chat, /*width*/ 100);
     assert_chatwidget_snapshot!("provider_account_actions", popup);
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     let (selected, expected_revision) = match rx.try_recv() {
         Ok(AppEvent::OpenProviderApiKeyReplacementPrompt {
@@ -3482,6 +3483,45 @@ async fn provider_plane_reauthenticates_an_api_key_without_changing_its_handle()
         }
         other => panic!("expected replacement submission, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn provider_plane_renames_an_account_without_changing_its_handle() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let account = ProviderAccount {
+        id: "opaque-account-handle".to_string(),
+        provider_id: "openai".to_string(),
+        user_label: "Before".to_string(),
+        credential_kind: ProviderAccountCredentialKind::OAuth,
+        status: ProviderAccountStatus::Ready,
+        added_at: 1,
+    };
+    chat.open_provider_account_actions(account.clone(), "7".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (selected, expected_revision) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderAccountRenamePrompt {
+            account,
+            expected_revision,
+        }) => (account, expected_revision),
+        other => panic!("expected rename prompt, got {other:?}"),
+    };
+    assert_eq!(selected, account);
+
+    chat.open_provider_account_rename_prompt(selected, expected_revision);
+    let prompt = render_bottom_popup(&chat, /*width*/ 100);
+    assert_chatwidget_snapshot!("provider_account_rename_prompt", prompt);
+    chat.handle_paste("A".to_string());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SubmitProviderAccountRename {
+            account_id,
+            expected_revision,
+            user_label,
+        }) if account_id == "opaque-account-handle"
+            && expected_revision == "7"
+            && user_label == "BeforeA"
+    ));
 }
 
 #[tokio::test]
@@ -3578,6 +3618,12 @@ async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
     assert!(!popup.contains("opaque-login-handle-must-not-render"));
     assert_chatwidget_snapshot!("provider_oauth_device_login", popup);
 
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CopyProviderDeviceCode { user_code }) if user_code == "ABCD-EFGH"
+    ));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),

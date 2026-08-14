@@ -1,5 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3125
 expression: popup
 ---
   Select Model and Effort
@@ -16,4 +17,4 @@ expression: popup
 › 5. GPT-5.2 (current)      tag: gpt-5.2 · Optimized for professional work and
                             long-running agents.
 
-  Enter select  ·  i add route  ·  d retire route  ·  Esc close
+  Enter select · p providers · i add · e targets · d retire · Esc close

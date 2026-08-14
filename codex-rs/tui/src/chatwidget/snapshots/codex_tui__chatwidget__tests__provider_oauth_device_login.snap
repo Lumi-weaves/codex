@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/popups_and_settings.rs
-assertion_line: 3561
+assertion_line: 3619
 expression: popup
 ---
   Sign in with OpenAI
@@ -9,7 +9,8 @@ expression: popup
   Device code: ABCD-EFGH
   RichCodex is waiting in the background.
 
-› 1. Open verification page  Launch the highlighted URL in your browser
-  2. Cancel login            Stop this authorization attempt
+› 1. Copy device code  ABCD-EFGH  Copy the exact code; works when terminal word selection splits at the dash
+  2. Open verification page       Launch the highlighted URL in your browser
+  3. Cancel login                 Stop this authorization attempt
 
   Press enter to confirm or esc to go back

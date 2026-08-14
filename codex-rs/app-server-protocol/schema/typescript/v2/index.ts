@@ -371,6 +371,7 @@ export type { ProviderAccount } from "./ProviderAccount";
 export type { ProviderAccountCredentialKind } from "./ProviderAccountCredentialKind";
 export type { ProviderAccountLogin } from "./ProviderAccountLogin";
 export type { ProviderAccountLoginFailure } from "./ProviderAccountLoginFailure";
+export type { ProviderAccountLoginMode } from "./ProviderAccountLoginMode";
 export type { ProviderAccountLoginStatus } from "./ProviderAccountLoginStatus";
 export type { ProviderAccountProvider } from "./ProviderAccountProvider";
 export type { ProviderAccountProviderStatus } from "./ProviderAccountProviderStatus";

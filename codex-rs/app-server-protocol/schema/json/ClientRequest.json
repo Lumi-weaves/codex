@@ -2577,6 +2577,13 @@
       ],
       "type": "object"
     },
+    "ProviderAccountLoginMode": {
+      "enum": [
+        "browser",
+        "deviceCode"
+      ],
+      "type": "string"
+    },
     "RealtimeConversationVersion": {
       "enum": [
         "v1",

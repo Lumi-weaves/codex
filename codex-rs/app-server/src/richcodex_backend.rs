@@ -59,7 +59,7 @@ use provider_login::request_provider_account_login_start;
 
 const BACKEND_PATH_ENV: &str = "RICHCX_MODEL_BACKEND_PATH";
 const BACKEND_DATA_PLANE_TOKEN_ENV: &str = "RICHCODEX_BACKEND_DATA_PLANE_TOKEN";
-const BACKEND_PROTOCOL_VERSION: u32 = 10;
+const BACKEND_PROTOCOL_VERSION: u32 = 11;
 const MAX_PROTOCOL_LINE_BYTES: usize = 64 * 1024;
 const MAX_SNAPSHOT_ITEMS: usize = 512;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -259,6 +259,12 @@ enum BackendMessage {
         catalog_revision: u64,
         account: ProviderAccountSummary,
     },
+    ProviderAccountRenameResult {
+        request_id: String,
+        desired_state_revision: u64,
+        catalog_revision: u64,
+        account: ProviderAccountSummary,
+    },
     ProviderAccountRemovalPreviewResult {
         request_id: String,
         desired_state_revision: u64,
@@ -384,6 +390,12 @@ enum AppServerMessage<'a> {
         expected_revision: u64,
         account_id: &'a str,
         api_key: &'a str,
+    },
+    ProviderAccountRename {
+        request_id: &'a str,
+        expected_revision: u64,
+        account_id: &'a str,
+        user_label: &'a str,
     },
     ProviderAccountRemovalPreview {
         request_id: &'a str,
@@ -641,6 +653,7 @@ where
         | BackendMessage::ProviderAccountImportResult { .. }
         | BackendMessage::ProviderAccountAddApiKeyResult { .. }
         | BackendMessage::ProviderAccountReplaceApiKeyResult { .. }
+        | BackendMessage::ProviderAccountRenameResult { .. }
         | BackendMessage::ProviderAccountRemovalPreviewResult { .. }
         | BackendMessage::ProviderAccountRemoveResult { .. }
         | BackendMessage::ProviderAccountLoginStartResult { .. }

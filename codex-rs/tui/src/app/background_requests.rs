@@ -46,6 +46,8 @@ use codex_app_server_protocol::ProviderAccountRemovalPreviewParams;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveParams;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountRenameParams;
+use codex_app_server_protocol::ProviderAccountRenameResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyParams;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::RequestId;
@@ -213,6 +215,33 @@ impl App {
         });
     }
 
+    pub(super) fn rename_provider_account(
+        &mut self,
+        app_server: &AppServerSession,
+        account_id: String,
+        expected_revision: String,
+        user_label: String,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request_id =
+                RequestId::String(format!("provider-account-rename-{}", Uuid::new_v4()));
+            let result: Result<ProviderAccountRenameResponse, String> = request_handle
+                .request_typed(ClientRequest::ProviderAccountRename {
+                    request_id,
+                    params: ProviderAccountRenameParams {
+                        account_id,
+                        expected_revision,
+                        user_label,
+                    },
+                })
+                .await
+                .map_err(|error| error.to_string());
+            app_event_tx.send(AppEvent::ProviderAccountRenameCompleted { result });
+        });
+    }
+
     pub(super) fn preview_provider_account_removal(
         &mut self,
         app_server: &AppServerSession,
@@ -343,12 +372,12 @@ impl App {
     pub(super) fn begin_model_route_target_manage(
         &mut self,
         app_server: &AppServerSession,
-        model_tag: String,
+        selected_model: codex_protocol::openai_models::ModelPreset,
     ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
-            let result = fetch_model_route_target_editor(request_handle, &model_tag).await;
+            let result = fetch_model_route_target_editor(request_handle, selected_model).await;
             app_event_tx.send(AppEvent::ModelRouteTargetEditorLoaded { result });
         });
     }
@@ -1139,8 +1168,8 @@ async fn fetch_model_route_account_choices(
 
 async fn fetch_model_route_target_editor(
     request_handle: AppServerRequestHandle,
-    model_tag: &str,
-) -> Result<crate::app_event::ModelRouteTargetEditorState, String> {
+    selected_model: codex_protocol::openai_models::ModelPreset,
+) -> Result<crate::app_event::ModelRouteTargetLoadResult, String> {
     let accounts_request_id =
         RequestId::String(format!("provider-account-list-{}", Uuid::new_v4()));
     let accounts: ProviderAccountListResponse = request_handle
@@ -1162,21 +1191,46 @@ async fn fetch_model_route_target_editor(
         })
         .await
         .map_err(|error| error.to_string())?;
-    let Some(route) = routes
+    if let Some(route) = routes
         .data
         .into_iter()
-        .find(|route| route.model_tag == model_tag && !route.retired)
-    else {
-        return Err(format!(
-            "`{model_tag}` is not an active managed RichCodex model route"
+        .find(|route| route.model_tag == selected_model.model)
+    {
+        if route.retired {
+            return Err(format!(
+                "`{}` is retired; explicit route restore is not available yet",
+                selected_model.model
+            ));
+        }
+        return Ok(crate::app_event::ModelRouteTargetLoadResult::Existing(
+            crate::app_event::ModelRouteTargetEditorState {
+                expected_revision: routes.desired_state_revision,
+                route,
+                accounts: accounts.data,
+            },
         ));
-    };
+    }
 
-    Ok(crate::app_event::ModelRouteTargetEditorState {
-        expected_revision: routes.desired_state_revision,
-        route,
-        accounts: accounts.data,
-    })
+    // `e` currently operates on raw model rows, so the picker model is also the semantic and
+    // upstream identity for its first binding. Launch presets must be resolved before this point;
+    // their preset IDs must never be persisted as model tags or semantic model identities.
+    let model_tag = selected_model.model.clone();
+    let display_name = selected_model.display_name.clone();
+    Ok(
+        crate::app_event::ModelRouteTargetLoadResult::FirstBindDraft {
+            draft: crate::app_event::ModelRouteDraft {
+                display_name,
+                model_tag,
+                selected_model: selected_model.clone(),
+            },
+            choices: crate::app_event::ModelRouteAccountChoices {
+                expected_revision: routes.desired_state_revision,
+                semantic_model: selected_model.model.clone(),
+                upstream_model_id: selected_model.model,
+                accounts: accounts.data,
+            },
+        },
+    )
 }
 
 async fn retire_model_route(

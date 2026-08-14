@@ -143,6 +143,7 @@ function executionStore(
     addApiKeyAccount: () => { throw new Error("not used"); },
     previewAccountRemoval: () => { throw new Error("not used"); },
     removeAccount: () => { throw new Error("not used"); },
+    renameAccount: () => { throw new Error("not used"); },
     replaceApiKeyCredential: () => { throw new Error("not used"); },
     reauthenticateOAuthAccount: () => { throw new Error("not used"); },
     createModelRoute: () => { throw new Error("not used"); },
@@ -705,7 +706,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 10,
+      protocolVersion: 11,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -1641,6 +1642,65 @@ describe("RichCodex headless backend composition root", () => {
       desiredStateRevision: 4,
       data: [{ modelTag: "ordered-route", targets: [{ id: newTargetId }, { id: originalTargetId }] }],
     });
+  });
+
+  test("renames a provider account without changing its handle, credential, or model targets", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-account-rename-"));
+    const stateRoot = join(root, "backend-state");
+    const added = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAddApiKey",
+        requestId: "add-account",
+        providerId: "openai",
+        providerDisplayName: "OpenAI",
+        apiBaseUrl: "https://api.openai.com/v1",
+        apiKey: "sk-rename-preserved-secret",
+        userLabel: "Before",
+      })}\n`,
+      stateRoot,
+    );
+    const accountId = (added.lines[1] as { account: { id: string } }).account.id;
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "modelRouteCreate",
+        requestId: "create-route",
+        expectedRevision: 1,
+        modelTag: "rename-route",
+        displayName: "Rename Route",
+        semanticModel: "gpt-5.4",
+        providerId: "openai",
+        accountId,
+        upstreamModelId: "gpt-5.4",
+      })}\n${JSON.stringify({
+        type: "providerAccountRename",
+        requestId: "rename-account",
+        expectedRevision: 2,
+        accountId,
+        userLabel: "After",
+      })}\n${JSON.stringify({
+        type: "providerAccountList",
+        requestId: "list-accounts",
+        cursor: null,
+        limit: null,
+      })}\n${JSON.stringify({
+        type: "modelRouteRead",
+        requestId: "read-routes",
+      })}\n`,
+      stateRoot,
+    );
+
+    expect(result.lines[2]).toMatchObject({
+      type: "providerAccountRenameResult",
+      desiredStateRevision: 3,
+      account: { id: accountId, userLabel: "After" },
+    });
+    expect(result.lines[3]).toMatchObject({
+      data: [{ id: accountId, userLabel: "After" }],
+    });
+    expect(result.lines[4]).toMatchObject({
+      data: [{ modelTag: "rename-route", targets: [{ accountId }] }],
+    });
+    expect(JSON.stringify(result.lines)).not.toContain("sk-rename-preserved-secret");
   });
 
   test("rejects stale route creation without changing the model plane", async () => {

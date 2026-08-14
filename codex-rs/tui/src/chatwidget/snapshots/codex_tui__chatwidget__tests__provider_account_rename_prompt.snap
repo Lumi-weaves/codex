@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/popups_and_settings.rs
+assertion_line: 3512
+expression: prompt
+---
+▌ Rename provider account
+▌ The opaque handle, credential, and every model target stay unchanged.
+▌
+▌ Before
+
+Press enter to confirm or esc to go back

@@ -1336,6 +1336,9 @@ impl MessageProcessor {
                     .replace_api_key(params)
                     .await
             }
+            ClientRequest::ProviderAccountRename { params, .. } => {
+                self.provider_account_processor.rename(params).await
+            }
             ClientRequest::ProviderAccountRemovalPreview { params, .. } => {
                 self.provider_account_processor
                     .removal_preview(params)

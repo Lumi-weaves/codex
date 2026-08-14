@@ -15,6 +15,7 @@ use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountRenameResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountStatus;
 
@@ -142,6 +143,8 @@ impl ChatWidget {
         account: ProviderAccount,
         expected_revision: String,
     ) {
+        let rename_account = account.clone();
+        let rename_revision = expected_revision.clone();
         let reauth_account = account.clone();
         let reauth_revision = expected_revision;
         let remove_account_id = account.id.clone();
@@ -150,6 +153,21 @@ impl ChatWidget {
             subtitle: Some(format!("{} · opaque account handle", account.provider_id)),
             footer_hint: Some(standard_popup_hint_line()),
             items: vec![
+                SelectionItem {
+                    name: "Rename account".to_string(),
+                    description: Some(
+                        "Change the label without changing credentials or model targets"
+                            .to_string(),
+                    ),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::OpenProviderAccountRenamePrompt {
+                            account: rename_account.clone(),
+                            expected_revision: rename_revision.clone(),
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
                 SelectionItem {
                     name: "Reauthenticate".to_string(),
                     description: Some(
@@ -187,6 +205,49 @@ impl ChatWidget {
             is_searchable: false,
             ..Default::default()
         });
+    }
+
+    pub(crate) fn open_provider_account_rename_prompt(
+        &mut self,
+        account: ProviderAccount,
+        expected_revision: String,
+    ) {
+        let tx = self.app_event_tx.clone();
+        let account_id = account.id;
+        let view = CustomPromptView::new(
+            "Rename provider account".to_string(),
+            "Friendly account name".to_string(),
+            account.user_label,
+            Some(
+                "The opaque handle, credential, and every model target stay unchanged.".to_string(),
+            ),
+            Box::new(move |user_label| {
+                tx.send(AppEvent::SubmitProviderAccountRename {
+                    account_id: account_id.clone(),
+                    expected_revision: expected_revision.clone(),
+                    user_label,
+                });
+            }),
+        );
+        self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn finish_provider_account_rename(
+        &mut self,
+        result: Result<ProviderAccountRenameResponse, String>,
+    ) {
+        match result {
+            Ok(response) => {
+                self.add_info_message(
+                    format!("Renamed provider account: {}", response.account.user_label),
+                    None,
+                );
+                self.app_event_tx.send(AppEvent::BeginProviderAccountManage);
+            }
+            Err(error) => {
+                self.add_error_message(format!("Could not rename provider account: {error}"));
+            }
+        }
     }
 
     pub(crate) fn open_provider_api_key_replacement_prompt(
@@ -471,7 +532,26 @@ impl ChatWidget {
             header: Box::new(header),
             footer_hint: Some(standard_popup_hint_line()),
             initial_selected_idx: Some(0),
-            items: vec![
+            items: {
+                let mut items = Vec::with_capacity(if user_code.is_some() { 3 } else { 2 });
+                if let Some(user_code) = user_code {
+                    let code = user_code.to_string();
+                    items.push(SelectionItem {
+                        name: format!("Copy device code  {user_code}"),
+                        description: Some(
+                            "Copy the exact code; works when terminal word selection splits at the dash"
+                                .to_string(),
+                        ),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::CopyProviderDeviceCode {
+                                user_code: code.clone(),
+                            });
+                        })],
+                        dismiss_on_select: false,
+                        ..Default::default()
+                    });
+                }
+                items.extend([
                 SelectionItem {
                     name: if user_code.is_some() {
                         "Open verification page".to_string()
@@ -498,9 +578,21 @@ impl ChatWidget {
                     dismiss_on_select: false,
                     ..Default::default()
                 },
-            ],
+                ]);
+                items
+            },
             ..Default::default()
         });
+    }
+
+    pub(crate) fn copy_provider_device_code(&mut self, user_code: &str) {
+        match crate::clipboard_copy::copy_to_clipboard(user_code) {
+            Ok(lease) => {
+                self.clipboard_lease = lease;
+                self.add_info_message("Copied device code to clipboard".to_string(), None);
+            }
+            Err(error) => self.add_error_message(format!("Could not copy device code: {error}")),
+        }
     }
 
     pub(crate) fn finish_provider_oauth_login(

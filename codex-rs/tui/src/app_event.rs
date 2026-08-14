@@ -41,6 +41,7 @@ use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
+use codex_app_server_protocol::ProviderAccountRenameResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
@@ -224,6 +225,15 @@ pub(crate) struct ModelRouteTargetEditorState {
     pub(crate) expected_revision: String,
     pub(crate) route: ModelRoute,
     pub(crate) accounts: Vec<ProviderAccount>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ModelRouteTargetLoadResult {
+    Existing(ModelRouteTargetEditorState),
+    FirstBindDraft {
+        draft: ModelRouteDraft,
+        choices: ModelRouteAccountChoices,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -955,6 +965,21 @@ pub(crate) enum AppEvent {
         expected_revision: String,
     },
 
+    OpenProviderAccountRenamePrompt {
+        account: ProviderAccount,
+        expected_revision: String,
+    },
+
+    SubmitProviderAccountRename {
+        account_id: String,
+        expected_revision: String,
+        user_label: String,
+    },
+
+    ProviderAccountRenameCompleted {
+        result: Result<ProviderAccountRenameResponse, String>,
+    },
+
     SubmitProviderApiKeyReplacement {
         account_id: String,
         expected_revision: String,
@@ -1040,6 +1065,11 @@ pub(crate) enum AppEvent {
         result: Result<ProviderAccountLogin, String>,
     },
 
+    /// Copy the backend-provided device code without normalizing or reformatting it.
+    CopyProviderDeviceCode {
+        user_code: String,
+    },
+
     /// Finish one provider login after background status polling reaches a terminal state.
     ProviderOAuthLoginFinished {
         result: Result<ProviderAccountLogin, String>,
@@ -1057,12 +1087,12 @@ pub(crate) enum AppEvent {
 
     /// Load one managed route plus safe provider accounts for target editing.
     BeginModelRouteTargetManage {
-        model_tag: String,
+        selected_model: ModelPreset,
     },
 
     /// Present an ordered target editor after the model plane has been read.
     ModelRouteTargetEditorLoaded {
-        result: Result<ModelRouteTargetEditorState, String>,
+        result: Result<ModelRouteTargetLoadResult, String>,
     },
 
     /// Present actions for one existing target.

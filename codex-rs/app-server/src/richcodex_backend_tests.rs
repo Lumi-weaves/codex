@@ -7,7 +7,7 @@ const TEST_WAIT: Duration = Duration::from_millis(100);
 
 #[tokio::test]
 async fn reads_bounded_ready_snapshot() {
-    let input = br#"{"type":"ready","protocolVersion":10,"instanceId":"backend-1","desiredStateRevision":3,"catalogRevision":7,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:5e7c03c78ba23105858523d923f000bfcb0ba6f352395fd5f72cdf823c49c97a","compositionVersion":4},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"ready"}],"models":[{"modelTag":"gpt-5.6-luna","displayName":"Luna","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-1","providerId":"openai","accountId":"account-1","upstreamModelId":"gpt-5.6-luna","priority":0,"status":"unverified"}]}]}
+    let input = br#"{"type":"ready","protocolVersion":11,"instanceId":"backend-1","desiredStateRevision":3,"catalogRevision":7,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:5e7c03c78ba23105858523d923f000bfcb0ba6f352395fd5f72cdf823c49c97a","compositionVersion":4},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":2,"status":"ready"}],"models":[{"modelTag":"gpt-5.6-luna","displayName":"Luna","retired":false,"semanticModel":"gpt-5.6-luna","targets":[{"id":"target-1","providerId":"openai","accountId":"account-1","upstreamModelId":"gpt-5.6-luna","priority":0,"status":"unverified"}]}]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 
@@ -47,7 +47,7 @@ async fn reads_bounded_ready_snapshot() {
 
 #[tokio::test]
 async fn rejects_a_kernel_provenance_mismatch() {
-    let input = br#"{"type":"ready","protocolVersion":10,"instanceId":"backend-1","desiredStateRevision":0,"catalogRevision":0,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","selectionDigest":"sha256:untrusted-selection","compositionVersion":4},"providers":[],"models":[]}
+    let input = br#"{"type":"ready","protocolVersion":11,"instanceId":"backend-1","desiredStateRevision":0,"catalogRevision":0,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"floating-main","contentDigest":"sha256:untrusted","selectionDigest":"sha256:untrusted-selection","compositionVersion":4},"providers":[],"models":[]}
 "#;
     let mut reader = BufReader::new(&input[..]);
 

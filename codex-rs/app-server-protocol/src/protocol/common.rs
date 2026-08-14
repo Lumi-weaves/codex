@@ -966,6 +966,12 @@ client_request_definitions! {
         serialization: global("richcodex-model-plane"),
         response: v2::ProviderAccountReplaceApiKeyResponse,
     },
+    #[experimental("providerAccount/rename")]
+    ProviderAccountRename => "providerAccount/rename" {
+        params: v2::ProviderAccountRenameParams,
+        serialization: global("richcodex-model-plane"),
+        response: v2::ProviderAccountRenameResponse,
+    },
     #[experimental("providerAccount/removalPreview")]
     ProviderAccountRemovalPreview => "providerAccount/removalPreview" {
         params: v2::ProviderAccountRemovalPreviewParams,

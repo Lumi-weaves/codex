@@ -21,7 +21,7 @@ import {
 } from "./model-plane";
 
 /** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 10 as const;
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 11 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -159,6 +159,7 @@ export type HeadlessProviderAccountImportResultMessage = {
   readonly type:
     | "providerAccountImportResult"
     | "providerAccountAddApiKeyResult"
+    | "providerAccountRenameResult"
     | "providerAccountReplaceApiKeyResult"
     | "providerAccountRemoveResult";
   readonly requestId: string;
@@ -234,6 +235,13 @@ type HeadlessInboundMessage =
     readonly userLabel: string;
     readonly accountId: string | null;
     readonly mode: "browser" | "deviceCode";
+  }
+  | {
+    readonly type: "providerAccountRename";
+    readonly requestId: string;
+    readonly expectedRevision: number;
+    readonly accountId: string;
+    readonly userLabel: string;
   }
   | {
     readonly type: "providerAccountReplaceApiKey";
@@ -595,6 +603,28 @@ function parseInboundMessage(text: string):
         expectedRevision: record.expectedRevision as number,
         accountId: record.accountId,
         apiKey: record.apiKey,
+      },
+    };
+  }
+  if (record.type === "providerAccountRename") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "accountId", "userLabel"])
+      || !requestId
+      || !Number.isSafeInteger(record.expectedRevision)
+      || (record.expectedRevision as number) < 0
+      || !isBoundedOpaqueText(record.accountId, 80)
+      || !isBoundedOpaqueText(record.userLabel, 80)
+      || record.userLabel.trim() !== record.userLabel
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountRename",
+        requestId,
+        expectedRevision: record.expectedRevision as number,
+        accountId: record.accountId,
+        userLabel: record.userLabel,
       },
     };
   }
@@ -1106,6 +1136,22 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 const snapshot = modelPlaneStore.snapshot();
                 if (!await write({
                   type: "providerAccountReplaceApiKeyResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountRename") {
+                const account = modelPlaneStore.renameAccount(
+                  parsed.message.accountId,
+                  parsed.message.expectedRevision,
+                  parsed.message.userLabel,
+                );
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountRenameResult",
                   requestId: parsed.message.requestId,
                   desiredStateRevision: snapshot.desiredStateRevision,
                   catalogRevision: snapshot.catalogRevision,

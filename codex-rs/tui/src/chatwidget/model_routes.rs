@@ -27,9 +27,7 @@ impl ChatWidget {
             self.bottom_pane
                 .dismiss_active_view_if_id(ALL_MODELS_POPUP_VIEW_ID);
             self.app_event_tx
-                .send(AppEvent::BeginModelRouteTargetManage {
-                    model_tag: selected_model.model,
-                });
+                .send(AppEvent::BeginModelRouteTargetManage { selected_model });
             return true;
         }
 

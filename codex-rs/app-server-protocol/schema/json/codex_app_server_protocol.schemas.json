@@ -16175,6 +16175,13 @@
         ],
         "type": "string"
       },
+      "ProviderAccountLoginMode": {
+        "enum": [
+          "browser",
+          "deviceCode"
+        ],
+        "type": "string"
+      },
       "ProviderAccountLoginStatus": {
         "enum": [
           "awaitingUser",

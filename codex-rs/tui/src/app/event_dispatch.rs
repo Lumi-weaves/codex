@@ -1343,6 +1343,23 @@ impl App {
                 self.chat_widget
                     .open_provider_api_key_replacement_prompt(account, expected_revision);
             }
+            AppEvent::OpenProviderAccountRenamePrompt {
+                account,
+                expected_revision,
+            } => {
+                self.chat_widget
+                    .open_provider_account_rename_prompt(account, expected_revision);
+            }
+            AppEvent::SubmitProviderAccountRename {
+                account_id,
+                expected_revision,
+                user_label,
+            } => {
+                self.rename_provider_account(app_server, account_id, expected_revision, user_label);
+            }
+            AppEvent::ProviderAccountRenameCompleted { result } => {
+                self.chat_widget.finish_provider_account_rename(result);
+            }
             AppEvent::SubmitProviderApiKeyReplacement {
                 account_id,
                 expected_revision,
@@ -1420,6 +1437,9 @@ impl App {
             AppEvent::ProviderOAuthLoginStarted { result } => {
                 self.chat_widget.show_provider_oauth_login(result);
             }
+            AppEvent::CopyProviderDeviceCode { user_code } => {
+                self.chat_widget.copy_provider_device_code(&user_code);
+            }
             AppEvent::ProviderOAuthLoginFinished { result } => {
                 self.chat_widget.finish_provider_oauth_login(result);
             }
@@ -1466,11 +1486,20 @@ impl App {
             AppEvent::ModelRouteRetireCompleted { result } => {
                 self.chat_widget.finish_model_route_retire(result);
             }
-            AppEvent::BeginModelRouteTargetManage { model_tag } => {
-                self.begin_model_route_target_manage(app_server, model_tag);
+            AppEvent::BeginModelRouteTargetManage { selected_model } => {
+                self.begin_model_route_target_manage(app_server, selected_model);
             }
             AppEvent::ModelRouteTargetEditorLoaded { result } => match result {
-                Ok(editor) => self.chat_widget.show_model_route_target_editor(editor),
+                Ok(crate::app_event::ModelRouteTargetLoadResult::Existing(editor)) => {
+                    self.chat_widget.show_model_route_target_editor(editor);
+                }
+                Ok(crate::app_event::ModelRouteTargetLoadResult::FirstBindDraft {
+                    draft,
+                    choices,
+                }) => {
+                    self.chat_widget
+                        .show_model_route_account_choices(draft, choices);
+                }
                 Err(error) => self
                     .chat_widget
                     .add_error_message(format!("Could not load model targets: {error}")),
