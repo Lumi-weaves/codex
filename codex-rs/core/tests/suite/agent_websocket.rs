@@ -1,6 +1,9 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
+use codex_protocol::agent::AgentDefinitionRef;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ToolMode;
 use codex_protocol::protocol::EventMsg;
@@ -166,7 +169,7 @@ async fn websocket_test_codex_shell_chain() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_first_turn_uses_startup_prewarm_and_create() -> Result<()> {
+async fn websocket_explicit_agent_first_turn_uses_startup_prewarm_and_create() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_websocket_server(vec![vec![
@@ -179,7 +182,15 @@ async fn websocket_first_turn_uses_startup_prewarm_and_create() -> Result<()> {
     ]])
     .await;
 
-    let mut builder = test_codex();
+    let mut builder = test_codex().with_config(|config| {
+        config.agent = Some(AgentSelection {
+            agent: AgentDefinitionRef {
+                id: "codex".to_string(),
+                revision: 1,
+            },
+            origin: AgentSelectionOrigin::Cli,
+        });
+    });
     let test = builder.build_with_websocket_server(&server).await?;
     test.submit_turn_with_policy("hello", test.config.legacy_sandbox_policy())
         .await?;
@@ -211,6 +222,12 @@ async fn websocket_first_turn_uses_startup_prewarm_and_create() -> Result<()> {
         "expected request tools to be populated"
     );
     assert_eq!(turn["type"].as_str(), Some("response.create"));
+    assert_eq!(warmup["instructions"], turn["instructions"]);
+    assert!(
+        warmup["instructions"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+    );
     let turn_metadata: Value = serde_json::from_str(
         turn["client_metadata"]["x-codex-turn-metadata"]
             .as_str()

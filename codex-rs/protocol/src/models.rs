@@ -1318,6 +1318,9 @@ pub enum BaseInstructionsProvenance {
     /// The instructions were explicitly configured and must survive model changes unchanged.
     Custom,
     /// The instructions were compiled from one pinned Agent Definition revision.
+    ///
+    /// Rollouts containing this tagged variant intentionally require a reader with Agent
+    /// provenance support; older readers fail closed rather than silently changing ownership.
     Agent {
         agent: crate::agent::AgentDefinitionRef,
     },

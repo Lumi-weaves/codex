@@ -274,6 +274,19 @@ async fn assert_cockpit_contract_receipt(
     assert_eq!(metadata["cockpitContract"]["descriptor"]["role"], role);
 }
 
+async fn wait_for_reference_context_item(session: &Arc<crate::session::session::Session>) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if session.reference_context_item().await.is_some() {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child session should establish its initial context");
+}
+
 fn has_subagent_notification<'a>(
     history_items: impl IntoIterator<Item = &'a ResponseItem>,
 ) -> bool {
@@ -2567,6 +2580,7 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
         !history_contains_text(history.raw_items(), "Child developer instructions."),
         "bounded fork should not inject child instructions before its canonical context rebuild"
     );
+    wait_for_reference_context_item(&child_thread.session).await;
     assert_cockpit_contract_receipt(&child_thread.session, "shadow").await;
     assert!(
         history_contains_text(history.raw_items(), "Preserved bounded developer context."),

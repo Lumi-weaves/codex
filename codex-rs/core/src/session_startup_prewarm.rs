@@ -182,7 +182,10 @@ impl SessionStartupPrewarmHandle {
 }
 
 impl Session {
-    pub(crate) async fn schedule_startup_prewarm(self: &Arc<Self>, base_instructions: String) {
+    pub(crate) async fn schedule_startup_prewarm(
+        self: &Arc<Self>,
+        base_instructions: BaseInstructions,
+    ) {
         let model_client = self.services.model_client.current();
         if !model_client.responses_websocket_enabled() {
             // Without websocket prewarm, resolve auth once so Agent Identity bootstrap can
@@ -250,7 +253,7 @@ impl Session {
 
 async fn schedule_startup_prewarm_inner(
     session: Arc<Session>,
-    base_instructions: String,
+    base_instructions: BaseInstructions,
 ) -> CodexResult<ModelClientSession> {
     let prewarm_started_at = Instant::now();
     let startup_turn_context = session
@@ -289,13 +292,8 @@ async fn schedule_startup_prewarm_inner(
         /*status*/ None,
     );
     let build_prompt_started_at = Instant::now();
-    let prompt_compiler = PromptCompiler::for_startup_prewarm(
-        step_context.as_ref(),
-        BaseInstructions {
-            text: base_instructions,
-            provenance: None,
-        },
-    );
+    let prompt_compiler =
+        PromptCompiler::for_startup_prewarm(step_context.as_ref(), base_instructions);
     let startup_prompt = prompt_compiler.compile_prompt(Vec::new());
     startup_turn_context.session_telemetry.record_startup_phase(
         "startup_prewarm_build_prompt",
