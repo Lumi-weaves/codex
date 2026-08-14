@@ -1,3 +1,5 @@
+use codex_core::RuntimeModelProviderRoutes;
+use codex_model_provider::create_private_openai_loopback_model_provider;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -16,6 +18,7 @@ use tokio::io::BufReader;
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tracing::info;
 use uuid::Uuid;
 
 #[path = "richcodex_backend_client.rs"]
@@ -63,6 +66,84 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const KERNEL_LOCK_JSON: &str = include_str!("../richcodex-kernel.lock.json");
+
+/// Owns one bundled backend process and the projections shared by every app-server transport.
+pub(crate) struct RichCodexBackendRuntime {
+    backend: Option<RichCodexBackend>,
+    client: Option<RichCodexBackendClient>,
+    initial_model_routes: Vec<ModelSummary>,
+    runtime_model_provider_routes: Option<RuntimeModelProviderRoutes>,
+}
+
+impl RichCodexBackendRuntime {
+    pub(crate) async fn start_if_bundled(codex_home: &Path) -> io::Result<Self> {
+        let app_server_executable = std::env::current_exe()?;
+        Self::start(
+            codex_home,
+            std::env::var_os(BACKEND_PATH_ENV),
+            &app_server_executable,
+        )
+        .await
+    }
+
+    pub(crate) async fn start(
+        codex_home: &Path,
+        configured_path: Option<OsString>,
+        app_server_executable: &Path,
+    ) -> io::Result<Self> {
+        let backend =
+            RichCodexBackend::start(codex_home, configured_path, app_server_executable).await?;
+        if let Some(backend) = &backend {
+            let snapshot = backend.snapshot();
+            info!(
+                backend_instance_id = %snapshot.instance_id,
+                kernel_source_commit = %snapshot.kernel.source_commit,
+                catalog_revision = snapshot.catalog_revision,
+                provider_count = snapshot.providers.len(),
+                model_count = snapshot.models.len(),
+                "bundled RichCodex model backend is ready"
+            );
+        }
+        let client = backend.as_ref().map(RichCodexBackend::client);
+        let initial_model_routes = backend
+            .as_ref()
+            .map(|backend| backend.snapshot().models.clone())
+            .unwrap_or_default();
+        let runtime_model_provider_routes = backend.as_ref().map(|backend| {
+            let (capability, port) = backend.data_plane();
+            RuntimeModelProviderRoutes::new(
+                "richcodex",
+                create_private_openai_loopback_model_provider(port, capability.to_owned()),
+                std::iter::empty(),
+            )
+        });
+        Ok(Self {
+            backend,
+            client,
+            initial_model_routes,
+            runtime_model_provider_routes,
+        })
+    }
+
+    pub(crate) fn client(&self) -> Option<RichCodexBackendClient> {
+        self.client.clone()
+    }
+
+    pub(crate) fn initial_model_routes(&self) -> Vec<ModelSummary> {
+        self.initial_model_routes.clone()
+    }
+
+    pub(crate) fn runtime_model_provider_routes(&self) -> Option<RuntimeModelProviderRoutes> {
+        self.runtime_model_provider_routes.clone()
+    }
+
+    pub(crate) async fn shutdown(self) -> io::Result<()> {
+        match self.backend {
+            Some(backend) => backend.shutdown().await,
+            None => Ok(()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -354,11 +435,12 @@ pub(crate) struct RichCodexBackend {
 }
 
 impl RichCodexBackend {
-    pub(crate) async fn start_if_bundled(codex_home: &Path) -> io::Result<Option<Self>> {
-        let Some(executable) = resolve_backend_executable(
-            std::env::var_os(BACKEND_PATH_ENV),
-            std::env::current_exe()?.as_path(),
-        )?
+    async fn start(
+        codex_home: &Path,
+        configured_path: Option<OsString>,
+        app_server_executable: &Path,
+    ) -> io::Result<Option<Self>> {
+        let Some(executable) = resolve_backend_executable(configured_path, app_server_executable)?
         else {
             return Ok(None);
         };

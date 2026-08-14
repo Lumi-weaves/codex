@@ -404,11 +404,27 @@ async fn run_outbound_router(
 
 async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
     args.config.auth_config().validate()?;
+    let richcodex_backend_runtime =
+        crate::richcodex_backend::RichCodexBackendRuntime::start_if_bundled(
+            args.config.codex_home.as_path(),
+        )
+        .await?;
+    start_uninitialized_with_backend_runtime(args, richcodex_backend_runtime).await
+}
+
+async fn start_uninitialized_with_backend_runtime(
+    args: InProcessStartArgs,
+    richcodex_backend_runtime: crate::richcodex_backend::RichCodexBackendRuntime,
+) -> IoResult<InProcessClientHandle> {
     let channel_capacity = args.channel_capacity.max(1);
     let installation_id = resolve_installation_id(&args.config.codex_home).await?;
     let (client_tx, mut client_rx) = mpsc::channel::<InProcessClientMessage>(channel_capacity);
     let (event_tx, event_rx) = mpsc::channel::<InProcessServerEvent>(channel_capacity);
 
+    let richcodex_backend = richcodex_backend_runtime.client();
+    let richcodex_initial_model_routes = richcodex_backend_runtime.initial_model_routes();
+    let richcodex_runtime_model_provider_routes =
+        richcodex_backend_runtime.runtime_model_provider_routes();
     let runtime_handle = tokio::spawn(async move {
         let (outgoing_tx, outgoing_rx) = mpsc::channel::<OutgoingEnvelope>(channel_capacity);
         let auth_manager =
@@ -481,9 +497,9 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 rpc_transport: AppServerRpcTransport::InProcess,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
-                richcodex_backend: None,
-                richcodex_initial_model_routes: Vec::new(),
-                richcodex_runtime_model_provider_routes: None,
+                richcodex_backend,
+                richcodex_initial_model_routes,
+                richcodex_runtime_model_provider_routes,
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
@@ -767,6 +783,10 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
 
         analytics_events_flush_client.flush().await;
 
+        if let Err(err) = richcodex_backend_runtime.shutdown().await {
+            warn!(error = %err, "failed to stop bundled RichCodex model backend cleanly");
+        }
+
         if let Some(done_tx) = shutdown_ack {
             let _ = done_tx.send(());
         }
@@ -787,6 +807,14 @@ mod tests {
     use codex_app_server_protocol::ClientInfo;
     use codex_app_server_protocol::ConfigRequirementsReadResponse;
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
+    use codex_app_server_protocol::InitializeCapabilities;
+    use codex_app_server_protocol::ProviderAccount;
+    use codex_app_server_protocol::ProviderAccountCredentialKind;
+    use codex_app_server_protocol::ProviderAccountListParams;
+    use codex_app_server_protocol::ProviderAccountListResponse;
+    use codex_app_server_protocol::ProviderAccountProvider;
+    use codex_app_server_protocol::ProviderAccountProviderStatus;
+    use codex_app_server_protocol::ProviderAccountStatus;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
@@ -798,6 +826,23 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::path::Path;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    const FAKE_RICHCX_BACKEND: &str = r##"#!/bin/sh
+printf '%s\n' '{"type":"ready","protocolVersion":9,"instanceId":"embedded-backend","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[{"id":"openai","displayName":"OpenAI","accountCount":1,"status":"ready"}],"models":[]}'
+while IFS= read -r line; do
+  request_id=$(printf '%s' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
+  case "$line" in
+    *'"type":"providerAccountList"'*)
+      printf '{"type":"providerAccountListResult","requestId":"%s","desiredStateRevision":1,"catalogRevision":1,"providers":[{"id":"openai","displayName":"OpenAI","accountCount":1,"status":"ready"}],"data":[{"id":"opaque-account","providerId":"openai","userLabel":"Embedded Dogfood","credentialKind":"oauth","status":"ready","addedAt":123}],"nextCursor":null}\n' "$request_id"
+      ;;
+    *'"type":"shutdown"'*)
+      printf '{"type":"shutdownComplete","requestId":"%s"}\n' "$request_id"
+      exit 0
+      ;;
+  esac
+done
+"##;
 
     async fn build_test_config(codex_home: &Path) -> Config {
         match ConfigBuilder::default()
@@ -873,6 +918,124 @@ mod tests {
 
         let _parsed: ConfigRequirementsReadResponse =
             serde_json::from_value(response).expect("response should match v2 schema");
+        client
+            .shutdown()
+            .await
+            .expect("in-process runtime should shutdown cleanly");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn in_process_provider_account_requests_use_the_bundled_backend() {
+        use std::ffi::OsString;
+        use std::os::unix::fs::PermissionsExt;
+
+        let codex_home = TempDir::new().expect("temp dir");
+        let fixture_root = TempDir::new().expect("fixture root");
+        let backend_path = fixture_root.path().join("fake-richcodex-model-backend");
+        std::fs::write(&backend_path, FAKE_RICHCX_BACKEND).expect("write fake backend");
+        std::fs::set_permissions(&backend_path, std::fs::Permissions::from_mode(0o700))
+            .expect("make fake backend executable");
+        let config = Arc::new(build_test_config(codex_home.path()).await);
+        let state_db = codex_rollout::state_db::try_init(config.as_ref())
+            .await
+            .expect("state db should initialize for in-process test");
+        let args = InProcessStartArgs {
+            arg0_paths: Arg0DispatchPaths::default(),
+            config,
+            cli_overrides: Vec::new(),
+            loader_overrides: LoaderOverrides::default(),
+            strict_config: false,
+            cloud_config_bundle: CloudConfigBundleLoader::default(),
+            thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
+            feedback: CodexFeedback::new(),
+            log_db: None,
+            state_db: Some(state_db),
+            environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+            config_warnings: Vec::new(),
+            session_source: SessionSource::Cli,
+            enable_codex_api_key_env: false,
+            initialize: InitializeParams {
+                client_info: ClientInfo {
+                    name: "codex-in-process-richcodex-test".to_string(),
+                    title: None,
+                    version: "0.0.0".to_string(),
+                },
+                capabilities: Some(InitializeCapabilities {
+                    experimental_api: true,
+                    ..Default::default()
+                }),
+            },
+            channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        };
+        let backend_runtime = crate::richcodex_backend::RichCodexBackendRuntime::start(
+            codex_home.path(),
+            Some(OsString::from(backend_path)),
+            Path::new("/unused-explicit-backend-path"),
+        )
+        .await
+        .expect("fake backend should start");
+        let client = start_uninitialized_with_backend_runtime(args, backend_runtime)
+            .await
+            .expect("in-process runtime should start");
+        client
+            .request(ClientRequest::Initialize {
+                request_id: RequestId::Integer(0),
+                params: InitializeParams {
+                    client_info: ClientInfo {
+                        name: "codex-in-process-richcodex-test".to_string(),
+                        title: None,
+                        version: "0.0.0".to_string(),
+                    },
+                    capabilities: Some(InitializeCapabilities {
+                        experimental_api: true,
+                        ..Default::default()
+                    }),
+                },
+            })
+            .await
+            .expect("initialize transport should work")
+            .expect("initialize should succeed");
+        client
+            .notify(ClientNotification::Initialized)
+            .expect("initialized notification should succeed");
+
+        let response = client
+            .request(ClientRequest::ProviderAccountList {
+                request_id: RequestId::Integer(1),
+                params: ProviderAccountListParams {
+                    cursor: None,
+                    limit: Some(20),
+                },
+            })
+            .await
+            .expect("providerAccount/list transport should work")
+            .expect("providerAccount/list should succeed");
+        let response: ProviderAccountListResponse =
+            serde_json::from_value(response).expect("provider account response should parse");
+
+        assert_eq!(
+            response,
+            ProviderAccountListResponse {
+                data: vec![ProviderAccount {
+                    id: "opaque-account".to_string(),
+                    provider_id: "openai".to_string(),
+                    user_label: "Embedded Dogfood".to_string(),
+                    credential_kind: ProviderAccountCredentialKind::OAuth,
+                    status: ProviderAccountStatus::Ready,
+                    added_at: 123,
+                }],
+                providers: vec![ProviderAccountProvider {
+                    id: "openai".to_string(),
+                    display_name: "OpenAI".to_string(),
+                    account_count: 1,
+                    status: ProviderAccountProviderStatus::Ready,
+                }],
+                desired_state_revision: "1".to_string(),
+                catalog_revision: "1".to_string(),
+                next_cursor: None,
+            }
+        );
         client
             .shutdown()
             .await
