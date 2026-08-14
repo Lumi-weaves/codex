@@ -4,6 +4,10 @@
 use codex_core::TurnInputRequest;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
+use codex_models_manager::bundled_models_response;
+use codex_protocol::agent::AgentDefinitionRef;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
@@ -70,9 +74,16 @@ async fn retries_on_early_close() {
         supports_standalone_web_search: false,
     };
 
-    let TestCodex { codex, .. } = test_codex()
+    let TestCodex { codex, config, .. } = test_codex()
         .with_config(move |config| {
             config.model_provider = model_provider;
+            config.agent = Some(AgentSelection {
+                agent: AgentDefinitionRef {
+                    id: "codex".to_string(),
+                    revision: 1,
+                },
+                origin: AgentSelectionOrigin::Cli,
+            });
         })
         .build_with_streaming_server(&server)
         .await
@@ -95,6 +106,17 @@ async fn retries_on_early_close() {
         2,
         "expected retry after incomplete SSE stream"
     );
+    let agent_instructions = bundled_models_response()
+        .expect("bundled models")
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("pinned Agent prompt source")
+        .get_model_instructions(config.personality);
+    for request in requests {
+        let body: serde_json::Value = serde_json::from_slice(&request).expect("request JSON");
+        assert_eq!(body["instructions"], agent_instructions);
+    }
 
     server.shutdown().await;
 }

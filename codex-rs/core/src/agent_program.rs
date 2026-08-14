@@ -140,3 +140,46 @@ pub(crate) fn applies_to_session_source(session_source: &SessionSource) -> bool 
         PromptInvocationKind::Turn | PromptInvocationKind::LocalCompaction
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::ThreadId;
+    use codex_protocol::protocol::InternalSessionSource;
+    use codex_protocol::protocol::SubAgentSource;
+
+    #[test]
+    fn explicit_agent_program_applies_only_to_ordinary_and_compaction_sessions() {
+        let ordinary_shadow = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some("worker".to_string()),
+        });
+        let included = [
+            SessionSource::Cli,
+            ordinary_shadow,
+            SessionSource::SubAgent(SubAgentSource::Compact),
+        ];
+        let excluded = [
+            SessionSource::SubAgent(SubAgentSource::Review),
+            SessionSource::SubAgent(SubAgentSource::Other("guardian".to_string())),
+            SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
+            SessionSource::SubAgent(SubAgentSource::MemoryConsolidation),
+        ];
+
+        for source in included {
+            assert!(
+                applies_to_session_source(&source),
+                "expected Agent program for {source:?}"
+            );
+        }
+        for source in excluded {
+            assert!(
+                !applies_to_session_source(&source),
+                "specialized session must retain its own prompt owner: {source:?}"
+            );
+        }
+    }
+}

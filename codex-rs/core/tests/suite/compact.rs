@@ -12,6 +12,9 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::AgentPath;
+use codex_protocol::agent::AgentDefinitionRef;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -98,6 +101,16 @@ const GLOBAL_AGENTS_OVERRIDE_FILENAME: &str = "AGENTS.override.md";
 const NEW_GLOBAL_INSTRUCTIONS: &str = "new global instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const REMOTE_V2_SUMMARY: &str = "global-instructions-remote-v2-summary";
+
+fn codex_agent_selection() -> AgentSelection {
+    AgentSelection {
+        agent: AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+        origin: AgentSelectionOrigin::Cli,
+    }
+}
 
 pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
 
@@ -722,10 +735,18 @@ async fn local_compaction_retains_agent_input_but_not_completion() {
             config.model_provider = model_provider;
             set_test_compact_prompt(config);
             config.model_auto_compact_token_limit = Some(200_000);
+            config.agent = Some(codex_agent_selection());
         })
         .build(&server)
         .await
         .unwrap();
+    let agent_instructions = bundled_models_response()
+        .expect("bundled models")
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("pinned Agent prompt source")
+        .get_model_instructions(test.config.personality);
     let codex = test.codex;
     let worker_path = AgentPath::root().join("worker").expect("valid worker path");
 
@@ -776,6 +797,9 @@ async fn local_compaction_retains_agent_input_but_not_completion() {
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 5);
+    for request in &requests {
+        assert_eq!(request.body_json()["instructions"], agent_instructions);
+    }
     let compact_body = requests[3].body_json().to_string();
     let follow_up_body = requests[4].body_json().to_string();
 
@@ -5256,8 +5280,15 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
             let _ = config.features.enable(Feature::RemoteCompactionV2);
+            config.agent = Some(codex_agent_selection());
         });
     let test = builder.build(&server).await?;
+    let agent_instructions = bundled_models_response()?
+        .models
+        .into_iter()
+        .find(|model| model.slug == "gpt-5.6-sol")
+        .expect("pinned Agent prompt source")
+        .get_model_instructions(test.config.personality);
 
     // Materialize the old snapshot, rewrite the selected file in place, and compact remotely.
     test.submit_turn("before remote v2 compaction").await?;
@@ -5331,6 +5362,9 @@ async fn remote_v2_compaction_keeps_creation_time_instructions_after_same_path_m
     // an explicit replacement.
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 4);
+    for request in &requests {
+        assert_eq!(request.body_json()["instructions"], agent_instructions);
+    }
     let replacement_fragment = expected_instruction_fragment(&format!(
         "These AGENTS.md instructions replace all previously provided AGENTS.md instructions.\n\n{NEW_GLOBAL_INSTRUCTIONS}"
     ));
