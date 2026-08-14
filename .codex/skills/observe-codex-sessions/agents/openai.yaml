@@ -1,0 +1,4 @@
+interface:
+  display_name: "Observe Codex Sessions"
+  short_description: "Inspect live status, logs, and rollout traces"
+  default_prompt: "Use $observe-codex-sessions to determine what this Codex session is doing and choose the least invasive diagnostic path."
