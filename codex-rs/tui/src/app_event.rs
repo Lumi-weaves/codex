@@ -38,6 +38,7 @@ use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountAddApiKeyResponse;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
 use codex_app_server_protocol::ProviderAccountReplaceApiKeyResponse;
@@ -1018,13 +1019,20 @@ pub(crate) enum AppEvent {
         result: Result<ProviderAccountAddApiKeyResponse, String>,
     },
 
-    /// Start an additional backend-owned OpenAI device login.
+    /// Collect a safe display label before choosing an OpenAI login mechanism.
     OpenProviderOAuthLabelPrompt,
+
+    /// Choose browser OAuth or device-code OAuth for one new or existing account.
+    OpenProviderOAuthMethodChoices {
+        user_label: String,
+        account_id: Option<String>,
+    },
 
     /// Submit the user-owned label for a new OpenAI OAuth account.
     SubmitProviderOAuthLogin {
         user_label: String,
         account_id: Option<String>,
+        mode: ProviderAccountLoginMode,
     },
 
     /// Present the safe verification URL and device code returned by the backend.

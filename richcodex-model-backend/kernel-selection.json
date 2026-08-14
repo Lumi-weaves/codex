@@ -15,7 +15,17 @@
     },
     {
       "path": "src/oauth/chatgpt.ts",
-      "symbols": ["decodeJwtPayload","extractAccountId"],
+      "symbols": ["decodeJwtPayload","extractAccountId","ChatGPTOAuthFlow"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/oauth/callback-server.ts",
+      "symbols": ["OAuthCallbackFlow","loopbackBindHostnames","state-validated-callback-lifecycle"],
+      "disposition": "behavior-adapted"
+    },
+    {
+      "path": "src/oauth/pkce.ts",
+      "symbols": ["generatePKCE"],
       "disposition": "behavior-adapted"
     },
     {

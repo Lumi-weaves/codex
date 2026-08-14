@@ -1,4 +1,4 @@
-//! Private device-login protocol codec for the bundled RichCodex backend.
+//! Private provider-login protocol codec for the bundled RichCodex backend.
 
 use super::AppServerMessage;
 use super::BackendMessage;
@@ -14,6 +14,7 @@ use std::io;
 use std::time::Duration;
 use tokio::io::AsyncBufRead;
 use tokio::io::AsyncWrite;
+use url::Url;
 
 const PROVIDER_LOGIN_START_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 35);
 
@@ -37,6 +38,7 @@ pub(super) async fn request_provider_account_login_start<W, R>(
     request_id: &str,
     user_label: &str,
     account_id: Option<&str>,
+    mode: &str,
 ) -> Result<ProviderAccountLoginResult, RichCodexBackendClientError>
 where
     W: AsyncWrite + Unpin,
@@ -48,6 +50,7 @@ where
             request_id,
             user_label,
             account_id,
+            mode,
         },
     )
     .await
@@ -235,13 +238,22 @@ fn validate_provider_account_login(login: &ProviderAccountLoginResult) -> io::Re
             "model backend sent an invalid provider-login timestamp",
         ));
     }
-    if let Some(url) = login.verification_url.as_deref()
-        && url != "https://auth.openai.com/codex/device"
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "model backend sent an invalid provider-login URL",
-        ));
+    if let Some(url) = login.verification_url.as_deref() {
+        let is_device = url == "https://auth.openai.com/codex/device";
+        let is_browser = Url::parse(url).is_ok_and(|parsed| {
+            parsed.scheme() == "https"
+                && parsed.host_str() == Some("auth.openai.com")
+                && parsed.path() == "/oauth/authorize"
+                && parsed.username().is_empty()
+                && parsed.password().is_none()
+                && parsed.fragment().is_none()
+        });
+        if !is_device && !is_browser {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "model backend sent an invalid provider-login URL",
+            ));
+        }
     }
     if let Some(user_code) = login.user_code.as_deref() {
         validate_safe_text(user_code, 128)?;
@@ -270,9 +282,9 @@ fn validate_provider_account_login(login: &ProviderAccountLoginResult) -> io::Re
     }
     let shape_is_valid = match login.status.as_str() {
         "awaitingUser" => {
-            login.verification_url.is_some()
-                && login.user_code.is_some()
-                && login.failure.is_none()
+            login.verification_url.as_deref().is_some_and(|url| {
+                (url == "https://auth.openai.com/codex/device") == login.user_code.is_some()
+            }) && login.failure.is_none()
                 && login.account.is_none()
         }
         "exchanging" => {

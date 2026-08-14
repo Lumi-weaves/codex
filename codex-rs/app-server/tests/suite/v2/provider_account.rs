@@ -240,7 +240,10 @@ async fn provider_account_device_login_exposes_only_safe_lifecycle_state() -> Re
     let start_id = server
         .send_raw_request(
             "providerAccount/login/start",
-            Some(serde_json::json!({ "userLabel": "Third Codex" })),
+            Some(serde_json::json!({
+                "userLabel": "Third Codex",
+                "mode": "deviceCode",
+            })),
         )
         .await?;
     let started: ProviderAccountLoginStartResponse =
@@ -302,7 +305,7 @@ set -eu
 test "$1" = "--state-root"
 state_root=$2
 mkdir -p "$state_root"
-printf '%s\n' '{"type":"ready","protocolVersion":9,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:fed70f36cf8a71e495e647db03480d5f5213fdc2760c231e6d7e8a414d84edbf","compositionVersion":3},"providers":[],"models":[]}'
+printf '%s\n' '{"type":"ready","protocolVersion":10,"instanceId":"fixture-1","desiredStateRevision":1,"catalogRevision":1,"dataPlanePort":48767,"kernel":{"sourceRepository":"https://github.com/lidge-jun/opencodex","sourceCommit":"cbbfdd8773e68a5dc2391ddeb32f33a225373c1a","contentDigest":"sha256:65672062788957661574aafd6d32d571d0a33afb0575f6a12e19801d72874b78","selectionDigest":"sha256:5e7c03c78ba23105858523d923f000bfcb0ba6f352395fd5f72cdf823c49c97a","compositionVersion":4},"providers":[],"models":[]}'
 while IFS= read -r line; do
   request_id=$(printf '%s\n' "$line" | sed -n 's/.*"requestId":"\([^"]*\)".*/\1/p')
   case "$line" in

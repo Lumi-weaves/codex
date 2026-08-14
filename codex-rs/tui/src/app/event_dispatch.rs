@@ -1403,11 +1403,19 @@ impl App {
             AppEvent::OpenProviderOAuthLabelPrompt => {
                 self.chat_widget.open_provider_oauth_label_prompt();
             }
-            AppEvent::SubmitProviderOAuthLogin {
+            AppEvent::OpenProviderOAuthMethodChoices {
                 user_label,
                 account_id,
             } => {
-                self.submit_provider_oauth_login(app_server, user_label, account_id);
+                self.chat_widget
+                    .open_provider_oauth_method_choices(user_label, account_id);
+            }
+            AppEvent::SubmitProviderOAuthLogin {
+                user_label,
+                account_id,
+                mode,
+            } => {
+                self.submit_provider_oauth_login(app_server, user_label, account_id, mode);
             }
             AppEvent::ProviderOAuthLoginStarted { result } => {
                 self.chat_widget.show_provider_oauth_login(result);

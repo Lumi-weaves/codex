@@ -11,6 +11,7 @@ use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::ProviderAccountLoginFailure;
+use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemoveResponse;
@@ -156,7 +157,7 @@ impl ChatWidget {
                     ),
                     actions: vec![Box::new(move |tx| match reauth_account.credential_kind {
                         ProviderAccountCredentialKind::OAuth => {
-                            tx.send(AppEvent::SubmitProviderOAuthLogin {
+                            tx.send(AppEvent::OpenProviderOAuthMethodChoices {
                                 user_label: reauth_account.user_label.clone(),
                                 account_id: Some(reauth_account.id.clone()),
                             })
@@ -375,15 +376,63 @@ impl ChatWidget {
             "Sign in with OpenAI — display name".to_string(),
             "Friendly account name".to_string(),
             "OpenAI Codex".to_string(),
-            Some("Device authorization opens on the next screen.".to_string()),
+            Some("Choose browser or device-code authorization next.".to_string()),
             Box::new(move |user_label| {
-                tx.send(AppEvent::SubmitProviderOAuthLogin {
+                tx.send(AppEvent::OpenProviderOAuthMethodChoices {
                     user_label,
                     account_id: None,
                 });
             }),
         );
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_provider_oauth_method_choices(
+        &mut self,
+        user_label: String,
+        account_id: Option<String>,
+    ) {
+        let browser_label = user_label.clone();
+        let browser_account_id = account_id.clone();
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Sign in with OpenAI".to_string()),
+            subtitle: Some(format!("Provider account: {user_label}")),
+            footer_hint: Some(standard_popup_hint_line()),
+            items: vec![
+                SelectionItem {
+                    name: "Continue in browser".to_string(),
+                    description: Some(
+                        "Use a browser that can reach this machine's localhost callback"
+                            .to_string(),
+                    ),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SubmitProviderOAuthLogin {
+                            user_label: browser_label.clone(),
+                            account_id: browser_account_id.clone(),
+                            mode: ProviderAccountLoginMode::Browser,
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+                SelectionItem {
+                    name: "Use device code".to_string(),
+                    description: Some(
+                        "Best for remote, headless, or container sessions".to_string(),
+                    ),
+                    actions: vec![Box::new(move |tx| {
+                        tx.send(AppEvent::SubmitProviderOAuthLogin {
+                            user_label: user_label.clone(),
+                            account_id: account_id.clone(),
+                            mode: ProviderAccountLoginMode::DeviceCode,
+                        });
+                    })],
+                    dismiss_on_select: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
     }
 
     pub(crate) fn show_provider_oauth_login(
@@ -397,25 +446,25 @@ impl ChatWidget {
                 return;
             }
         };
-        let (Some(verification_url), Some(user_code)) = (
-            login.verification_url.as_deref(),
-            login.user_code.as_deref(),
-        ) else {
+        let Some(verification_url) = login.verification_url.as_deref() else {
             self.add_error_message(
-                "Could not start OpenAI login: backend returned no device code.".to_string(),
+                "Could not start OpenAI login: backend returned no authorization URL.".to_string(),
             );
             return;
         };
+        let user_code = login.user_code.as_deref();
         let login_id = login.login_id.clone();
         let open_url = verification_url.to_string();
         let mut header = ColumnRenderable::new();
         header.push(Line::from("Sign in with OpenAI".bold()));
         header.push(Line::from("Open this URL:".dim()));
         header.push(Line::from(open_url.clone().cyan().underlined()));
-        header.push(Line::from(vec![
-            "Device code: ".dim(),
-            user_code.to_string().cyan().bold(),
-        ]));
+        if let Some(user_code) = user_code {
+            header.push(Line::from(vec![
+                "Device code: ".dim(),
+                user_code.to_string().cyan().bold(),
+            ]));
+        }
         header.push(Line::from("RichCodex is waiting in the background.".dim()));
         self.bottom_pane.show_selection_view(SelectionViewParams {
             view_id: Some(PROVIDER_OAUTH_LOGIN_VIEW_ID),
@@ -424,7 +473,11 @@ impl ChatWidget {
             initial_selected_idx: Some(0),
             items: vec![
                 SelectionItem {
-                    name: "Open verification page".to_string(),
+                    name: if user_code.is_some() {
+                        "Open verification page".to_string()
+                    } else {
+                        "Continue in browser".to_string()
+                    },
                     description: Some("Launch the highlighted URL in your browser".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::OpenUrlInBrowser {
@@ -436,7 +489,7 @@ impl ChatWidget {
                 },
                 SelectionItem {
                     name: "Cancel login".to_string(),
-                    description: Some("Stop this device authorization attempt".to_string()),
+                    description: Some("Stop this authorization attempt".to_string()),
                     actions: vec![Box::new(move |tx| {
                         tx.send(AppEvent::CancelProviderOAuthLogin {
                             login_id: login_id.clone(),

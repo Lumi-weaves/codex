@@ -25,6 +25,7 @@ use codex_app_server_protocol::ProviderAccountLogin;
 use codex_app_server_protocol::ProviderAccountLoginCancelParams;
 use codex_app_server_protocol::ProviderAccountLoginCancelResponse;
 use codex_app_server_protocol::ProviderAccountLoginFailure;
+use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountLoginStartParams;
 use codex_app_server_protocol::ProviderAccountLoginStartResponse;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
@@ -134,8 +135,12 @@ impl ProviderAccountRequestProcessor {
             return Err(invalid_params("provider account login label is invalid"));
         }
         let backend = self.backend.as_ref().ok_or_else(backend_unavailable)?;
+        let mode = match params.mode {
+            ProviderAccountLoginMode::Browser => "browser",
+            ProviderAccountLoginMode::DeviceCode => "deviceCode",
+        };
         backend
-            .start_provider_account_login(params.user_label, params.account_id)
+            .start_provider_account_login(params.user_label, params.account_id, mode.to_string())
             .await
             .map(|result| ProviderAccountLoginStartResponse {
                 login: provider_account_login(result),

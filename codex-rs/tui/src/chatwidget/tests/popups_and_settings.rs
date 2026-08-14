@@ -17,6 +17,7 @@ use codex_app_server_protocol::ProviderAccount;
 use codex_app_server_protocol::ProviderAccountCredentialKind;
 use codex_app_server_protocol::ProviderAccountListResponse;
 use codex_app_server_protocol::ProviderAccountLogin;
+use codex_app_server_protocol::ProviderAccountLoginMode;
 use codex_app_server_protocol::ProviderAccountLoginStatus;
 use codex_app_server_protocol::ProviderAccountRemovalPreviewResponse;
 use codex_app_server_protocol::ProviderAccountRemovalTarget;
@@ -3535,10 +3536,27 @@ async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     chat.open_provider_oauth_label_prompt();
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    let (user_label, account_id) = match rx.try_recv() {
+        Ok(AppEvent::OpenProviderOAuthMethodChoices {
+            user_label,
+            account_id,
+        }) => (user_label, account_id),
+        other => panic!("expected OpenProviderOAuthMethodChoices, got {other:?}"),
+    };
+    chat.open_provider_oauth_method_choices(user_label, account_id);
+    let methods = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(methods.contains("Continue in browser"));
+    assert!(methods.contains("Use device code"));
+    assert_chatwidget_snapshot!("provider_oauth_method_choices", methods);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     assert!(matches!(
         rx.try_recv(),
-        Ok(AppEvent::SubmitProviderOAuthLogin { user_label, account_id })
-            if user_label == "OpenAI Codex" && account_id.is_none()
+        Ok(AppEvent::SubmitProviderOAuthLogin { user_label, account_id, mode })
+            if user_label == "OpenAI Codex"
+                && account_id.is_none()
+                && mode == ProviderAccountLoginMode::DeviceCode
     ));
 
     chat.show_provider_oauth_login(Ok(ProviderAccountLogin {
@@ -3572,6 +3590,36 @@ async fn provider_plane_starts_and_safely_renders_an_additional_openai_login() {
         rx.try_recv(),
         Ok(AppEvent::CancelProviderOAuthLogin { login_id })
             if login_id == "opaque-login-handle-must-not-render"
+    ));
+}
+
+#[tokio::test]
+async fn provider_plane_renders_browser_login_url_without_device_code() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let authorization_url = "https://auth.openai.com/oauth/authorize?state=safe-state";
+    chat.show_provider_oauth_login(Ok(ProviderAccountLogin {
+        login_id: "opaque-browser-login-must-not-render".to_string(),
+        status: ProviderAccountLoginStatus::AwaitingUser,
+        verification_url: Some(authorization_url.to_string()),
+        user_code: None,
+        expires_at: 2_000,
+        failure: None,
+        account: None,
+        desired_state_revision: "1".to_string(),
+        catalog_revision: "1".to_string(),
+    }));
+
+    let popup = render_bottom_popup(&chat, /*width*/ 110);
+    assert!(popup.contains(authorization_url));
+    assert!(popup.contains("Continue in browser"));
+    assert!(!popup.contains("Device code:"));
+    assert!(!popup.contains("opaque-browser-login-must-not-render"));
+    assert_chatwidget_snapshot!("provider_oauth_browser_login", popup);
+
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::OpenUrlInBrowser { url }) if url == authorization_url
     ));
 }
 
