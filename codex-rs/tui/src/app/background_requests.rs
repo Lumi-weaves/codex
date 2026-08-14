@@ -1218,11 +1218,11 @@ async fn fetch_model_route_target_editor(
     let display_name = selected_model.display_name.clone();
     Ok(
         crate::app_event::ModelRouteTargetLoadResult::FirstBindDraft {
-            draft: crate::app_event::ModelRouteDraft {
+            draft: Box::new(crate::app_event::ModelRouteDraft {
                 display_name,
                 model_tag,
                 selected_model: selected_model.clone(),
-            },
+            }),
             choices: crate::app_event::ModelRouteAccountChoices {
                 expected_revision: routes.desired_state_revision,
                 semantic_model: selected_model.model.clone(),

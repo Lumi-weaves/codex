@@ -231,7 +231,7 @@ pub(crate) struct ModelRouteTargetEditorState {
 pub(crate) enum ModelRouteTargetLoadResult {
     Existing(ModelRouteTargetEditorState),
     FirstBindDraft {
-        draft: ModelRouteDraft,
+        draft: Box<ModelRouteDraft>,
         choices: ModelRouteAccountChoices,
     },
 }
