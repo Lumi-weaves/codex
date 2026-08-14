@@ -374,6 +374,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     RichCodexExecutionReceiptNotification {
                         thread_id: conversation_id.to_string(),
                         turn_id: event_turn_id.clone(),
+                        client_attempt_id: event.client_attempt_id,
                         model_tag: event.model_tag,
                         resolved_model: event.resolved_model,
                         provider_id: event.provider_id,

@@ -30,6 +30,7 @@ const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const RICHCODEX_EXECUTION_RECEIPT_HEADER: &str = "x-richcodex-execution-receipt";
+const RICHCODEX_CLIENT_ATTEMPT_ID_HEADER: &str = "x-richcodex-client-attempt-id";
 const TRUSTED_ACCESS_FOR_CYBER_VERIFICATION: &str = "trusted_access_for_cyber";
 
 pub fn spawn_response_stream(
@@ -58,11 +59,20 @@ pub fn spawn_response_stream(
         .get(REQUEST_ID_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let client_attempt_id = stream_response
+        .headers
+        .get(RICHCODEX_CLIENT_ATTEMPT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_client_attempt_id);
     let richcodex_receipt = stream_response
         .headers
         .get(RICHCODEX_EXECUTION_RECEIPT_HEADER)
         .and_then(|value| value.to_str().ok())
-        .and_then(parse_richcodex_receipt);
+        .and_then(parse_richcodex_receipt)
+        .map(|mut receipt| {
+            receipt.client_attempt_id = client_attempt_id;
+            receipt
+        });
     let safety_buffering_treatment =
         treatment_from_headers(&stream_response.headers).unwrap_or_default();
     if let Some(turn_state) = turn_state.as_ref()
@@ -141,6 +151,17 @@ fn parse_richcodex_receipt(value: &str) -> Option<crate::common::RichCodexExecut
 
 fn valid_richcodex_receipt_text(value: &str, max_bytes: usize) -> bool {
     !value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn parse_client_attempt_id(value: &str) -> Option<String> {
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    if parsed.get_version() != Some(uuid::Version::Random)
+        || parsed.get_variant() != uuid::Variant::RFC4122
+    {
+        return None;
+    }
+    let canonical = parsed.hyphenated().to_string();
+    (canonical == value).then_some(canonical)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1384,6 +1405,10 @@ mod tests {
             RICHCODEX_EXECUTION_RECEIPT_HEADER,
             HeaderValue::from_str(&encoded).unwrap(),
         );
+        headers.insert(
+            RICHCODEX_CLIENT_ATTEMPT_ID_HEADER,
+            HeaderValue::from_static("018f0000-0000-4000-8000-000000000001"),
+        );
         let stream_response = StreamResponse {
             status: StatusCode::OK,
             headers,
@@ -1402,6 +1427,29 @@ mod tests {
                     && receipt.provider_id == "alibaba"
                     && receipt.account_id == "account-opaque"
                     && receipt.attempt == 2
+                    && receipt.client_attempt_id.as_deref()
+                        == Some("018f0000-0000-4000-8000-000000000001")
+        );
+    }
+
+    #[test]
+    fn client_attempt_id_requires_canonical_uuid() {
+        assert_eq!(
+            parse_client_attempt_id("018f0000-0000-4000-8000-000000000001").as_deref(),
+            Some("018f0000-0000-4000-8000-000000000001")
+        );
+        assert_eq!(parse_client_attempt_id("not-an-attempt"), None);
+        assert_eq!(
+            parse_client_attempt_id("018f0000-0000-1000-8000-000000000001"),
+            None
+        );
+        assert_eq!(
+            parse_client_attempt_id("018f0000-0000-4000-7000-000000000001"),
+            None
+        );
+        assert_eq!(
+            parse_client_attempt_id("018F0000-0000-4000-8000-000000000001"),
+            None
         );
     }
 

@@ -4,6 +4,7 @@ use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
 use super::UnauthorizedRecoveryExecution;
+use super::X_CODEX_CLIENT_ATTEMPT_ID_HEADER;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
@@ -32,6 +33,7 @@ use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use codex_model_provider::create_private_openai_loopback_model_provider;
 use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
@@ -745,6 +747,32 @@ fn build_subagent_headers_sets_internal_memory_consolidation_label() {
         headers.get("originator"),
         Some(&http::HeaderValue::from_static("test_originator"))
     );
+}
+
+#[test]
+fn client_attempt_id_is_added_only_for_private_direct_transports() {
+    let private = create_private_openai_loopback_model_provider(
+        48767,
+        "private-loopback-capability".to_string(),
+    );
+    let mut private_headers = http::HeaderMap::new();
+    super::add_client_attempt_id_header(&private, &mut private_headers);
+    let attempt_id = private_headers
+        .get(X_CODEX_CLIENT_ATTEMPT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .expect("private dispatch attempt id");
+    assert_eq!(
+        uuid::Uuid::parse_str(attempt_id).unwrap().to_string(),
+        attempt_id
+    );
+
+    let configured = create_model_provider(
+        create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses),
+        None,
+    );
+    let mut configured_headers = http::HeaderMap::new();
+    super::add_client_attempt_id_header(&configured, &mut configured_headers);
+    assert!(!configured_headers.contains_key(X_CODEX_CLIENT_ATTEMPT_ID_HEADER));
 }
 
 #[test]

@@ -10,6 +10,8 @@ const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const DATA_PLANE_TOKEN_HEADER = "x-richcodex-data-plane-token";
+const CLIENT_ATTEMPT_ID_REQUEST_HEADER = "x-codex-client-attempt-id";
+const CLIENT_ATTEMPT_ID_RESPONSE_HEADER = "x-richcodex-client-attempt-id";
 const TOKEN_REFRESH_SKEW_MS = 5 * 60_000;
 const QUOTA_EVIDENCE_TTL_MS = 15 * 60_000;
 const DEFAULT_COOLDOWN_MS = 60_000;
@@ -173,17 +175,22 @@ function responseHeaders(
   upstream: Response,
   candidate: ModelExecutionCandidate,
   attempt: number,
+  clientAttemptId: string | undefined,
 ): Headers {
   const headers = new Headers();
   upstream.headers.forEach((value, name) => {
     if (!STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) headers.append(name, value);
   });
+  headers.delete(CLIENT_ATTEMPT_ID_RESPONSE_HEADER);
   headers.set("x-richcodex-model-tag", candidate.modelTag);
   headers.set("x-richcodex-resolved-model", candidate.upstreamModelId);
   headers.set("x-richcodex-provider-id", candidate.providerId);
   headers.set("x-richcodex-account-id", candidate.accountId);
   headers.set("x-richcodex-target-id", candidate.targetId);
   headers.set("x-richcodex-route-attempt", String(attempt));
+  if (clientAttemptId !== undefined) {
+    headers.set(CLIENT_ATTEMPT_ID_RESPONSE_HEADER, clientAttemptId);
+  }
   return headers;
 }
 
@@ -200,6 +207,10 @@ function safeReceipt(candidate: ModelExecutionCandidate, attempt: number): strin
 
 function validCapability(value: string): boolean {
   return value.length >= 32 && value.length <= 512 && /^[A-Za-z0-9._~-]+$/.test(value);
+}
+
+function validClientAttemptId(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 }
 
 function retryableUpstreamStatus(status: number): boolean {
@@ -300,6 +311,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     candidate: ModelExecutionCandidate,
     attempt: number,
     forceRefresh: boolean,
+    clientAttemptId: string | undefined,
   ): Promise<Response> => {
     const credential = await refreshCredential(candidate, forceRefresh);
     const upstream = await fetchImpl(
@@ -332,7 +344,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       options.modelPlaneStore.markAccountStatus(candidate.accountId, "ready");
     }
     runtime.set(candidate.accountId, state);
-    const headers = responseHeaders(upstream, candidate, attempt);
+    const headers = responseHeaders(upstream, candidate, attempt, clientAttemptId);
     headers.set("x-richcodex-execution-receipt", safeReceipt(candidate, attempt));
     return new Response(upstream.body, {
       status: upstream.status,
@@ -347,6 +359,10 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     }
     if (request.headers.get(DATA_PLANE_TOKEN_HEADER) !== options.capability) {
       return staticError(401, "unauthorized");
+    }
+    const clientAttemptId = request.headers.get(CLIENT_ATTEMPT_ID_REQUEST_HEADER) ?? undefined;
+    if (clientAttemptId !== undefined && !validClientAttemptId(clientAttemptId)) {
+      return staticError(400, "invalid_client_attempt_id");
     }
     const declaredLength = Number(request.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BYTES) {
@@ -385,6 +401,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           candidate,
           index + 1,
           false,
+          clientAttemptId,
         );
         if (response.status === 401 && candidate.credential.kind === "oauth") {
           await response.body?.cancel().catch(() => undefined);
@@ -394,6 +411,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
             candidate,
             index + 1,
             true,
+            clientAttemptId,
           );
         }
         if (!retryableUpstreamStatus(response.status)) {
