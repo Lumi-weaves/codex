@@ -21,6 +21,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::MCP_APP_UI_EXTENSION_ID;
 use codex_protocol::mcp::OPENAI_FORM_EXTENSION_ID;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
@@ -182,11 +183,23 @@ async fn agent_selection_round_trips_through_rollout_resume_and_fork() {
     let persisted = RolloutRecorder::get_rollout_history(&rollout_path)
         .await
         .expect("read source rollout");
+    let expected_provenance = BaseInstructionsProvenance::Agent {
+        agent: codex_protocol::agent::AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+    };
     assert_eq!(
         persisted
             .get_agent_selection()
             .map(|selection| selection.origin),
         Some(AgentSelectionOrigin::Cli)
+    );
+    assert_eq!(
+        persisted
+            .get_base_instructions()
+            .and_then(|instructions| instructions.provenance),
+        Some(expected_provenance.clone())
     );
     source
         .thread
@@ -218,6 +231,15 @@ async fn agent_selection_round_trips_through_rollout_resume_and_fork() {
             .map(|selection| selection.origin),
         Some(AgentSelectionOrigin::Resume)
     );
+    assert_eq!(
+        resumed
+            .thread
+            .session
+            .get_base_instructions()
+            .await
+            .provenance,
+        Some(expected_provenance.clone())
+    );
 
     let forked = manager
         .fork_thread(
@@ -239,6 +261,15 @@ async fn agent_selection_round_trips_through_rollout_resume_and_fork() {
             .as_ref()
             .map(|selection| selection.origin),
         Some(AgentSelectionOrigin::Fork)
+    );
+    assert_eq!(
+        forked
+            .thread
+            .session
+            .get_base_instructions()
+            .await
+            .provenance,
+        Some(expected_provenance)
     );
 
     let report = manager

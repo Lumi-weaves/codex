@@ -508,6 +508,7 @@ async fn explicit_codex_agent_model_change_preserves_program_without_model_reinj
 
     let requests = resp_mock.requests();
     assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body_json()["instructions"], agent_instructions);
     assert_eq!(requests[1].body_json()["instructions"], agent_instructions);
     assert!(
         requests[1]

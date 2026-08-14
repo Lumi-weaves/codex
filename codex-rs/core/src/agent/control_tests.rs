@@ -24,6 +24,9 @@ use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::ResponseItemId;
+use codex_protocol::agent::AgentDefinitionRef;
+use codex_protocol::agent::AgentSelection;
+use codex_protocol::agent::AgentSelectionOrigin;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
@@ -259,7 +262,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
 async fn assert_cockpit_contract_receipt(
     session: &Arc<crate::session::session::Session>,
     role: &str,
-) {
+) -> serde_json::Value {
     let receipt = crate::prompt_debug::build_prompt_request_receipt_from_session(
         session,
         text_input("cockpit contract conformance probe"),
@@ -272,6 +275,7 @@ async fn assert_cockpit_contract_receipt(
     assert_eq!(metadata["cockpitContract"]["expectedCopyCount"], 1);
     assert_eq!(metadata["cockpitContract"]["effectiveCopyCount"], 1);
     assert_eq!(metadata["cockpitContract"]["descriptor"]["role"], role);
+    metadata
 }
 
 async fn wait_for_reference_context_item(session: &Arc<crate::session::session::Session>) {
@@ -377,12 +381,19 @@ async fn cockpit_contract_receipts_cover_root_and_fresh_role_shadow() {
     let harness = AgentControlHarness::new().await;
     let mut config = harness.config.clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
+    config.agent = Some(AgentSelection {
+        agent: AgentDefinitionRef {
+            id: "codex".to_string(),
+            revision: 1,
+        },
+        origin: AgentSelectionOrigin::Cli,
+    });
     let root = harness
         .manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
         .expect("start cockpit root");
-    assert_cockpit_contract_receipt(&root.thread.session, "root").await;
+    let root_receipt = assert_cockpit_contract_receipt(&root.thread.session, "root").await;
 
     let child_thread_id = harness
         .control
@@ -406,7 +417,21 @@ async fn cockpit_contract_receipts_cover_root_and_fresh_role_shadow() {
         .get_thread(child_thread_id)
         .await
         .expect("fresh role shadow registered");
-    assert_cockpit_contract_receipt(&child.session, "shadow").await;
+    wait_for_reference_context_item(&child.session).await;
+    let shadow_receipt = assert_cockpit_contract_receipt(&child.session, "shadow").await;
+
+    for receipt in [&root_receipt, &shadow_receipt] {
+        assert_eq!(receipt["agentSelection"]["agent"]["id"], "codex");
+        assert_eq!(receipt["agentSelection"]["agent"]["revision"], 1);
+        assert_eq!(
+            receipt["agentProgram"]["resources"][0]["effectiveCopyCount"],
+            1
+        );
+    }
+    assert_eq!(
+        root_receipt["agentProgram"]["sha256"], shadow_receipt["agentProgram"]["sha256"],
+        "root and ordinary Shadow must compile the same Agent Program revision"
+    );
 
     let _ = harness.control.shutdown_live_agent(child_thread_id).await;
     let _ = root.thread.submit(Op::Shutdown {}).await;
