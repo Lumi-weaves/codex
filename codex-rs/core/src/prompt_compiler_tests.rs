@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
+use codex_protocol::agent::AgentDefinitionRef;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_tools::JsonSchema;
@@ -35,34 +37,42 @@ fn compile_prompt_preserves_the_resolved_step_state() {
     })]);
     let base_instructions = BaseInstructions {
         text: "resolved base instructions".to_string(),
-        provenance: None,
+        provenance: Some(BaseInstructionsProvenance::Agent {
+            agent: AgentDefinitionRef {
+                id: "codex".to_string(),
+                revision: 1,
+            },
+        }),
     };
     let output_schema = Some(json!({
         "type": "object",
         "properties": {"answer": {"type": "string"}},
     }));
-    let compiler = PromptCompiler {
-        state: PromptCompilerState {
-            target: PromptCompilationTarget::Turn,
+    for target in [
+        PromptCompilationTarget::Turn,
+        PromptCompilationTarget::StartupPrewarm,
+    ] {
+        let compiler = PromptCompiler {
+            state: PromptCompilerState {
+                target,
+                tools: Arc::clone(&tools),
+                parallel_tool_calls: true,
+                base_instructions: base_instructions.clone(),
+                output_schema: output_schema.clone(),
+                output_schema_strict: false,
+            },
+        };
+        let expected = Prompt {
+            input: input.clone(),
             tools: Arc::clone(&tools),
             parallel_tool_calls: true,
             base_instructions: base_instructions.clone(),
             output_schema: output_schema.clone(),
             output_schema_strict: false,
-        },
-    };
+        };
 
-    let actual = compiler.compile_prompt(input.clone());
-    let expected = Prompt {
-        input,
-        tools,
-        parallel_tool_calls: true,
-        base_instructions,
-        output_schema,
-        output_schema_strict: false,
-    };
-
-    assert_eq!(actual, expected);
+        assert_eq!(compiler.compile_prompt(input.clone()), expected);
+    }
 }
 
 #[test]
