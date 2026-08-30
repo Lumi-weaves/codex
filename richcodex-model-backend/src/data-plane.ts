@@ -56,6 +56,11 @@ interface AccountRuntimeState {
   quotaObservedAt?: number;
 }
 
+type FetchFunction = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
 class CredentialRefreshError extends Error {
   readonly accountStatus: "verificationRequired" | "reauthenticationRequired";
 
@@ -69,7 +74,7 @@ class CredentialRefreshError extends Error {
 export interface ModelDataPlaneOptions {
   readonly capability: string;
   readonly modelPlaneStore: ModelPlaneStore;
-  readonly fetch?: typeof globalThis.fetch;
+  readonly fetch?: FetchFunction;
   readonly now?: () => number;
 }
 

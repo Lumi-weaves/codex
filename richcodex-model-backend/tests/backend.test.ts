@@ -297,10 +297,10 @@ describe("RichCodex private model data plane", () => {
     const plane = createModelDataPlane({
       capability: TEST_DATA_PLANE_CAPABILITY,
       modelPlaneStore: executionStore([]),
-      fetch: (async () => {
+      fetch: async () => {
         dispatched = true;
         return new Response(null, { status: 200 });
-      }) as typeof fetch,
+      },
     });
 
     for (const clientAttemptId of [
