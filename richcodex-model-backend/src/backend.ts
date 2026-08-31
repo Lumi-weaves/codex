@@ -20,8 +20,8 @@ import {
   type SafeProviderSummary,
 } from "./model-plane";
 
-/** The first private RichCodex/backend protocol revision. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 11 as const;
+/** Protocol 13 adds client-owned ChatGPT token installation. */
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 13 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -159,6 +159,7 @@ export type HeadlessProviderAccountImportResultMessage = {
   readonly type:
     | "providerAccountImportResult"
     | "providerAccountAddApiKeyResult"
+    | "providerAccountAuthTokensInstallResult"
     | "providerAccountRenameResult"
     | "providerAccountReplaceApiKeyResult"
     | "providerAccountRemoveResult";
@@ -235,6 +236,15 @@ type HeadlessInboundMessage =
     readonly userLabel: string;
     readonly accountId: string | null;
     readonly mode: "browser" | "deviceCode";
+  }
+  | {
+    readonly type: "providerAccountAuthTokensInstall";
+    readonly requestId: string;
+    readonly accessToken: string;
+    readonly chatgptAccountId: string;
+    readonly chatgptPlanType: string | null;
+    readonly userLabel: string;
+    readonly accountId: string | null;
   }
   | {
     readonly type: "providerAccountRename";
@@ -581,6 +591,45 @@ function parseInboundMessage(text: string):
         userLabel: record.userLabel,
         accountId,
         mode: record.mode,
+      },
+    };
+  }
+  if (record.type === "providerAccountAuthTokensInstall") {
+    const requestId = parseRequestId(record.requestId);
+    const accountId = record.accountId === undefined || record.accountId === null
+      ? null
+      : record.accountId;
+    const planType = record.chatgptPlanType === undefined || record.chatgptPlanType === null
+      ? null
+      : record.chatgptPlanType;
+    if (
+      !hasExactlyKeys(record, [
+        "type",
+        "requestId",
+        "accessToken",
+        "chatgptAccountId",
+        "chatgptPlanType",
+        "userLabel",
+        "accountId",
+      ])
+      || !requestId
+      || !isBoundedOpaqueText(record.accessToken, 64 * 1024)
+      || !isBoundedOpaqueText(record.chatgptAccountId, 512)
+      || planType !== null && !isBoundedOpaqueText(planType, 128)
+      || !isBoundedOpaqueText(record.userLabel, 80)
+      || record.userLabel.trim() !== record.userLabel
+      || accountId !== null && !isBoundedOpaqueText(accountId, 80)
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountAuthTokensInstall",
+        requestId,
+        accessToken: record.accessToken,
+        chatgptAccountId: record.chatgptAccountId,
+        chatgptPlanType: planType,
+        userLabel: record.userLabel,
+        accountId,
       },
     };
   }
@@ -1106,6 +1155,18 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 const snapshot = modelPlaneStore.snapshot();
                 if (!await write({
                   type: "providerAccountAddApiKeyResult",
+                  requestId: parsed.message.requestId,
+                  desiredStateRevision: snapshot.desiredStateRevision,
+                  catalogRevision: snapshot.catalogRevision,
+                  account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountAuthTokensInstall") {
+                const account = modelPlaneStore.installClientAuthTokens(parsed.message);
+                const snapshot = modelPlaneStore.snapshot();
+                if (!await write({
+                  type: "providerAccountAuthTokensInstallResult",
                   requestId: parsed.message.requestId,
                   desiredStateRevision: snapshot.desiredStateRevision,
                   catalogRevision: snapshot.catalogRevision,

@@ -141,6 +141,7 @@ function executionStore(
     }),
     importCodexAuthJson: () => { throw new Error("not used"); },
     addOAuthAccount: () => { throw new Error("not used"); },
+    installClientAuthTokens: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
     previewAccountRemoval: () => { throw new Error("not used"); },
     removeAccount: () => { throw new Error("not used"); },
@@ -213,6 +214,39 @@ describe("RichCodex browser OAuth coordinator", () => {
 });
 
 describe("RichCodex private model data plane", () => {
+  test("returns a client-owned token 401 without attempting provider refresh", async () => {
+    const credential: StoredOAuthCredential = {
+      kind: "oauth",
+      accessToken: "client-owned-access-token",
+      refreshToken: null,
+      chatgptAccountId: "client-workspace",
+      expiresAt: null,
+    };
+    const calls: string[] = [];
+    const plane = createModelDataPlane({
+      capability: TEST_DATA_PLANE_CAPABILITY,
+      modelPlaneStore: executionStore([
+        executionCandidate("client-account", "client-target", 0, credential),
+      ]),
+      fetch: (async (input, init) => {
+        calls.push(String(input));
+        expect(new Headers(init?.headers).get("authorization"))
+          .toBe("Bearer client-owned-access-token");
+        return new Response("unauthorized", { status: 401 });
+      }) as typeof fetch,
+    });
+    const response = await plane.handle(new Request("http://127.0.0.1/v1/responses", {
+      method: "POST",
+      headers: {
+        "x-richcodex-data-plane-token": TEST_DATA_PLANE_CAPABILITY,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ model: "my-fast-model", input: [] }),
+    }));
+    expect(response.status).toBe(401);
+    expect(calls).toEqual(["https://chatgpt.com/backend-api/codex/responses"]);
+  });
+
   test("requires its process capability and rewrites only the stable model tag", async () => {
     const now = 1_000_000;
     const credential: StoredOAuthCredential = {
@@ -752,7 +786,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 11,
+      protocolVersion: 13,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -1004,6 +1038,76 @@ describe("RichCodex headless backend composition root", () => {
     const persisted = join(stateRoot, "model-plane.json");
     expect(existsSync(persisted)).toBe(true);
     if (process.platform !== "win32") expect(statSync(persisted).mode & 0o777).toBe(0o600);
+  });
+
+  test("installs client-owned ChatGPT tokens without reflecting the credential", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-client-auth-tokens-"));
+    const token = "private-client-token-canary";
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAuthTokensInstall",
+        requestId: "client-token-install",
+        accessToken: token,
+        chatgptAccountId: "client-workspace",
+        chatgptPlanType: "pro",
+        userLabel: "Codex Desktop",
+        accountId: null,
+      })}\n${JSON.stringify({
+        type: "providerAccountList",
+        requestId: "client-token-list",
+        cursor: null,
+        limit: 10,
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "client-token-shutdown" })}\n`,
+      root,
+    );
+    expect(result.lines[0]).toMatchObject({ type: "ready", protocolVersion: 13 });
+    expect(result.lines[1]).toMatchObject({
+      type: "providerAccountAuthTokensInstallResult",
+      requestId: "client-token-install",
+      account: {
+        providerId: "openai",
+        userLabel: "Codex Desktop",
+        status: "verificationRequired",
+        planType: "pro",
+      },
+    });
+    expect(result.lines[2]).toMatchObject({
+      type: "providerAccountListResult",
+      data: [{ providerId: "openai", planType: "pro" }],
+    });
+    expect(JSON.stringify(result.lines)).not.toContain(token);
+    expect(result.stderr).toEqual([]);
+  });
+
+  test("replaces client-owned tokens without duplicating the durable account", () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-client-auth-replace-"));
+    const firstStore = createModelPlaneStore(root, {
+      createAccountId: () => "client-account-stable",
+    });
+    const first = firstStore.installClientAuthTokens({
+      accessToken: "first-client-token",
+      chatgptAccountId: "client-workspace",
+      chatgptPlanType: "plus",
+      userLabel: "Codex Desktop",
+      accountId: null,
+    });
+    const replaced = firstStore.installClientAuthTokens({
+      accessToken: "second-client-token",
+      chatgptAccountId: "client-workspace",
+      chatgptPlanType: "pro",
+      userLabel: "Codex Desktop",
+      accountId: first.id,
+    });
+    const restarted = createModelPlaneStore(root).installClientAuthTokens({
+      accessToken: "third-client-token",
+      chatgptAccountId: "client-workspace",
+      chatgptPlanType: null,
+      userLabel: "Codex Desktop",
+      accountId: null,
+    });
+    expect(replaced.id).toBe("client-account-stable");
+    expect(restarted).toMatchObject({ id: "client-account-stable", planType: "pro" });
+    expect(createModelPlaneStore(root).snapshot().accounts).toHaveLength(1);
   });
 
   test("accepts Codex login metadata for distinct token and selected workspaces", async () => {

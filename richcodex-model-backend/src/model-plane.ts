@@ -37,6 +37,8 @@ export interface SafeProviderAccount {
   readonly credentialKind: "oauth" | "apiKey";
   readonly status: ProviderAccountStatus;
   readonly addedAt: number;
+  readonly email?: string;
+  readonly planType?: string;
 }
 
 export interface SafeProviderSummary {
@@ -49,9 +51,10 @@ export interface SafeProviderSummary {
 export interface StoredOAuthCredential {
   readonly kind: "oauth";
   readonly accessToken: string;
-  readonly refreshToken: string;
+  /** Null means the attached Codex client, not this process, owns refresh. */
+  readonly refreshToken: string | null;
   readonly chatgptAccountId: string;
-  readonly expiresAt: number;
+  readonly expiresAt: number | null;
 }
 
 export interface StoredApiKeyCredential {
@@ -69,6 +72,14 @@ interface StoredProvider {
 
 interface StoredProviderAccount extends SafeProviderAccount {
   readonly credential: StoredProviderCredential;
+}
+
+export interface InstallClientAuthTokensInput {
+  readonly accessToken: string;
+  readonly chatgptAccountId: string;
+  readonly chatgptPlanType: string | null;
+  readonly userLabel: string;
+  readonly accountId: string | null;
 }
 
 interface StoredModelTarget {
@@ -223,6 +234,7 @@ export interface ModelPlaneStore {
   snapshot(): ProviderAccountSnapshot;
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount;
+  installClientAuthTokens(input: InstallClientAuthTokensInput): SafeProviderAccount;
   addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
   previewAccountRemoval(accountId: string): AccountRemovalPreview;
   removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
@@ -356,7 +368,9 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     && isSafeText(value.userLabel, 80)
     && isSafeAccountStatus(value.status)
     && Number.isSafeInteger(value.addedAt)
-    && (value.addedAt as number) >= 0;
+    && (value.addedAt as number) >= 0
+    && (value.email === undefined || isSafeText(value.email, 512))
+    && (value.planType === undefined || isSafeText(value.planType, 128));
   if (!commonIsValid) return null;
   if (credential.kind === "apiKey") {
     if (!isSafeText(credential.apiKey, 64 * 1024)) return null;
@@ -367,6 +381,8 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
       credentialKind: "apiKey",
       status: value.status as ProviderAccountStatus,
       addedAt: value.addedAt as number,
+      ...(typeof value.email === "string" ? { email: value.email } : {}),
+      ...(typeof value.planType === "string" ? { planType: value.planType } : {}),
       credential: { kind: "apiKey", apiKey: credential.apiKey },
     };
   }
@@ -374,9 +390,10 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     value.providerId !== OPENAI_PROVIDER_ID
     || credential.kind !== undefined && credential.kind !== "oauth"
     || !isSafeText(credential.accessToken, 64 * 1024)
-    || !isSafeText(credential.refreshToken, 64 * 1024)
+    || credential.refreshToken !== null && !isSafeText(credential.refreshToken, 64 * 1024)
     || !isSafeText(credential.chatgptAccountId, 512)
-    || !Number.isSafeInteger(credential.expiresAt)
+    || credential.expiresAt !== null && !Number.isSafeInteger(credential.expiresAt)
+    || (credential.refreshToken === null) !== (credential.expiresAt === null)
   ) {
     return null;
   }
@@ -387,6 +404,8 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     credentialKind: "oauth",
     status: value.status as ProviderAccountStatus,
     addedAt: value.addedAt as number,
+    ...(typeof value.email === "string" ? { email: value.email } : {}),
+    ...(typeof value.planType === "string" ? { planType: value.planType } : {}),
     credential: {
       kind: "oauth",
       accessToken: credential.accessToken as string,
@@ -764,10 +783,14 @@ function safeAccount(account: StoredProviderAccount, now: number): SafeProviderA
     providerId: account.providerId,
     userLabel: account.userLabel,
     credentialKind: account.credential.kind,
-    status: account.credential.kind === "oauth" && account.credential.expiresAt <= now
+    status: account.credential.kind === "oauth"
+      && account.credential.expiresAt !== null
+      && account.credential.expiresAt <= now
       ? "reauthenticationRequired"
       : account.status,
     addedAt: account.addedAt,
+    ...(account.email === undefined ? {} : { email: account.email }),
+    ...(account.planType === undefined ? {} : { planType: account.planType }),
   };
 }
 
@@ -792,7 +815,9 @@ function safeModelRoute(
         upstreamModelId: target.upstreamModelId,
         priority: target.priority,
         status: account
-          && (account.credential.kind === "apiKey" || account.credential.expiresAt > now)
+          && (account.credential.kind === "apiKey"
+            || account.credential.expiresAt === null
+            || account.credential.expiresAt > now)
           && account.status !== "reauthenticationRequired"
           ? "unverified" as const
           : "reauthenticationRequired" as const,
@@ -911,8 +936,10 @@ export function createModelPlaneStore(
     if (
       credential.kind !== "oauth"
       || !isSafeText(credential.accessToken, 64 * 1024)
+      || typeof credential.refreshToken !== "string"
       || !isSafeText(credential.refreshToken, 64 * 1024)
       || !isSafeText(credential.chatgptAccountId, 512)
+      || typeof credential.expiresAt !== "number"
       || !Number.isSafeInteger(credential.expiresAt)
       || credential.expiresAt <= now()
       || !isSafeText(userLabel, 80)
@@ -962,6 +989,68 @@ export function createModelPlaneStore(
     },
     addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount {
       return addOAuthAccount(credential, userLabel);
+    },
+    installClientAuthTokens(input: InstallClientAuthTokensInput): SafeProviderAccount {
+      if (
+        !isSafeText(input.accessToken, 64 * 1024)
+        || !isSafeText(input.chatgptAccountId, 512)
+        || input.chatgptPlanType !== null && !isSafeText(input.chatgptPlanType, 128)
+        || !isSafeText(input.userLabel, 80)
+        || input.userLabel.trim() !== input.userLabel
+        || input.accountId !== null && !isSafeText(input.accountId, 80)
+      ) throw new ModelPlaneError("invalid_auth_document");
+      const existing = input.accountId === null
+        ? document.accounts.find(account =>
+          account.credential.kind === "oauth"
+          && account.credential.chatgptAccountId === input.chatgptAccountId
+        )
+        : document.accounts.find(account => account.id === input.accountId);
+      if (input.accountId !== null && !existing) {
+        throw new ModelPlaneError("account_not_found");
+      }
+      if (existing?.credential.kind === "apiKey") {
+        throw new ModelPlaneError("credential_kind_mismatch");
+      }
+      if (
+        existing?.credential.kind === "oauth"
+        && existing.credential.chatgptAccountId !== input.chatgptAccountId
+      ) throw new ModelPlaneError("account_identity_mismatch");
+      if (!existing && document.accounts.length >= PROVIDER_ACCOUNT_MAX_ROWS) {
+        throw new ModelPlaneError("account_limit_reached");
+      }
+      const id = existing?.id ?? createAccountId();
+      if (
+        !isSafeText(id, 80)
+        || !existing && document.accounts.some(account => account.id === id)
+      ) throw new ModelPlaneError("store_unavailable");
+      const account: StoredProviderAccount = {
+        ...(existing ?? {
+          id,
+          providerId: OPENAI_PROVIDER_ID,
+          credentialKind: "oauth" as const,
+          addedAt: Math.floor(now() / 1000),
+        }),
+        userLabel: input.userLabel,
+        status: "verificationRequired",
+        ...(input.chatgptPlanType === null
+          ? existing?.planType === undefined ? {} : { planType: existing.planType }
+          : { planType: input.chatgptPlanType }),
+        credential: {
+          kind: "oauth",
+          accessToken: input.accessToken,
+          refreshToken: null,
+          chatgptAccountId: input.chatgptAccountId,
+          expiresAt: null,
+        },
+      };
+      const next = nextDocument(document, {
+        accounts: existing
+          ? document.accounts.map(candidate => candidate.id === id ? account : candidate)
+          : [...document.accounts, account],
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeAccount(account, now());
     },
     addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount {
       const apiBaseUrl = normalizedApiBaseUrl(input.apiBaseUrl);
@@ -1161,7 +1250,9 @@ export function createModelPlaneStore(
       }
       if (
         !isSafeText(credential.accessToken, 64 * 1024)
+        || typeof credential.refreshToken !== "string"
         || !isSafeText(credential.refreshToken, 64 * 1024)
+        || typeof credential.expiresAt !== "number"
         || !Number.isSafeInteger(credential.expiresAt)
         || credential.expiresAt <= now()
       ) throw new ModelPlaneError("invalid_auth_document");
@@ -1352,8 +1443,10 @@ export function createModelPlaneStore(
       if (
         credential.kind !== "oauth"
         || !isSafeText(credential.accessToken, 64 * 1024)
+        || typeof credential.refreshToken !== "string"
         || !isSafeText(credential.refreshToken, 64 * 1024)
         || !isSafeText(credential.chatgptAccountId, 512)
+        || typeof credential.expiresAt !== "number"
         || !Number.isSafeInteger(credential.expiresAt)
         || credential.expiresAt <= now()
       ) {

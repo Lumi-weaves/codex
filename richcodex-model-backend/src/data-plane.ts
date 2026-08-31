@@ -240,7 +240,12 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
   ): Promise<StoredProviderCredential> => {
     if (candidate.credential.kind === "apiKey") return candidate.credential;
     const oauthCredential = candidate.credential;
-    if (!force && oauthCredential.expiresAt > now() + TOKEN_REFRESH_SKEW_MS) {
+    const ownedRefreshToken = oauthCredential.refreshToken;
+    const ownedExpiresAt = oauthCredential.expiresAt;
+    if (ownedRefreshToken === null || ownedExpiresAt === null) {
+      return oauthCredential;
+    }
+    if (!force && ownedExpiresAt > now() + TOKEN_REFRESH_SKEW_MS) {
       return oauthCredential;
     }
     const existing = refreshFlights.get(candidate.accountId);
@@ -253,7 +258,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         body: new URLSearchParams({
           grant_type: "refresh_token",
           client_id: OPENAI_CODEX_CLIENT_ID,
-          refresh_token: oauthCredential.refreshToken,
+          refresh_token: ownedRefreshToken,
         }),
         redirect: "manual",
       });
@@ -279,7 +284,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         : 3600;
       const refreshToken = typeof payload.refresh_token === "string" && payload.refresh_token.length > 0
         ? payload.refresh_token
-        : oauthCredential.refreshToken;
+        : ownedRefreshToken;
       const credential: StoredOAuthCredential = {
         kind: "oauth",
         accessToken: payload.access_token,
@@ -289,7 +294,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       };
       if (!options.modelPlaneStore.replaceOAuthCredential(
         candidate.accountId,
-        oauthCredential.refreshToken,
+        ownedRefreshToken,
         credential,
       )) {
         const current = options.modelPlaneStore
@@ -408,7 +413,11 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           false,
           clientAttemptId,
         );
-        if (response.status === 401 && candidate.credential.kind === "oauth") {
+        if (
+          response.status === 401
+          && candidate.credential.kind === "oauth"
+          && candidate.credential.refreshToken !== null
+        ) {
           await response.body?.cancel().catch(() => undefined);
           response = await send(
             request,
