@@ -70,9 +70,16 @@ describe("Responses WebSocket continuation", () => {
             type: "response.created",
             response: { id: responseId },
           }));
+          for (const [outputIndex, item] of output.entries()) {
+            socket.send(JSON.stringify({
+              type: "response.output_item.done",
+              output_index: outputIndex,
+              item,
+            }));
+          }
           socket.send(JSON.stringify({
             type: "response.completed",
-            response: { id: responseId, output },
+            response: { id: responseId, output: [] },
           }));
         },
       },

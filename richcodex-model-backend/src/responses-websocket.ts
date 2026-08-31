@@ -234,7 +234,13 @@ class ResponsesWebSocketConnection {
       if (!terminalEvent(type)) return;
       if (type === "response.completed") {
         const completedOutput = responseOf(value)?.output;
-        const output = Array.isArray(completedOutput) ? completedOutput : pendingOutput;
+        // The Responses WebSocket completion envelope currently carries an
+        // empty aggregate even after complete items were delivered through
+        // `response.output_item.done`. Preserve those streamed items so the
+        // next exact-prefix calculation has the real continuation baseline.
+        const output = Array.isArray(completedOutput) && completedOutput.length > 0
+          ? completedOutput
+          : pendingOutput;
         if (responseId !== undefined) {
           this.lastRequest = structuredClone(body);
           this.lastResponse = {
