@@ -222,4 +222,46 @@ describe("Responses WebSocket continuation", () => {
     expect(payloads[2]!.previous_response_id).toBeUndefined();
     expect(payloads[2]!.input).toEqual(secondInput);
   });
+
+  test("normalizes multiline websocket JSON into one SSE data line", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request, server) {
+        return server.upgrade(request)
+          ? undefined
+          : new Response("upgrade failed", { status: 400 });
+      },
+      websocket: {
+        message(socket) {
+          socket.send(JSON.stringify({
+            type: "response.completed",
+            response: { id: "response-pretty", output: [] },
+          }, null, 2));
+        },
+      },
+    });
+    servers.push(server);
+    const pool = new ResponsesWebSocketPool();
+    pools.push(pool);
+
+    const response = await pool.stream({
+      continuationKey: "vibeseed-lineage-pretty",
+      routeKey: "target-1",
+      url: `ws://127.0.0.1:${server.port}/responses`,
+      headers: new Headers(),
+      body: requestBody([{ role: "user", content: "inspect" }]),
+      responseHeaders: responseHeaders(),
+    });
+    const events = (await response.text())
+      .split("\n\n")
+      .filter(Boolean)
+      .map(chunk => chunk.replace(/^data: /, ""));
+
+    expect(events.at(-1)).toBe("[DONE]");
+    expect(JSON.parse(events[0]!)).toEqual({
+      type: "response.completed",
+      response: { id: "response-pretty", output: [] },
+    });
+  });
 });

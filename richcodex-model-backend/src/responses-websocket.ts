@@ -225,7 +225,12 @@ class ResponsesWebSocketConnection {
         const item = ownedObject(value)?.item;
         if (item !== undefined) pendingOutput.push(item);
       }
-      controller?.enqueue(encoder.encode(`data: ${text}\n\n`));
+      // A WebSocket text message is one complete JSON value, but it is not
+      // required to occupy one physical line. Re-encode the parsed value so a
+      // pretty-printed upstream frame cannot become a truncated SSE `data:`
+      // event for the ordinary Responses client on the local data plane.
+      const sseData = JSON.stringify(value);
+      controller?.enqueue(encoder.encode(`data: ${sseData}\n\n`));
       if (!terminalEvent(type)) return;
       if (type === "response.completed") {
         const completedOutput = responseOf(value)?.output;
