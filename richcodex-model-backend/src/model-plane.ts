@@ -235,6 +235,7 @@ export interface ModelPlaneStore {
   importCodexAuthJson(authJsonPath: string, userLabel: string): SafeProviderAccount;
   addOAuthAccount(credential: StoredOAuthCredential, userLabel: string): SafeProviderAccount;
   installClientAuthTokens(input: InstallClientAuthTokensInput): SafeProviderAccount;
+  readOAuthAccessToken(accountId: string): string;
   addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
   previewAccountRemoval(accountId: string): AccountRemovalPreview;
   removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
@@ -1051,6 +1052,17 @@ export function createModelPlaneStore(
       persistDocument(stateRoot, path, next);
       document = next;
       return safeAccount(account, now());
+    },
+    readOAuthAccessToken(accountId: string): string {
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      if (account.credential.kind !== "oauth") {
+        throw new ModelPlaneError("credential_kind_mismatch");
+      }
+      if (!isSafeText(account.credential.accessToken, 64 * 1024)) {
+        throw new ModelPlaneError("store_unavailable");
+      }
+      return account.credential.accessToken;
     },
     addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount {
       const apiBaseUrl = normalizedApiBaseUrl(input.apiBaseUrl);

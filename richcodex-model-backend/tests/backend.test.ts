@@ -142,6 +142,7 @@ function executionStore(
     importCodexAuthJson: () => { throw new Error("not used"); },
     addOAuthAccount: () => { throw new Error("not used"); },
     installClientAuthTokens: () => { throw new Error("not used"); },
+    readOAuthAccessToken: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
     previewAccountRemoval: () => { throw new Error("not used"); },
     removeAccount: () => { throw new Error("not used"); },
@@ -790,7 +791,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 13,
+      protocolVersion: 14,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -1064,7 +1065,7 @@ describe("RichCodex headless backend composition root", () => {
       })}\n${JSON.stringify({ type: "shutdown", requestId: "client-token-shutdown" })}\n`,
       root,
     );
-    expect(result.lines[0]).toMatchObject({ type: "ready", protocolVersion: 13 });
+    expect(result.lines[0]).toMatchObject({ type: "ready", protocolVersion: 14 });
     expect(result.lines[1]).toMatchObject({
       type: "providerAccountAuthTokensInstallResult",
       requestId: "client-token-install",
@@ -1081,6 +1082,43 @@ describe("RichCodex headless backend composition root", () => {
     });
     expect(JSON.stringify(result.lines)).not.toContain(token);
     expect(result.stderr).toEqual([]);
+  });
+
+  test("returns only the explicitly requested OAuth access token", async () => {
+    const root = mkdtempSync(join(tmpdir(), "richcodex-auth-token-read-"));
+    const token = "private-client-token-canary";
+    const result = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAuthTokensInstall",
+        requestId: "client-token-install",
+        accessToken: token,
+        chatgptAccountId: "client-workspace",
+        chatgptPlanType: "pro",
+        userLabel: "Codex Desktop",
+        accountId: null,
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "client-token-shutdown" })}\n`,
+      root,
+    );
+    const installed = result.lines[1] as {
+      account: { id: string };
+    };
+    expect(installed.account.id).toBeTruthy();
+
+    const replay = await runBackend(
+      `${JSON.stringify({
+        type: "providerAccountAuthTokenRead",
+        requestId: "client-token-read",
+        accountId: installed.account.id,
+      })}\n${JSON.stringify({ type: "shutdown", requestId: "client-token-shutdown" })}\n`,
+      root,
+    );
+    expect(replay.lines[1]).toEqual({
+      type: "providerAccountAuthTokenReadResult",
+      requestId: "client-token-read",
+      accessToken: token,
+    });
+    expect(JSON.stringify(replay.lines)).not.toContain("refreshToken");
+    expect(replay.stderr).toEqual([]);
   });
 
   test("replaces client-owned tokens without duplicating the durable account", () => {

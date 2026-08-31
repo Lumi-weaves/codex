@@ -20,8 +20,8 @@ import {
   type SafeProviderSummary,
 } from "./model-plane";
 
-/** Protocol 13 adds client-owned ChatGPT token installation. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 13 as const;
+/** Protocol 14 adds explicit local-frontend access-token projection. */
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 14 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -169,6 +169,12 @@ export type HeadlessProviderAccountImportResultMessage = {
   readonly account: SafeProviderAccount;
 };
 
+export type HeadlessProviderAccountAuthTokenReadResultMessage = {
+  readonly type: "providerAccountAuthTokenReadResult";
+  readonly requestId: string;
+  readonly accessToken: string;
+};
+
 export type HeadlessProviderAccountRemovalPreviewResultMessage = AccountRemovalPreview & {
   readonly type: "providerAccountRemovalPreviewResult";
   readonly requestId: string;
@@ -245,6 +251,11 @@ type HeadlessInboundMessage =
     readonly chatgptPlanType: string | null;
     readonly userLabel: string;
     readonly accountId: string | null;
+  }
+  | {
+    readonly type: "providerAccountAuthTokenRead";
+    readonly requestId: string;
+    readonly accountId: string;
   }
   | {
     readonly type: "providerAccountRename";
@@ -404,6 +415,7 @@ function encodeMessage(message:
   | HeadlessProtocolErrorMessage
   | HeadlessProviderAccountListResultMessage
   | HeadlessProviderAccountImportResultMessage
+  | HeadlessProviderAccountAuthTokenReadResultMessage
   | HeadlessProviderAccountRemovalPreviewResultMessage
   | HeadlessProviderAccountLoginResultMessage
   | HeadlessModelRouteReadResultMessage
@@ -630,6 +642,22 @@ function parseInboundMessage(text: string):
         chatgptPlanType: planType,
         userLabel: record.userLabel,
         accountId,
+      },
+    };
+  }
+  if (record.type === "providerAccountAuthTokenRead") {
+    const requestId = parseRequestId(record.requestId);
+    if (
+      !hasExactlyKeys(record, ["type", "requestId", "accountId"])
+      || !requestId
+      || !isBoundedOpaqueText(record.accountId, 80)
+    ) return { ok: false, error: protocolError("malformed_message") };
+    return {
+      ok: true,
+      message: {
+        type: "providerAccountAuthTokenRead",
+        requestId,
+        accountId: record.accountId,
       },
     };
   }
@@ -1050,6 +1078,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
             | HeadlessProtocolErrorMessage
             | HeadlessProviderAccountListResultMessage
             | HeadlessProviderAccountImportResultMessage
+            | HeadlessProviderAccountAuthTokenReadResultMessage
             | HeadlessProviderAccountRemovalPreviewResultMessage
             | HeadlessProviderAccountLoginResultMessage
             | HeadlessModelRouteReadResultMessage
@@ -1171,6 +1200,17 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                   desiredStateRevision: snapshot.desiredStateRevision,
                   catalogRevision: snapshot.catalogRevision,
                   account,
+                })) return { exitCode: 1, reason: "output_error" };
+                continue;
+              }
+              if (parsed.message.type === "providerAccountAuthTokenRead") {
+                const accessToken = modelPlaneStore.readOAuthAccessToken(
+                  parsed.message.accountId,
+                );
+                if (!await write({
+                  type: "providerAccountAuthTokenReadResult",
+                  requestId: parsed.message.requestId,
+                  accessToken,
                 })) return { exitCode: 1, reason: "output_error" };
                 continue;
               }
