@@ -126,12 +126,12 @@ async function fetchWithTimeout(
 }
 
 function callbackPage(ok: boolean): Response {
-  const title = ok ? "Login complete" : "Login failed";
+  const title = ok ? "Authorization complete" : "Authorization failed";
   const body = ok
-    ? "You can close this tab and return to RichCodex."
-    : "Return to RichCodex and start a new sign-in attempt.";
+    ? "You can close this tab and return to VibeSeed to finish signing in."
+    : "Return to VibeSeed and start a new sign-in attempt.";
   return new Response(
-    `<!doctype html><html><head><meta charset="utf-8"><title>RichCodex</title></head><body><h2>${title}</h2><p>${body}</p></body></html>`,
+    `<!doctype html><html><head><meta charset="utf-8"><title>VibeSeed</title></head><body><h2>${title}</h2><p>${body}</p></body></html>`,
     { status: ok ? 200 : 400, headers: { "content-type": "text/html; charset=utf-8" } },
   );
 }

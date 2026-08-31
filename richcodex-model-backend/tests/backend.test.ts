@@ -194,12 +194,16 @@ describe("RichCodex browser OAuth coordinator", () => {
       `http://127.0.0.1:${redirect.port}${redirect.pathname}?code=wrong&state=wrong`,
     );
     expect(wrong.status).toBe(400);
+    expect(await wrong.text()).toContain("Return to VibeSeed");
     expect(coordinator.status(started.loginId).status).toBe("awaitingUser");
 
     const accepted = await fetch(
       `http://127.0.0.1:${redirect.port}${redirect.pathname}?code=callback-code&state=${state}`,
     );
     expect(accepted.status).toBe(200);
+    const acceptedPage = await accepted.text();
+    expect(acceptedPage).toContain("<title>VibeSeed</title>");
+    expect(acceptedPage).toContain("return to VibeSeed to finish signing in");
     for (let attempt = 0; attempt < 20; attempt += 1) {
       if (coordinator.status(started.loginId).status === "completed") break;
       await Bun.sleep(10);
