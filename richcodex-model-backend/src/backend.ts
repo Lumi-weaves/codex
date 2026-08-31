@@ -1069,6 +1069,10 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
       const dataPlane = createModelDataPlane({
         capability: dataPlaneCapability,
         modelPlaneStore,
+        responsesWebSocketProxy: options.env?.HTTPS_PROXY
+          ?? options.env?.https_proxy
+          ?? options.env?.ALL_PROXY
+          ?? options.env?.all_proxy,
       }).start();
       try {
         let readyWritten = false;

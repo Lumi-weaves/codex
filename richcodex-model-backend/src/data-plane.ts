@@ -4,6 +4,10 @@ import type {
   StoredProviderCredential,
   StoredOAuthCredential,
 } from "./model-plane";
+import {
+  ResponsesWebSocketPool,
+  type ResponsesWebSocketFactory,
+} from "./responses-websocket";
 
 const OPENAI_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -76,6 +80,8 @@ export interface ModelDataPlaneOptions {
   readonly modelPlaneStore: ModelPlaneStore;
   readonly fetch?: FetchFunction;
   readonly now?: () => number;
+  readonly responsesWebSocketFactory?: ResponsesWebSocketFactory;
+  readonly responsesWebSocketProxy?: string;
 }
 
 export interface StartedModelDataPlane {
@@ -186,6 +192,16 @@ function responseHeaders(
   upstream.headers.forEach((value, name) => {
     if (!STRIPPED_RESPONSE_HEADERS.has(name.toLowerCase())) headers.append(name, value);
   });
+  addRouteHeaders(headers, candidate, attempt, clientAttemptId);
+  return headers;
+}
+
+function addRouteHeaders(
+  headers: Headers,
+  candidate: ModelExecutionCandidate,
+  attempt: number,
+  clientAttemptId: string | undefined,
+): void {
   headers.delete(CLIENT_ATTEMPT_ID_RESPONSE_HEADER);
   headers.set("x-richcodex-model-tag", candidate.modelTag);
   headers.set("x-richcodex-resolved-model", candidate.upstreamModelId);
@@ -196,7 +212,6 @@ function responseHeaders(
   if (clientAttemptId !== undefined) {
     headers.set(CLIENT_ATTEMPT_ID_RESPONSE_HEADER, clientAttemptId);
   }
-  return headers;
 }
 
 function safeReceipt(candidate: ModelExecutionCandidate, attempt: number): string {
@@ -218,6 +233,24 @@ function validClientAttemptId(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 }
 
+function validContinuationKey(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 8
+    && value.length <= 512
+    && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+function responsesWebSocketUrl(candidate: ModelExecutionCandidate): string {
+  const url = new URL(
+    candidate.credential.kind === "oauth"
+      ? OPENAI_CODEX_RESPONSES_URL
+      : `${candidate.apiBaseUrl}/responses`,
+  );
+  if (url.protocol === "https:") url.protocol = "wss:";
+  else if (url.protocol === "http:") url.protocol = "ws:";
+  return url.toString();
+}
+
 function retryableUpstreamStatus(status: number): boolean {
   return status === 401
     || status === 402
@@ -233,6 +266,9 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
   const now = options.now ?? Date.now;
   const runtime = new Map<string, AccountRuntimeState>();
   const refreshFlights = new Map<string, Promise<StoredOAuthCredential>>();
+  const responsesWebSockets = new ResponsesWebSocketPool(
+    options.responsesWebSocketFactory,
+  );
 
   const refreshCredential = async (
     candidate: ModelExecutionCandidate,
@@ -402,6 +438,37 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     );
     if (candidates.length === 0) return staticError(503, "no_eligible_target");
 
+    const continuationKey = (body as Record<string, unknown>).prompt_cache_key;
+    const websocketCandidate = candidates[0];
+    if (
+      websocketCandidate !== undefined
+      && websocketCandidate.providerId === "openai"
+      && validContinuationKey(continuationKey)
+    ) {
+      try {
+        const credential = await refreshCredential(websocketCandidate, false);
+        const headers = forwardedRequestHeaders(request, credential);
+        const responseHeaders = new Headers({ "content-type": "text/event-stream" });
+        addRouteHeaders(responseHeaders, websocketCandidate, 1, clientAttemptId);
+        responseHeaders.set(
+          "x-richcodex-execution-receipt",
+          safeReceipt(websocketCandidate, 1),
+        );
+        return await responsesWebSockets.stream({
+          continuationKey,
+          routeKey: websocketCandidate.targetId,
+          url: responsesWebSocketUrl(websocketCandidate),
+          headers,
+          body: { ...(body as Record<string, unknown>), model: websocketCandidate.upstreamModelId },
+          responseHeaders,
+          proxy: options.responsesWebSocketProxy,
+        });
+      } catch {
+        // A provider continuation is only an acceleration resource. The complete
+        // Kernel-owned request remains sufficient for the ordinary HTTP path.
+      }
+    }
+
     let lastResponse: Response | undefined;
     for (const [index, candidate] of candidates.entries()) {
       try {
@@ -464,6 +531,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       return {
         port: server.port,
         async stop(): Promise<void> {
+          responsesWebSockets.closeAll();
           await server.stop(true);
         },
       };
