@@ -120,15 +120,24 @@ describe("model data plane Responses WebSocket", () => {
 
   test("uses full HTTP replay when the ephemeral WebSocket cannot open", async () => {
     const fetchBodies: Record<string, unknown>[] = [];
+    const fetchProxies: Array<string | undefined> = [];
+    const resolvedUrls: string[] = [];
     const plane = createModelDataPlane({
       capability: CAPABILITY,
       modelPlaneStore: configuredStore(),
       fetch: async (_input, init) => {
         fetchBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        fetchProxies.push(init?.proxy);
         return new Response('data: {"type":"response.completed"}\n\n', {
           status: 200,
           headers: { "content-type": "text/event-stream" },
         });
+      },
+      networkRouteResolver: {
+        resolve: async url => {
+          resolvedUrls.push(url);
+          return { kind: "proxy", url: "http://127.0.0.1:7897" };
+        },
       },
       responsesWebSocketFactory: () => {
         throw new Error("offline");
@@ -144,5 +153,10 @@ describe("model data plane Responses WebSocket", () => {
       model: "gpt-5.6-sol",
       input: [{ role: "user", content: "hello" }],
     });
+    expect(fetchProxies).toEqual(["http://127.0.0.1:7897"]);
+    expect(resolvedUrls).toEqual([
+      "wss://api.openai.com/v1/responses",
+      "https://api.openai.com/v1/responses",
+    ]);
   });
 });

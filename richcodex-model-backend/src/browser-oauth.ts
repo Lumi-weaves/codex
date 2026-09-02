@@ -6,6 +6,12 @@ import {
   type ModelPlaneStore,
   type SafeProviderAccount,
 } from "./model-plane";
+import {
+  createRouteAwareFetch,
+  createSystemNetworkRouteResolver,
+  type NetworkRouteResolver,
+  type RouteAwareFetch,
+} from "./network-route";
 
 const OPENAI_AUTH_BASE_URL = "https://auth.openai.com";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -20,7 +26,6 @@ const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 type BackendEnvironment = Readonly<Record<string, string | undefined>>;
 type FetchInit = RequestInit & { readonly proxy?: string };
-type FetchImplementation = (input: string | URL | Request, init?: FetchInit) => Promise<Response>;
 type BunServer = ReturnType<typeof Bun.serve>;
 
 interface BrowserLoginFlow {
@@ -43,7 +48,8 @@ interface BrowserLoginFlow {
 interface BrowserOAuthCoordinatorOptions {
   readonly modelPlaneStore: ModelPlaneStore;
   readonly env?: BackendEnvironment;
-  readonly fetch?: FetchImplementation;
+  readonly fetch?: RouteAwareFetch;
+  readonly networkRouteResolver?: NetworkRouteResolver;
   readonly now?: () => number;
   readonly createLoginId?: () => string;
   readonly callbackPort?: number;
@@ -60,15 +66,6 @@ function record(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function proxyFromEnvironment(env: BackendEnvironment): string | undefined {
-  return env.HTTPS_PROXY
-    ?? env.https_proxy
-    ?? env.ALL_PROXY
-    ?? env.all_proxy
-    ?? env.HTTP_PROXY
-    ?? env.http_proxy;
 }
 
 function isAddressInUse(error: unknown): boolean {
@@ -108,7 +105,7 @@ async function pkce(): Promise<{ verifier: string; challenge: string }> {
 }
 
 async function fetchWithTimeout(
-  fetchImpl: FetchImplementation,
+  fetchImpl: RouteAwareFetch,
   input: string,
   init: FetchInit,
   parentSignal: AbortSignal,
@@ -142,11 +139,13 @@ export function createBrowserOAuthCoordinator(
 ): DeviceOAuthCoordinator {
   const modelPlaneStore = options.modelPlaneStore;
   const env = options.env ?? process.env;
-  const fetchImpl = options.fetch ?? (fetch as FetchImplementation);
+  const fetchImpl = createRouteAwareFetch(
+    options.networkRouteResolver ?? createSystemNetworkRouteResolver({ env }),
+    options.fetch ?? fetch,
+  );
   const now = options.now ?? Date.now;
   const createLoginId = options.createLoginId ?? (() => `browser-login-${randomUUID()}`);
   const callbackPort = options.callbackPort ?? DEFAULT_CALLBACK_PORT;
-  const proxy = proxyFromEnvironment(env);
   const flows = new Map<string, BrowserLoginFlow>();
 
   const safe = (flow: BrowserLoginFlow): SafeProviderLogin => {
@@ -195,7 +194,6 @@ export function createBrowserOAuthCoordinator(
             redirect_uri: `http://localhost:${flow.servers[0].port}${CALLBACK_PATH}`,
             code_verifier: flow.verifier,
           }).toString(),
-          ...(proxy ? { proxy } : {}),
         },
         flow.abort.signal,
       );

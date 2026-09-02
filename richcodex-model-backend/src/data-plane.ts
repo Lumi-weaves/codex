@@ -8,6 +8,12 @@ import {
   ResponsesWebSocketPool,
   type ResponsesWebSocketFactory,
 } from "./responses-websocket";
+import {
+  createRouteAwareFetch,
+  createSystemNetworkRouteResolver,
+  type NetworkRouteResolver,
+  type RouteAwareFetch,
+} from "./network-route";
 
 const OPENAI_CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token";
@@ -60,11 +66,6 @@ interface AccountRuntimeState {
   quotaObservedAt?: number;
 }
 
-type FetchFunction = (
-  input: RequestInfo | URL,
-  init?: RequestInit,
-) => Promise<Response>;
-
 class CredentialRefreshError extends Error {
   readonly accountStatus: "verificationRequired" | "reauthenticationRequired";
 
@@ -78,10 +79,11 @@ class CredentialRefreshError extends Error {
 export interface ModelDataPlaneOptions {
   readonly capability: string;
   readonly modelPlaneStore: ModelPlaneStore;
-  readonly fetch?: FetchFunction;
+  readonly fetch?: RouteAwareFetch;
   readonly now?: () => number;
   readonly responsesWebSocketFactory?: ResponsesWebSocketFactory;
   readonly responsesWebSocketProxy?: string;
+  readonly networkRouteResolver?: NetworkRouteResolver;
 }
 
 export interface StartedModelDataPlane {
@@ -262,7 +264,12 @@ function retryableUpstreamStatus(status: number): boolean {
 /** Build the loopback-only, capability-authenticated model execution plane. */
 export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataPlane {
   if (!validCapability(options.capability)) throw new Error("data_plane_capability_invalid");
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const networkRouteResolver = options.networkRouteResolver
+    ?? createSystemNetworkRouteResolver();
+  const fetchImpl = createRouteAwareFetch(
+    networkRouteResolver,
+    options.fetch ?? globalThis.fetch,
+  );
   const now = options.now ?? Date.now;
   const runtime = new Map<string, AccountRuntimeState>();
   const refreshFlights = new Map<string, Promise<StoredOAuthCredential>>();
@@ -454,6 +461,9 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           "x-richcodex-execution-receipt",
           safeReceipt(websocketCandidate, 1),
         );
+        const resolvedRoute = await networkRouteResolver.resolve(
+          responsesWebSocketUrl(websocketCandidate),
+        );
         return await responsesWebSockets.stream({
           continuationKey,
           routeKey: websocketCandidate.targetId,
@@ -461,7 +471,8 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           headers,
           body: { ...(body as Record<string, unknown>), model: websocketCandidate.upstreamModelId },
           responseHeaders,
-          proxy: options.responsesWebSocketProxy,
+          proxy: options.responsesWebSocketProxy
+            ?? (resolvedRoute.kind === "proxy" ? resolvedRoute.url : ""),
         });
       } catch {
         // A provider continuation is only an acceleration resource. The complete

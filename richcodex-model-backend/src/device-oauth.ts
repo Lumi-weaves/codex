@@ -5,6 +5,12 @@ import {
   type ModelPlaneStore,
   type SafeProviderAccount,
 } from "./model-plane";
+import {
+  createRouteAwareFetch,
+  createSystemNetworkRouteResolver,
+  type NetworkRouteResolver,
+  type RouteAwareFetch,
+} from "./network-route";
 
 const OPENAI_AUTH_BASE_URL = "https://auth.openai.com";
 const OPENAI_CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -17,7 +23,6 @@ const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 
 type BackendEnvironment = Readonly<Record<string, string | undefined>>;
 type FetchInit = RequestInit & { readonly proxy?: string };
-type FetchImplementation = (input: string | URL | Request, init?: FetchInit) => Promise<Response>;
 
 export type ProviderLoginStatus =
   | "awaitingUser"
@@ -75,7 +80,8 @@ interface LoginFlow {
 interface DeviceOAuthCoordinatorOptions {
   readonly modelPlaneStore: ModelPlaneStore;
   readonly env?: BackendEnvironment;
-  readonly fetch?: FetchImplementation;
+  readonly fetch?: RouteAwareFetch;
+  readonly networkRouteResolver?: NetworkRouteResolver;
   readonly now?: () => number;
   readonly createLoginId?: () => string;
   readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
@@ -86,15 +92,6 @@ function isBoundedText(value: unknown, maxBytes: number): value is string {
     && value.length > 0
     && Buffer.byteLength(value, "utf8") <= maxBytes
     && !CONTROL_CHARACTER.test(value);
-}
-
-function proxyFromEnvironment(env: BackendEnvironment): string | undefined {
-  return env.HTTPS_PROXY
-    ?? env.https_proxy
-    ?? env.ALL_PROXY
-    ?? env.all_proxy
-    ?? env.HTTP_PROXY
-    ?? env.http_proxy;
 }
 
 function defaultSleep(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -116,7 +113,7 @@ function defaultSleep(milliseconds: number, signal: AbortSignal): Promise<void> 
 }
 
 async function fetchWithTimeout(
-  fetchImpl: FetchImplementation,
+  fetchImpl: RouteAwareFetch,
   input: string,
   init: FetchInit,
   parentSignal: AbortSignal | undefined,
@@ -162,11 +159,13 @@ export function createDeviceOAuthCoordinator(
 ): DeviceOAuthCoordinator {
   const modelPlaneStore = options.modelPlaneStore;
   const env = options.env ?? process.env;
-  const fetchImpl = options.fetch ?? (fetch as FetchImplementation);
+  const fetchImpl = createRouteAwareFetch(
+    options.networkRouteResolver ?? createSystemNetworkRouteResolver({ env }),
+    options.fetch ?? fetch,
+  );
   const now = options.now ?? Date.now;
   const createLoginId = options.createLoginId ?? (() => `login-${randomUUID()}`);
   const sleep = options.sleep ?? defaultSleep;
-  const proxy = proxyFromEnvironment(env);
   const flows = new Map<string, LoginFlow>();
 
   const safe = (flow: LoginFlow): SafeProviderLogin => {
@@ -216,7 +215,6 @@ export function createDeviceOAuthCoordinator(
               device_auth_id: flow.deviceAuthId,
               user_code: flow.userCode,
             }),
-            ...(proxy ? { proxy } : {}),
           },
           flow.abort.signal,
         );
@@ -251,7 +249,6 @@ export function createDeviceOAuthCoordinator(
             method: "POST",
             headers: { "content-type": "application/x-www-form-urlencoded" },
             body: tokenBody.toString(),
-            ...(proxy ? { proxy } : {}),
           },
           flow.abort.signal,
         );
@@ -335,7 +332,6 @@ export function createDeviceOAuthCoordinator(
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ client_id: OPENAI_CODEX_CLIENT_ID }),
-            ...(proxy ? { proxy } : {}),
           },
           undefined,
         );

@@ -19,6 +19,7 @@ import {
   type SafeModelRoute,
   type SafeProviderSummary,
 } from "./model-plane";
+import { createSystemNetworkRouteResolver } from "./network-route";
 
 /** Protocol 14 adds explicit local-frontend access-token projection. */
 export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 14 as const;
@@ -1036,13 +1037,16 @@ function pageAccounts(
 export function createHeadlessBackend(options: HeadlessBackendOptions = {}): HeadlessBackend {
   const stateRoot = resolveBackendStateRoot(options);
   const modelPlaneStore = options.modelPlaneStore ?? createModelPlaneStore(stateRoot);
+  const networkRouteResolver = createSystemNetworkRouteResolver({ env: options.env });
   const deviceOAuth = options.deviceOAuthCoordinator ?? createDeviceOAuthCoordinator({
     modelPlaneStore,
     env: options.env,
+    networkRouteResolver,
   });
   const browserOAuth = options.browserOAuthCoordinator ?? createBrowserOAuthCoordinator({
     modelPlaneStore,
     env: options.env,
+    networkRouteResolver,
   });
   const loginModes = new Map<string, "browser" | "deviceCode">();
   const dataPlaneCapability = options.dataPlaneCapability
@@ -1069,10 +1073,7 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
       const dataPlane = createModelDataPlane({
         capability: dataPlaneCapability,
         modelPlaneStore,
-        responsesWebSocketProxy: options.env?.HTTPS_PROXY
-          ?? options.env?.https_proxy
-          ?? options.env?.ALL_PROXY
-          ?? options.env?.all_proxy,
+        networkRouteResolver,
       }).start();
       try {
         let readyWritten = false;

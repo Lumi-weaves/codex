@@ -20,6 +20,14 @@ provenance is mirrored by `codex-rs/app-server/richcodex-kernel.lock.json`;
 selected upstream modules will enter here deliberately behind RichCodex-owned
 interfaces.
 
+Outbound auth, HTTPS/SSE, and WebSocket connection attempts share one
+destination-aware network route resolver. On macOS it follows the current
+System Configuration HTTP/HTTPS route with a bounded cache; a later physical
+retry therefore observes proxy changes without restarting the backend. If
+platform discovery is unavailable, explicit proxy environment variables are
+the fallback. Proxy URLs remain transport-private and are never written to the
+stdio protocol, model-plane store, or diagnostics.
+
 `kernel-selection.json` records the exact OpenCodex symbols and invariants
 adapted into the current composition. Explicitly selected Codex-auth imports
 live in a RichCodex-owned provider store. The backend never discovers or
