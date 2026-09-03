@@ -1424,6 +1424,9 @@ describe("RichCodex headless backend composition root", () => {
     const coordinator = createDeviceOAuthCoordinator({
       modelPlaneStore,
       env: { HTTPS_PROXY: "http://127.0.0.1:7890" },
+      networkRouteResolver: {
+        resolve: async () => ({ kind: "proxy", url: "http://127.0.0.1:7890" }),
+      },
       now: () => now,
       createLoginId: () => "login-local-handle",
       fetch: async (input, init) => {
