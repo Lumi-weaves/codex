@@ -238,6 +238,7 @@ export interface ModelPlaneStore {
   readOAuthAccessToken(accountId: string): string;
   addApiKeyAccount(input: AddApiKeyAccountInput): SafeProviderAccount;
   previewAccountRemoval(accountId: string): AccountRemovalPreview;
+  logoutAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
   removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount;
   renameAccount(
     accountId: string,
@@ -374,7 +375,8 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
     && (value.planType === undefined || isSafeText(value.planType, 128));
   if (!commonIsValid) return null;
   if (credential.kind === "apiKey") {
-    if (!isSafeText(credential.apiKey, 64 * 1024)) return null;
+    if (!isSafeText(credential.apiKey, 64 * 1024)
+      && !(value.status === "reauthenticationRequired" && credential.apiKey === "")) return null;
     return {
       id: value.id as string,
       providerId: value.providerId as string,
@@ -390,7 +392,9 @@ function parseStoredAccount(value: unknown): StoredProviderAccount | null {
   if (
     value.providerId !== OPENAI_PROVIDER_ID
     || credential.kind !== undefined && credential.kind !== "oauth"
-    || !isSafeText(credential.accessToken, 64 * 1024)
+    || (!isSafeText(credential.accessToken, 64 * 1024)
+      && !(value.status === "reauthenticationRequired" && credential.accessToken === ""
+        && credential.refreshToken === null && credential.expiresAt === null))
     || credential.refreshToken !== null && !isSafeText(credential.refreshToken, 64 * 1024)
     || !isSafeText(credential.chatgptAccountId, 512)
     || credential.expiresAt !== null && !Number.isSafeInteger(credential.expiresAt)
@@ -1014,6 +1018,7 @@ export function createModelPlaneStore(
       }
       if (
         existing?.credential.kind === "oauth"
+        && existing.credential.accessToken !== ""
         && existing.credential.chatgptAccountId !== input.chatgptAccountId
       ) throw new ModelPlaneError("account_identity_mismatch");
       if (!existing && document.accounts.length >= PROVIDER_ACCOUNT_MAX_ROWS) {
@@ -1156,6 +1161,27 @@ export function createModelPlaneStore(
         canRemove: affectedTargets.length === 0,
       };
     },
+    logoutAccount(accountId: string, expectedRevision: number): SafeProviderAccount {
+      if (!isSafeText(accountId, 80) || !Number.isSafeInteger(expectedRevision)
+        || expectedRevision < 0) throw new ModelPlaneError("invalid_request");
+      if (expectedRevision !== document.desiredStateRevision) throw new ModelPlaneError("revision_conflict");
+      const account = document.accounts.find(candidate => candidate.id === accountId);
+      if (!account) throw new ModelPlaneError("account_not_found");
+      // Keep account/route identity, never keep an access or refresh secret.
+      const cleared: StoredProviderAccount = {
+        ...account, status: "reauthenticationRequired", email: undefined, planType: undefined,
+        credential: account.credential.kind === "oauth"
+          ? { ...account.credential, accessToken: "", refreshToken: null, expiresAt: null }
+          : { kind: "apiKey", apiKey: "" },
+      };
+      const next = nextDocument(document, {
+        accounts: document.accounts.map(candidate => candidate.id === accountId ? cleared : candidate),
+        modelTags: document.modelTags, displayEntries: document.displayEntries,
+      });
+      persistDocument(stateRoot, path, next);
+      document = next;
+      return safeAccount(cleared, now());
+    },
     removeAccount(accountId: string, expectedRevision: number): SafeProviderAccount {
       if (
         !isSafeText(accountId, 80)
@@ -1257,7 +1283,8 @@ export function createModelPlaneStore(
       if (account.credential.kind !== "oauth") {
         throw new ModelPlaneError("credential_kind_mismatch");
       }
-      if (account.credential.chatgptAccountId !== credential.chatgptAccountId) {
+      if (account.credential.accessToken !== ""
+        && account.credential.chatgptAccountId !== credential.chatgptAccountId) {
         throw new ModelPlaneError("account_identity_mismatch");
       }
       if (
@@ -1482,6 +1509,9 @@ export function createModelPlaneStore(
     markAccountStatus(accountId: string, status: ProviderAccountStatus): void {
       const account = document.accounts.find(candidate => candidate.id === accountId);
       if (!account || account.status === status) return;
+      // Late completion of an in-flight request must not revive a logged-out account.
+      if (account.credential.kind === "oauth" ? account.credential.accessToken === ""
+        : account.credential.apiKey === "") return;
       const next: ModelPlaneDocument = {
         ...document,
         accounts: document.accounts.map(candidate =>

@@ -145,6 +145,7 @@ function executionStore(
     readOAuthAccessToken: () => { throw new Error("not used"); },
     addApiKeyAccount: () => { throw new Error("not used"); },
     previewAccountRemoval: () => { throw new Error("not used"); },
+    logoutAccount: () => { throw new Error("not used"); },
     removeAccount: () => { throw new Error("not used"); },
     renameAccount: () => { throw new Error("not used"); },
     replaceApiKeyCredential: () => { throw new Error("not used"); },
@@ -791,7 +792,7 @@ describe("RichCodex headless backend composition root", () => {
     expect(shutdown.lines).toHaveLength(2);
     expect(shutdown.lines[0]).toMatchObject({
       type: "ready",
-      protocolVersion: 14,
+      protocolVersion: 15,
       kernel: RICHCODEX_BACKEND_KERNEL,
       desiredStateRevision: 0,
       catalogRevision: 0,
@@ -1065,7 +1066,7 @@ describe("RichCodex headless backend composition root", () => {
       })}\n${JSON.stringify({ type: "shutdown", requestId: "client-token-shutdown" })}\n`,
       root,
     );
-    expect(result.lines[0]).toMatchObject({ type: "ready", protocolVersion: 14 });
+    expect(result.lines[0]).toMatchObject({ type: "ready", protocolVersion: 15 });
     expect(result.lines[1]).toMatchObject({
       type: "providerAccountAuthTokensInstallResult",
       requestId: "client-token-install",

@@ -21,8 +21,8 @@ import {
 } from "./model-plane";
 import { createSystemNetworkRouteResolver } from "./network-route";
 
-/** Protocol 14 adds explicit local-frontend access-token projection. */
-export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 14 as const;
+/** Protocol 15 adds credential-only logout, preserving account and route identity. */
+export const RICHCODEX_BACKEND_PROTOCOL_VERSION = 15 as const;
 
 /**
  * The canonical state-root slot for the supervised backend.
@@ -163,7 +163,8 @@ export type HeadlessProviderAccountImportResultMessage = {
     | "providerAccountAuthTokensInstallResult"
     | "providerAccountRenameResult"
     | "providerAccountReplaceApiKeyResult"
-    | "providerAccountRemoveResult";
+    | "providerAccountRemoveResult"
+    | "providerAccountLogoutResult";
   readonly requestId: string;
   readonly desiredStateRevision: number;
   readonly catalogRevision: number;
@@ -275,6 +276,12 @@ type HeadlessInboundMessage =
   | {
     readonly type: "providerAccountRemovalPreview";
     readonly requestId: string;
+    readonly accountId: string;
+  }
+  | {
+    readonly type: "providerAccountLogout";
+    readonly requestId: string;
+    readonly expectedRevision: number;
     readonly accountId: string;
   }
   | {
@@ -718,7 +725,7 @@ function parseInboundMessage(text: string):
       message: { type: "providerAccountRemovalPreview", requestId, accountId: record.accountId },
     };
   }
-  if (record.type === "providerAccountRemove") {
+  if (record.type === "providerAccountRemove" || record.type === "providerAccountLogout") {
     const requestId = parseRequestId(record.requestId);
     if (
       !hasExactlyKeys(record, ["type", "requestId", "expectedRevision", "accountId"])
@@ -730,7 +737,7 @@ function parseInboundMessage(text: string):
     return {
       ok: true,
       message: {
-        type: "providerAccountRemove",
+        type: record.type,
         requestId,
         expectedRevision: record.expectedRevision as number,
         accountId: record.accountId,
@@ -1277,14 +1284,16 @@ export function createHeadlessBackend(options: HeadlessBackendOptions = {}): Hea
                 })) return { exitCode: 1, reason: "output_error" };
                 continue;
               }
-              if (parsed.message.type === "providerAccountRemove") {
-                const account = modelPlaneStore.removeAccount(
+              if (parsed.message.type === "providerAccountRemove" || parsed.message.type === "providerAccountLogout") {
+                const account = (parsed.message.type === "providerAccountLogout"
+                  ? modelPlaneStore.logoutAccount : modelPlaneStore.removeAccount).call(modelPlaneStore,
                   parsed.message.accountId,
                   parsed.message.expectedRevision,
                 );
                 const snapshot = modelPlaneStore.snapshot();
                 if (!await write({
-                  type: "providerAccountRemoveResult",
+                  type: parsed.message.type === "providerAccountLogout"
+                    ? "providerAccountLogoutResult" : "providerAccountRemoveResult",
                   requestId: parsed.message.requestId,
                   desiredStateRevision: snapshot.desiredStateRevision,
                   catalogRevision: snapshot.catalogRevision,
