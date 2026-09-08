@@ -215,7 +215,7 @@ test("network failures do not revoke a ready account", async () => {
   expect(calls).toBe(2);
 });
 
-test("abort tears down an established upstream socket without starting HTTP", async () => {
+test.each(["acceptance", "stream"])("abort during %s tears down the upstream without starting HTTP", async stage => {
   let closed!: () => void;
   const closedPromise = new Promise<void>(resolve => { closed = resolve; });
   let started!: () => void;
@@ -225,7 +225,10 @@ test("abort tears down an established upstream socket without starting HTTP", as
     fetch(request, server) {
       return server.upgrade(request) ? undefined : new Response(null, { status: 400 });
     },
-    websocket: { message() { started(); }, close() { closed(); } },
+    websocket: {
+      message(socket) { if (stage === "stream") socket.send('{"type":"response.created"}'); started(); },
+      close() { closed(); },
+    },
   });
   servers.push(server);
   let http = 0;
@@ -235,10 +238,19 @@ test("abort tears down an established upstream socket without starting HTTP", as
     fetch: async () => { http++; return new Response(null); },
   });
   const controller = new AbortController();
-  const response = await plane.handle(new Request(request(), { signal: controller.signal }));
-  await startedPromise;
-  controller.abort();
-  await expect(response.text()).rejects.toThrow();
-  await closedPromise;
-  expect(http).toBe(0);
+  const local = plane.start();
+  try {
+    const input = request();
+    const pending = fetch(`http://127.0.0.1:${local.port}/v1/responses`, {
+      method: "POST", headers: input.headers, body: await input.text(), signal: controller.signal,
+    });
+    await startedPromise;
+    if (stage === "stream") await pending;
+    controller.abort();
+    await expect(pending.then(response => response.text())).rejects.toThrow();
+    await closedPromise;
+    expect(http).toBe(0);
+  } finally {
+    await local.stop();
+  }
 });

@@ -260,7 +260,16 @@ class ResponsesWebSocketConnection {
         this.close();
       }
     };
-    const onAbort = (): void => fail(new Error("responses_websocket_cancelled"));
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      failed();
+      cleanup();
+      // The caller has already cancelled. Do not error an abandoned Bun HTTP
+      // body: that surfaces as an unhandled server error rather than evidence.
+      try { controller?.close(); } catch { /* body already cancelled */ }
+      this.close();
+    };
     const onError = (): void => fail(new Error("responses_websocket_stream_failed"));
     const onClose = (): void => fail(new Error("responses_websocket_closed"));
 
