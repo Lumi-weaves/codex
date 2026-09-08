@@ -160,3 +160,85 @@ describe("model data plane Responses WebSocket", () => {
     ]);
   });
 });
+
+test("an established socket failure stays on HTTP until cooldown and HTTP recovery", async () => {
+  let now = 0;
+  let sockets = 0;
+  let http = 0;
+  const plane = createModelDataPlane({
+    capability: CAPABILITY, modelPlaneStore: configuredStore(), now: () => now,
+    responsesWebSocketFactory: () => {
+      sockets++;
+      const socket = Object.assign(new EventTarget(), {
+        readyState: WebSocket.OPEN,
+        close() {},
+        send() { queueMicrotask(() => socket.dispatchEvent(new Event("close"))); },
+      });
+      queueMicrotask(() => socket.dispatchEvent(new Event("open")));
+      return socket as unknown as WebSocket;
+    },
+    fetch: async () => {
+      http++;
+      return new Response('data: {"type":"response.completed"}\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  });
+  const first = await plane.handle(request());
+  expect(first.headers.get("x-vibeseed-response-transport")).toBe("websocket");
+  await expect(first.text()).rejects.toThrow();
+  const second = await plane.handle(request());
+  expect(second.headers.get("x-vibeseed-response-transport")).toBe("https");
+  await second.text();
+  expect(sockets).toBe(1);
+  expect(http).toBe(1);
+  now = 60_001;
+  const third = await plane.handle(request());
+  await expect(third.text()).rejects.toThrow();
+  expect(sockets).toBe(2);
+});
+
+test("network failures do not revoke a ready account", async () => {
+  let calls = 0;
+  const plane = createModelDataPlane({
+    capability: CAPABILITY, modelPlaneStore: configuredStore(),
+    responsesWebSocketFactory: () => { throw new Error("network unavailable"); },
+    fetch: async () => {
+      if (++calls === 1) throw new Error("network unavailable");
+      return new Response('data: {"type":"response.completed"}\n\n');
+    },
+  });
+  expect((await plane.handle(request())).status).toBe(502);
+  const recovered = await plane.handle(request());
+  expect(recovered.status).toBe(200);
+  expect(await recovered.text()).toContain("response.completed");
+  expect(calls).toBe(2);
+});
+
+test("abort tears down an established upstream socket without starting HTTP", async () => {
+  let closed!: () => void;
+  const closedPromise = new Promise<void>(resolve => { closed = resolve; });
+  let started!: () => void;
+  const startedPromise = new Promise<void>(resolve => { started = resolve; });
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request, server) {
+      return server.upgrade(request) ? undefined : new Response(null, { status: 400 });
+    },
+    websocket: { message() { started(); }, close() { closed(); } },
+  });
+  servers.push(server);
+  let http = 0;
+  const plane = createModelDataPlane({
+    capability: CAPABILITY, modelPlaneStore: configuredStore(),
+    responsesWebSocketFactory: () => new WebSocket(`ws://127.0.0.1:${server.port}`),
+    fetch: async () => { http++; return new Response(null); },
+  });
+  const controller = new AbortController();
+  const response = await plane.handle(new Request(request(), { signal: controller.signal }));
+  await startedPromise;
+  controller.abort();
+  await expect(response.text()).rejects.toThrow();
+  await closedPromise;
+  expect(http).toBe(0);
+});

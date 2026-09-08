@@ -18,6 +18,7 @@ export interface ResponsesWebSocketStreamRequest {
   readonly body: JsonObject;
   readonly responseHeaders: Headers;
   readonly proxy?: string;
+  readonly signal?: AbortSignal;
 }
 
 interface LastResponse {
@@ -156,7 +157,7 @@ class ResponsesWebSocketConnection {
     return !this.closed && this.socket.readyState === WebSocket.OPEN;
   }
 
-  stream(body: JsonObject, responseHeaders: Headers): Response {
+  stream(body: JsonObject, responseHeaders: Headers, failed: () => void, signal?: AbortSignal): Response {
     if (!this.usable || this.active) throw new Error("responses_websocket_unavailable");
     this.active = true;
     this.lastUsed = Date.now();
@@ -169,6 +170,7 @@ class ResponsesWebSocketConnection {
     const encoder = new TextEncoder();
 
     const cleanup = (): void => {
+      signal?.removeEventListener("abort", onAbort);
       this.socket.removeEventListener("message", onMessage);
       this.socket.removeEventListener("error", onError);
       this.socket.removeEventListener("close", onClose);
@@ -178,6 +180,7 @@ class ResponsesWebSocketConnection {
     const fail = (error: Error): void => {
       if (settled) return;
       settled = true;
+      failed();
       cleanup();
       controller?.error(error);
       this.close();
@@ -257,12 +260,15 @@ class ResponsesWebSocketConnection {
         this.close();
       }
     };
+    const onAbort = (): void => fail(new Error("responses_websocket_cancelled"));
     const onError = (): void => fail(new Error("responses_websocket_stream_failed"));
     const onClose = (): void => fail(new Error("responses_websocket_closed"));
 
     const stream = new ReadableStream<Uint8Array>({
       start: streamController => {
         controller = streamController;
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (signal?.aborted) { onAbort(); return; }
         this.socket.addEventListener("message", onMessage);
         this.socket.addEventListener("error", onError);
         this.socket.addEventListener("close", onClose);
@@ -272,7 +278,14 @@ class ResponsesWebSocketConnection {
           fail(new Error("responses_websocket_send_failed"));
         }
       },
-      cancel: () => this.close(),
+      cancel: () => {
+        if (!settled) {
+          settled = true;
+          failed();
+          cleanup();
+        }
+        this.close();
+      },
     });
     return new Response(stream, { status: 200, headers: responseHeaders });
   }
@@ -294,7 +307,9 @@ async function openSocket(
   headers: Headers,
   proxy: string | undefined,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<WebSocket> {
+  signal?.throwIfAborted();
   const socket = factory(url, { headers, proxy });
   return await new Promise<WebSocket>((resolve, reject) => {
     let settled = false;
@@ -302,12 +317,17 @@ async function openSocket(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       socket.removeEventListener("open", onOpen);
       socket.removeEventListener("error", onError);
       socket.removeEventListener("close", onError);
       if (result === "open") resolve(socket);
-      else reject(new Error("responses_websocket_connect_failed"));
+      else {
+        socket.close();
+        reject(new Error("responses_websocket_connect_failed"));
+      }
     };
+    const onAbort = (): void => settle("error");
     const onOpen = (): void => settle("open");
     const onError = (): void => settle("error");
     const timer = setTimeout(() => {
@@ -317,6 +337,8 @@ async function openSocket(
         settle("error");
       }
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     socket.addEventListener("open", onOpen);
     socket.addEventListener("error", onError);
     socket.addEventListener("close", onError);
@@ -326,14 +348,44 @@ async function openSocket(
 /** Ephemeral, bounded provider continuation pool; callers retain full replay authority. */
 export class ResponsesWebSocketPool {
   private readonly connections = new Map<string, ResponsesWebSocketConnection>();
+  private readonly fallback = new Map<string, { until: number; httpSucceeded: boolean }>();
 
   constructor(
     private readonly factory: ResponsesWebSocketFactory = defaultWebSocketFactory,
     private readonly connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
     private readonly maxConnections = DEFAULT_MAX_CONNECTIONS,
+    private readonly now: () => number = Date.now,
   ) {}
 
+  canProbe(key: string): boolean {
+    const state = this.fallback.get(key);
+    return state === undefined || (state.httpSucceeded && this.now() >= state.until);
+  }
+
+  httpSucceeded(key: string): void {
+    const state = this.fallback.get(key);
+    if (state) state.httpSucceeded = true;
+  }
+
+  private failed(key: string): void {
+    // Recovery state is ephemeral and bounded, just like continuation sockets.
+    this.fallback.delete(key);
+    if (this.fallback.size >= this.maxConnections) {
+      this.fallback.delete(this.fallback.keys().next().value!);
+    }
+    this.fallback.set(key, { until: this.now() + 60_000, httpSucceeded: false });
+  }
+
   async stream(request: ResponsesWebSocketStreamRequest): Promise<Response> {
+    try {
+      return await this.openStream(request);
+    } catch (error) {
+      this.failed(request.continuationKey);
+      throw error;
+    }
+  }
+
+  private async openStream(request: ResponsesWebSocketStreamRequest): Promise<Response> {
     let connection = this.connections.get(request.continuationKey);
     if (
       connection !== undefined
@@ -352,6 +404,7 @@ export class ResponsesWebSocketPool {
         headers,
         request.proxy,
         this.connectTimeoutMs,
+        request.signal,
       );
       const created = new ResponsesWebSocketConnection(
         request.routeKey,
@@ -365,12 +418,15 @@ export class ResponsesWebSocketPool {
       this.connections.set(request.continuationKey, created);
       connection = created;
     }
-    return connection.stream(request.body, request.responseHeaders);
+    this.fallback.delete(request.continuationKey);
+    return connection.stream(request.body, request.responseHeaders,
+      () => this.failed(request.continuationKey), request.signal);
   }
 
   closeAll(): void {
     for (const connection of [...this.connections.values()]) connection.close();
     this.connections.clear();
+    this.fallback.clear();
   }
 
   private makeRoom(): void {

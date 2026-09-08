@@ -274,7 +274,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
   const runtime = new Map<string, AccountRuntimeState>();
   const refreshFlights = new Map<string, Promise<StoredOAuthCredential>>();
   const responsesWebSockets = new ResponsesWebSocketPool(
-    options.responsesWebSocketFactory,
+    options.responsesWebSocketFactory, undefined, undefined, now,
   );
 
   const refreshCredential = async (
@@ -304,7 +304,11 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
           refresh_token: ownedRefreshToken,
         }),
         redirect: "manual",
+        signal: AbortSignal.timeout(30_000),
       });
+      if (response.status === 408 || response.status === 429 || response.status >= 500) {
+        throw new Error("credential_refresh_transport_unavailable");
+      }
       if (!response.ok) {
         throw new CredentialRefreshError(
           response.status === 400 || response.status === 401
@@ -367,6 +371,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     clientAttemptId: string | undefined,
   ): Promise<Response> => {
     const credential = await refreshCredential(candidate, forceRefresh);
+    request.signal.throwIfAborted();
     const upstream = await fetchImpl(
       credential.kind === "oauth"
         ? OPENAI_CODEX_RESPONSES_URL
@@ -399,6 +404,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
     runtime.set(candidate.accountId, state);
     const headers = responseHeaders(upstream, candidate, attempt, clientAttemptId);
     headers.set("x-richcodex-execution-receipt", safeReceipt(candidate, attempt));
+    headers.set("x-vibeseed-response-transport", "https");
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
@@ -451,12 +457,14 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       websocketCandidate !== undefined
       && websocketCandidate.providerId === "openai"
       && validContinuationKey(continuationKey)
+      && responsesWebSockets.canProbe(continuationKey)
     ) {
       try {
         const credential = await refreshCredential(websocketCandidate, false);
         const headers = forwardedRequestHeaders(request, credential);
         const responseHeaders = new Headers({ "content-type": "text/event-stream" });
         addRouteHeaders(responseHeaders, websocketCandidate, 1, clientAttemptId);
+        responseHeaders.set("x-vibeseed-response-transport", "websocket");
         responseHeaders.set(
           "x-richcodex-execution-receipt",
           safeReceipt(websocketCandidate, 1),
@@ -464,8 +472,10 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         const resolvedRoute = await networkRouteResolver.resolve(
           responsesWebSocketUrl(websocketCandidate),
         );
+        request.signal.throwIfAborted();
         return await responsesWebSockets.stream({
           continuationKey,
+          signal: request.signal,
           routeKey: websocketCandidate.targetId,
           url: responsesWebSocketUrl(websocketCandidate),
           headers,
@@ -475,6 +485,7 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
             ?? (resolvedRoute.kind === "proxy" ? resolvedRoute.url : ""),
         });
       } catch {
+        if (request.signal.aborted) return staticError(499, "request_cancelled");
         // A provider continuation is only an acceleration resource. The complete
         // Kernel-owned request remains sufficient for the ordinary HTTP path.
       }
@@ -506,6 +517,9 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
             clientAttemptId,
           );
         }
+        if (response.ok && validContinuationKey(continuationKey)) {
+          responsesWebSockets.httpSucceeded(continuationKey);
+        }
         if (!retryableUpstreamStatus(response.status)) {
           await lastResponse?.body?.cancel().catch(() => undefined);
           return response;
@@ -516,12 +530,12 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
         await lastResponse?.body?.cancel().catch(() => undefined);
         lastResponse = response;
       } catch (error) {
-        options.modelPlaneStore.markAccountStatus(
-          candidate.accountId,
-          error instanceof CredentialRefreshError
-            ? error.accountStatus
-            : "verificationRequired",
-        );
+        // Transport failure says nothing about credential validity. Poisoning
+        // Account readiness here makes every later managed retry ineligible.
+        if (error instanceof CredentialRefreshError) {
+          options.modelPlaneStore.markAccountStatus(candidate.accountId, error.accountStatus);
+        }
+        if (request.signal.aborted) return staticError(499, "request_cancelled");
       }
     }
     return lastResponse ?? staticError(502, "upstream_unavailable");
