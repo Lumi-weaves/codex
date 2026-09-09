@@ -547,6 +547,9 @@ export function createModelDataPlane(options: ModelDataPlaneOptions): ModelDataP
       const server = Bun.serve({
         hostname: "127.0.0.1",
         port: 0,
+        // Model progress/cancellation deadlines belong to the caller. Bun
+        // must not truncate a healthy reasoning stream during a silent gap.
+        idleTimeout: 0,
         fetch: handle,
       });
       if (server.port === undefined) {

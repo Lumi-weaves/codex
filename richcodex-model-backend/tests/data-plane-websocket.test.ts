@@ -254,3 +254,30 @@ test.each(["acceptance", "stream"])("abort during %s tears down the upstream wit
     await local.stop();
   }
 });
+
+
+test("loopback preserves a silent inference beyond the HTTP idle timeout", async () => {
+  const plane = createModelDataPlane({
+    capability: CAPABILITY, modelPlaneStore: configuredStore(),
+    responsesWebSocketFactory: () => { throw new Error("use HTTP fixture"); },
+    fetch: async () => new Response(new ReadableStream({
+      async start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+        await Bun.sleep(18_000);
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.completed"}\n\n'));
+        controller.close();
+      },
+    })),
+  });
+  const local = plane.start();
+  try {
+    const input = request();
+    const response = await fetch(`http://127.0.0.1:${local.port}/v1/responses`, {
+      method: "POST", headers: input.headers, body: await input.text(),
+      signal: AbortSignal.timeout(22_000),
+    });
+    expect(await response.text()).toContain("response.completed");
+  } finally {
+    await local.stop();
+  }
+}, 25_000);
